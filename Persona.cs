@@ -122,6 +122,15 @@ namespace AzhuPet
 
             // 两个起点：exe 目录（正常启动）＋ 工作目录（从源码树跑自检时）。
             // 与 Cli.ResolveModel 同一套路 —— 少了第二个，从别处跑 --personatest 就得每次手写全路径。
+            // ⚠ 发布形态（zip 解压后 exe 与 persona.md 同目录）也要能找到：Release 里没有库结构，
+            //   「向上搜仓库」永远撞不到 —— 所以先查 exe 目录／工作目录下的**裸 persona.md**。
+            //   这一步放最前：与 exe 同目录的文件优先于仓库深处的同名文件（部署的比源码树的更「真」）。
+            foreach (string start in new[] { AppDomain.CurrentDomain.BaseDirectory, Directory.GetCurrentDirectory() })
+            {
+                if (string.IsNullOrEmpty(start)) continue;
+                string bare = Path.Combine(start.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), RelativePath[2]);
+                if (File.Exists(bare)) return bare;
+            }
             foreach (string start in new[] { AppDomain.CurrentDomain.BaseDirectory, Directory.GetCurrentDirectory() })
             {
                 if (string.IsNullOrEmpty(start)) continue;

@@ -186,7 +186,10 @@ namespace AzhuPet
         private void ToggleAutostart()
         {
             bool on = PetConfig.AutostartOn();
-            string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
+            // ⚠ 单文件发布（PublishSingleFile）下 Assembly.Location 返回空串（IL3000），
+            //   自启就会指向空路径。Environment.ProcessPath 在两种形态下都返回真 exe 路径。
+            string exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe)) exe = System.Reflection.Assembly.GetEntryAssembly().Location;
             string exePath = exe.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
                 ? exe.Substring(0, exe.Length - 4) + ".exe" : exe;
             bool ok = PetConfig.SetAutostart(!on, exePath);
