@@ -23,17 +23,40 @@
 
 ## 快速开始
 
-```bash
-# 方式一：源码运行（需要 .NET 9 SDK）
-git clone https://github.com/mauyumaster/pet.git
-cd AzhuPet
-run-pet.cmd        # 或：dotnet run -c Release
+### 方式一：下载即用（推荐）
+
+**[→ 打开 Releases 页](https://github.com/mauyumaster/pet/releases/latest)**，在最新一版的
+`Assets` 里下载 `AzhuPet-v<版本号>-win-x64.zip`（约 18 MB）。
+
+解压到**任意目录**（不需要是仓库、不需要管理员权限），双击 `pet.exe` 即可。
+
+解压后应该是这样——**三个文件，请保持相对位置不变**：
+
+```
+AzhuPet-v0.1.0-win-x64/
+├── pet.exe                      ← 双击这个
+├── persona.md                   ← 她的人格文本（别删，删了她会退回默认音色）
+└── model/
+    └── chibi_maid_pet.glb       ← 3D 模型（别删，删了启动会报错退出）
 ```
 
+> ⚠ **别把 `pet.exe` 单独拖出来。** 它就靠同目录的 `model/` 找模型，靠同目录的
+> `persona.md` 知道「自己是谁」。挪走了会分别表现为「找不到模型」和「说话像陌生人」。
+> 想放到别处，请整个文件夹一起搬。
+
+首次运行若提示缺少运行时，装一次
+[.NET 9 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/9.0)（x64）即可。
+
+### 方式二：从源码运行（需要 .NET 9 SDK）
+
 ```bash
-# 方式二：发布产物（zip，需 .NET 9 Desktop Runtime）
-# 从 GitHub Releases 下载，解压后双击 pet.exe
+git clone https://github.com/mauyumaster/pet.git
+cd pet
+run-pet.cmd        # 会自动增量构建 Release 再启动
 ```
+
+> 源码方式**不含** 3D 模型（模型 13 MB，不进 git）。`run-pet.cmd` 会在缺少模型时提示你。
+> 只想用桌面宠物的话，走方式一。
 
 首次启动：托盘出现图标。**不开模型也能玩**——默认台词是免费模板句；想要「会说人话的她」，按下文配一条模型通道。
 

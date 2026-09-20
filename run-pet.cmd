@@ -33,8 +33,40 @@ dotnet build -c Release -v q --nologo
 if errorlevel 1 goto :buildfailed
 
 if not exist "%PETEXE%" goto :nobinary
+
+rem ---- model guard ----
+rem WHY: the 13MB GLB is NOT in git (too big), and it lives BESIDE this folder
+rem (..\model\), not inside it. So a fresh clone has NO model, and the very
+rem first launch dies with a plain MessageBox: "cannot find
+rem model/chibi_maid_pet.glb". That popup is technically correct and
+rem practically useless -- it does not say the model was never in git, nor
+rem where to put it.
+rem Catch it HERE, before launching, and say the useful part.
+rem ResolveModel walks UP from the exe, so ..\model\ is what it will find.
+if not exist "..\model\chibi_maid_pet.glb" goto :nomodel
+
 start "" "%PETEXE%"
 exit /b 0
+
+:nomodel
+echo.
+echo [x] The 3D model was not found -- NOT launching.
+echo.
+echo     Looked for: %~dp0..\model\chibi_maid_pet.glb
+echo.
+echo     Why this happens: the model is a 13MB binary and is deliberately
+echo     NOT committed to git. A fresh clone therefore never has it.
+echo.
+echo     Fix -- pick ONE:
+echo       a) Just use the release build instead (it ships WITH the model):
+echo            https://github.com/mauyumaster/pet/releases/latest
+echo       b) Or copy the model in yourself, then run this file again:
+echo            ..\model\chibi_maid_pet.glb
+echo       c) Or point at a model you already have:
+echo            start "" "%PETEXE%" --model "D:\path\to\chibi_maid_pet.glb"
+echo.
+pause
+exit /b 1
 
 :buildfailed
 echo.
