@@ -54,6 +54,8 @@ namespace AzhuPet
             if (o.CaliberTest) return CaliberTest.Run(o);
             if (o.BubbleTest) return BubbleTest.Run(o);
             if (o.BalanceConfigTest) return BalanceConfigTest.Run();
+            if (o.ConfigTest) return ConfigTest.Run(o);
+            if (o.FixConfig) return ConfigFix.Run(o);
             if (o.SummaryTest) return SummaryTest.Run(o);
             if (o.SummaryNow) return SummaryTest.NowRun(o);      // 真调模型一次，总结「现在往前 60 分钟」
             if (!string.IsNullOrEmpty(o.InstallBalanceTemplate)) return BalanceTemplateInstaller.Run(o.InstallBalanceTemplate);

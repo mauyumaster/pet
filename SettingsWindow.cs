@@ -227,13 +227,7 @@ namespace AzhuPet
         // ==================================================================================
         private void BuildPages()
         {
-            BuildPageSpeech();
-            BuildPageModel();
-            BuildPagePrivacy();
-            BuildPageSummary();
-            BuildPageAppearance();
-            BuildPageAbout();
-        }
+BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPageAppearance();BuildPageAbout();        }
 
         /// <summary>开一页并返回「卡片流」宿主。
         /// ⚠ 版式要点（第一版就在这里翻过车）：
@@ -774,6 +768,10 @@ namespace AzhuPet
                 {
                     // ⚠ 用 TextRenderer（GDI，非 GDI+）—— 它对「同线程有 WPF 渲染器」不敏感，
                     //   正是上面那条脆弱路径换掉之后要用的东西。
+                    // ⚠⚠ 这一步曾是「打开设置卡 16.5 秒」的量测点（2026-09-20 事故）：
+                    //   病灶不在 MeasureText 本身，而在喂给它的字符串有 2.68 亿字符。
+                    //   ⇒ 纪律：**量文本的地方要假设文本可能很长**，谁生产这个字符串谁负责消毒
+                    //     （已落在 PetConfig.IsPoisonedPath + Load 自愈里）。
                     need = TextRenderer.MeasureText(g, l.Text, l.Font,
                         new Size(width, int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
                 }

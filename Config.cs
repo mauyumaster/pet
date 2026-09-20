@@ -60,10 +60,17 @@ namespace AzhuPet
         public double HDip { get { return Sizes[SizeIndex][1]; } }
 
         /// <summary>配置与内部状态的落点（%LOCALAPPDATA%\AzhuPet）。
-        /// ⚠ public：设置面板要显示它（「配置在哪」是用户第一个会问的问题）。</summary>
+        /// ⚠ public：设置面板要显示它（「配置在哪」是用户第一个会问的问题）。
+        /// ⚠ 支持 `AZHU_CONFIG_DIR` 覆盖：判据要能把它指到临时目录去，
+        ///   否则测一次就把用户的真配置写坏了（本项目的判据纪律：离线、不碰真数据）。</summary>
         public static string Dir
         {
-            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AzhuPet"); }
+            get
+            {
+                string ov = Environment.GetEnvironmentVariable("AZHU_CONFIG_DIR");
+                if (!string.IsNullOrEmpty(ov)) return ov;
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AzhuPet");
+            }
         }
         private static string FilePath { get { return Path.Combine(Dir, "config.json"); } }
 
@@ -88,6 +95,10 @@ namespace AzhuPet
                 c.SummaryOn = Bool(s, "summaryOn", c.SummaryOn);
                 c.SummaryIntervalMin = Num(s, "summaryIntervalMin", c.SummaryIntervalMin);
                 c.VaultPath = Raw(s, "vaultPath")?.Trim('"') ?? c.VaultPath;
+                // ⚠ 自愈：历史版本写坏的值（反斜杠膨胀）已不可还原 ⇒ 判为垃圾、回落默认。
+                //   放在 Load 里而不是只在 --fixconfig 里，是为了「打开面板」这条路也自愈：
+                //   否则用户被污染的配置要等到他恰好想起来跑修复工具才不再卡。
+                if (IsPoisonedPath(c.VaultPath)) c.VaultPath = new PetConfig().VaultPath;
                 c.DeepSeekKey = Raw(s, "deepSeekKey")?.Trim('"') ?? "";
                 c.OpenAiBase = Raw(s, "openAiBase")?.Trim('"') ?? "";
                 c.OpenAiModel = Raw(s, "openAiModel")?.Trim('"') ?? "";
@@ -122,15 +133,15 @@ namespace AzhuPet
                 sb.Append("  \"roastOn\": ").Append(RoastOn ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"summaryOn\": ").Append(SummaryOn ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"summaryIntervalMin\": ").Append(SummaryIntervalMin.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\r\n");
-                sb.Append("  \"vaultPath\": \"").Append(VaultPath.Replace("\\", "\\\\")).Append("\",\r\n");
-                sb.Append("  \"deepSeekKey\": \"").Append(DeepSeekKey).Append("\",\r\n");
-                sb.Append("  \"openAiBase\": \"").Append(OpenAiBase).Append("\",\r\n");
-                sb.Append("  \"openAiModel\": \"").Append(OpenAiModel).Append("\",\r\n");
-                sb.Append("  \"balanceUrl\": \"").Append(BalanceUrl).Append("\",\r\n");
-                sb.Append("  \"balanceToken\": \"").Append(BalanceToken).Append("\",\r\n");
-                sb.Append("  \"balanceHeader\": \"").Append(BalanceHeader).Append("\",\r\n");
-                sb.Append("  \"balanceKey\": \"").Append(BalanceKey).Append("\",\r\n");
-                sb.Append("  \"balanceUnit\": \"").Append(BalanceUnit).Append("\",\r\n");
+                sb.Append("  \"vaultPath\": \"").Append(Esc(VaultPath)).Append("\",\r\n");
+                sb.Append("  \"deepSeekKey\": \"").Append(Esc(DeepSeekKey)).Append("\",\r\n");
+                sb.Append("  \"openAiBase\": \"").Append(Esc(OpenAiBase)).Append("\",\r\n");
+                sb.Append("  \"openAiModel\": \"").Append(Esc(OpenAiModel)).Append("\",\r\n");
+                sb.Append("  \"balanceUrl\": \"").Append(Esc(BalanceUrl)).Append("\",\r\n");
+                sb.Append("  \"balanceToken\": \"").Append(Esc(BalanceToken)).Append("\",\r\n");
+                sb.Append("  \"balanceHeader\": \"").Append(Esc(BalanceHeader)).Append("\",\r\n");
+                sb.Append("  \"balanceKey\": \"").Append(Esc(BalanceKey)).Append("\",\r\n");
+                sb.Append("  \"balanceUnit\": \"").Append(Esc(BalanceUnit)).Append("\",\r\n");
                 sb.Append("  \"x\": ").Append(double.IsNaN(X) ? "null" : ((long)X).ToString()).Append(",\r\n");
                 sb.Append("  \"y\": ").Append(double.IsNaN(Y) ? "null" : ((long)Y).ToString()).Append("\r\n");
                 sb.Append("}\r\n");
@@ -153,6 +164,18 @@ namespace AzhuPet
             if (v == null) return dflt;
             return v == "true";
         }
+        /// <summary>极简 JSON 取值。
+        ///
+        /// ⚠⚠ 2026-09-20 真实事故：这里以前只 `Trim()`、**不做反转义**，而 <see cref="Save"/> 写盘时
+        ///   对 vaultPath 做了 `Replace("\\", "\\\\")`。两边不对称 ⇒ 每次「保存设置」
+        ///   反斜杠**翻一倍**：`D:\Obsidian` → `D:\\Obsidian` → `D:\\\\Obsidian` → …
+        ///   面板打开时会「读到值 → 写回」，所以**每开一次就翻一倍**（指数增长）。
+        ///   实测用户机上 config.json 涨到 **268 MB**（正常约 1 KB），
+        ///   而面板构造要对这段文本 `MeasureText` ⇒ **稳定卡 16.5 秒**，
+        ///   表现出来的症状只是「打开设置要等很久」——根因是一处转义不对称。
+        ///   ⇒ 纪律：**凡「写时转义」的地方，读时必须有对应的反转义**，
+        ///     而且两者要成对出现在同一处可对照的代码里，否则迟早分叉。
+        /// </summary>
         private static string Raw(string s, string key)
         {
             int i = s.IndexOf("\"" + key + "\"", StringComparison.Ordinal);
@@ -161,9 +184,103 @@ namespace AzhuPet
             if (c < 0) return null;
             int e = c + 1;
             while (e < s.Length && (s[e] == ' ' || s[e] == '\t')) e++;
+
+            // 带引号的值：扫到配对的收尾引号，同时做反转义（与 Save 的转义成对）。
+            if (e < s.Length && s[e] == '"')
+            {
+                var sb = new StringBuilder();
+                for (int k = e + 1; k < s.Length; k++)
+                {
+                    char ch = s[k];
+                    if (ch == '\\' && k + 1 < s.Length)
+                    {
+                        char n = s[++k];
+                        switch (n)
+                        {
+                            case 'n': sb.Append('\n'); break;
+                            case 'r': sb.Append('\r'); break;
+                            case 't': sb.Append('\t'); break;
+                            case '"': sb.Append('"'); break;
+                            case '\\': sb.Append('\\'); break;
+                            case '/': sb.Append('/'); break;
+                            case 'b': sb.Append('\b'); break;
+                            case 'f': sb.Append('\f'); break;
+                            case 'u':
+                                // \uXXXX —— 解不出就放 U+FFFD，别静默吞掉字符
+                                if (k + 4 < s.Length)
+                                {
+                                    int cp;
+                                    if (int.TryParse(s.Substring(k + 1, 4),
+                                            System.Globalization.NumberStyles.HexNumber,
+                                            System.Globalization.CultureInfo.InvariantCulture, out cp))
+                                    { sb.Append((char)cp); k += 4; }
+                                    else sb.Append('\uFFFD');
+                                }
+                                else sb.Append('\uFFFD');
+                                break;
+                            default: sb.Append(n); break;   // 未知转义：原样保留第二个字符
+                        }
+                        continue;
+                    }
+                    if (ch == '"') break;                   // 值到此结束
+                    sb.Append(ch);
+                }
+                return sb.ToString();
+            }
+
+            // 裸值（数字／true／false／null）：扫到分隔符
             int end = e;
             while (end < s.Length && s[end] != ',' && s[end] != '\r' && s[end] != '\n' && s[end] != '}') end++;
             return s.Substring(e, end - e).Trim();
+        }
+
+        /// <summary>识别并清掉「被转义膨胀写坏」的路径值。
+        ///
+        /// ⚠⚠ 2026-09-20 事故的**抢救**这一步：转义不对称会把 `D:\Obsidian_SecondBrain\SecondBrain`
+        ///   写成 `D:` + 2²⁷ 个反斜杠 + `SecondBrain`（实测 134,217,728 个 `\`）。
+        ///   关键认识：**这个值已经不可逆还原了** —— 多出来的反斜杠把原本的段落分隔
+        ///   （`\Obsidian_SecondBrain\`）吃掉了，任何「反转义 N 次」的尝试都是猜。
+        ///   ⇒ 唯一正确做法是**判定它是垃圾、重置为默认值**，而不是保真读回来
+        ///   （保真读回来正是 `--fixconfig` 第一次没生效的原因：读回 1.34 亿个 `\`，
+        ///   写回时再转义成 2.68 亿 —— 字节数原地踏步，看着像「修复失败」）。
+        ///
+        /// 判据用**结构性**条件，不用魔数：反斜杠数量超过任何合法路径可能有的量级，
+        /// 或长度超过 NTFS 长路径上限，就判为垃圾。正常 Windows 路径反斜杠不会过百。
+        /// </summary>
+        public static bool IsPoisonedPath(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return false;
+            if (v.Length > 32767) return true;              // 超 NTFS 长路径上限
+            int bs = 0;
+            for (int i = 0; i < v.Length; i++)
+                if (v[i] == '\\' && ++bs > 64) return true; // 合法路径不会有 64 个以上分隔符
+            return false;
+        }
+
+        /// <summary>JSON 字符串值转义（与 <see cref="Raw"/> 的反转义成对）。
+        /// ⚠ 以前只有 vaultPath 走了转义，其他字段（含 API key）**直接裸拼** ——
+        ///   key 里只要有一个引号或反斜杠就会把整个 config.json 写坏，而且下次读不回来。
+        ///   统一走这里，两边才算对称。</summary>
+        private static string Esc(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return "";
+            var sb = new StringBuilder(v.Length + 8);
+            foreach (char ch in v)
+            {
+                switch (ch)
+                {
+                    case '"': sb.Append("\\\""); break;
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (ch < 0x20) sb.Append("\\u").Append(((int)ch).ToString("x4"));
+                        else sb.Append(ch);
+                        break;
+                }
+            }
+            return sb.ToString();
         }
 
         // ---- 开机自启：写 HKCU 的 Run 键（不用 reg.exe —— 老式外部工具在本机被拦过）----
@@ -217,6 +334,8 @@ namespace AzhuPet
         public bool SettingsTest;               // --settingstest：离线验设置面板版式（裁剪／重叠／跟随缩放）
         public bool NoLayout;                   // --no-layout：负对照 —— 跳过重排，版式判据必须变红
         public bool BalanceConfigTest;          // --balanceconfigtest：离线验保存/备份/坏 JSON/凭据隔离
+        public bool ConfigTest;                 // --configtest：离线验主配置「写/读转义对称 + 不膨胀」
+        public bool FixConfig;                  // --fixconfig：把被「转义不对称」写胖的 config.json 修回来
         public string InstallBalanceTemplate;   // --install-balance-template sui-xiang：只装结构，不装凭据
         public bool ForceBubbleOnPet;           // --force-bubble-on-pet：负对照（故意压在模型上，该判据必须变红）
         public string DeepSeekKey;              // 命令行传入的 DeepSeek key（会写入配置）
@@ -322,6 +441,8 @@ namespace AzhuPet
                     case "--settingstest": c.SettingsTest = true; break;
                     case "--no-layout": c.NoLayout = true; break;
                     case "--balanceconfigtest": c.BalanceConfigTest = true; break;
+                    case "--configtest": c.ConfigTest = true; break;
+                    case "--fixconfig": c.FixConfig = true; break;
                     case "--install-balance-template": c.InstallBalanceTemplate = Nxt(a, ref i); break;
                     case "--force-bubble-on-pet": c.ForceBubbleOnPet = true; break;
                     case "--force-through": c.ForceThrough = true; break;
