@@ -379,6 +379,89 @@ namespace AzhuPet
                 Check(false, ".cmd 守卫不该抛异常", ex.GetType().Name + ": " + ex.Message);
             }
 
+            // ================= ⑤之四 README 配图守卫 =================
+            // ⚠⚠ 这条守的是「本地看着好好的，推到 GitHub 上整片变黑」。
+            //   GitHub 渲染仓库内 SVG 时会**剥掉 <style> 块与 class 属性**（防 XSS），
+            //   只认内联的 fill / stroke / font-size。所以用 class 画的图，本地预览完美，
+            //   线上所有元素退回默认黑色 —— 而且不报任何错。
+            //   同类事故还有一种：属性拼错（`stroke="x"/ fill="y">`）会破坏 XML，
+            //   图**直接不显示**。两种都属「本地看不出来、线上才显形」，必须有判据。
+            try
+            {
+                string repoRoot2 = FindRepoRoot();
+                if (repoRoot2 == null)
+                {
+                    Console.WriteLine("  [skip] 附近没有仓库根（发布产物里没有 README 配图）");
+                }
+                else
+                {
+                    string docsDir = Path.Combine(repoRoot2, "assets", "docs");
+                    if (!Directory.Exists(docsDir))
+                    {
+                        Check(false, "README 配图目录 assets/docs 存在", docsDir);
+                    }
+                    else
+                    {
+                        string[] svgs = Directory.GetFiles(docsDir, "*.svg", SearchOption.TopDirectoryOnly);
+                        Check(svgs.Length > 0, "assets/docs 下至少有一张 SVG（否则这条守卫没有对象）",
+                            svgs.Length + " 张");
+
+                        foreach (string f in svgs)
+                        {
+                            string name = Path.GetFileName(f);
+                            string text = File.ReadAllText(f);
+
+                            // ① XML 必须合法 —— 拼错属性会让整张图不显示，且不报错
+                            bool xmlOk = true;
+                            try { System.Xml.Linq.XDocument.Parse(text); }
+                            catch (Exception xe) { xmlOk = false; Check(false, name + " XML 合法（不合法则整张图不显示）", xe.Message); }
+                            if (!xmlOk) continue;
+
+                            // ② 不许有 <style> 块与 class=（GitHub 会剥掉）
+                            Check(!text.Contains("<style"),
+                                name + " 不含 <style> 块（GitHub 会剥掉，样式全失效）", "");
+                            int clsCount = System.Text.RegularExpressions.Regex.Matches(text, @"\bclass\s*=").Count;
+                            Check(clsCount == 0,
+                                name + " 不含 class=（GitHub 会剥掉，元素退化成黑块）",
+                                clsCount + " 处");
+
+                            // ③ 每个可见元素必须自带颜色（否则是黑块 / 深色主题下看不见）
+                            int noPaint = 0;
+                            foreach (System.Text.RegularExpressions.Match m in
+                                     System.Text.RegularExpressions.Regex.Matches(text, @"<(?:rect|circle|ellipse|path|polygon|line)\b[^>]*>"))
+                            {
+                                string el = m.Value;
+                                if (!el.Contains("fill=") && !el.Contains("stroke=")) noPaint++;
+                            }
+                            Check(noPaint == 0,
+                                name + " 每个形状都自带 fill 或 stroke（否则变黑块）", noPaint + " 个缺色");
+
+                            // ④ text 必须有 fill 与 font-size
+                            int tNoFill = 0, tNoSize = 0, tTotal = 0;
+                            foreach (System.Text.RegularExpressions.Match m in
+                                     System.Text.RegularExpressions.Regex.Matches(text, @"<text\b[^>]*>"))
+                            {
+                                tTotal++;
+                                string el = m.Value;
+                                if (!el.Contains("fill=")) tNoFill++;
+                                if (!el.Contains("font-size=")) tNoSize++;
+                            }
+                            Check(tNoFill == 0, name + " 每段文字都有 fill（缺了在深色主题下看不见）", tNoFill + " 段");
+                            Check(tNoSize == 0, name + " 每段文字都有 font-size（缺了各浏览器默认值不一）", tNoSize + " 段");
+                            Check(tTotal > 0, name + " 至少含一段文字（纯图形图要人工看）", tTotal + " 段");
+
+                            // ⑤ 根元素必须带 viewBox（否则 GitHub 里宽度不可控）
+                            string head = text.Substring(0, text.IndexOf('>') + 1);
+                            Check(head.Contains("viewBox="), name + " 根 <svg> 带 viewBox（否则宽度不可控）", "");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Check(false, "README 配图守卫不该抛异常", ex.GetType().Name + ": " + ex.Message);
+            }
+
             // ================= ⑥ 更新源地址自检 =================
             // ⚠⚠ 这条守一个「推上去才发现」的坑：raw.githubusercontent.com 路径**区分大小写**，
             //   而 404 在这条链路上只表现成「检查更新失败」，看不到「地址写错了」。

@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 440" width="720" height="440" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif">
+  <text x="20" y="30" fill="#1c202a" font-size="15px" font-weight="600">她是怎么决定「说这句话」的</text>
+  <text x="20" y="50" fill="#687082" font-size="11px">从「看见你在用哪个程序」到「开口」，中间有四段。每段都有开关，也都有对应的判据。</text>
+
+  <rect x="20" y="70" width="160" height="88" rx="8" fill="#ffffff" stroke="#cdd5e6" stroke-width="1"/>
+  <text x="100" y="94" fill="#1c202a" font-size="11px" text-anchor="middle" font-weight="600">① 感知</text>
+  <text x="100" y="112" fill="#687082" font-size="10px" text-anchor="middle">每秒记一次前台进程</text>
+  <text x="100" y="129" fill="#687082" font-size="10px" text-anchor="middle">+ 已停留多久</text>
+  <text x="100" y="147" fill="#969dac" font-size="10px" text-anchor="middle">开关：始终开启</text>
+
+  <line x1="180" y1="114" x2="214" y2="114" stroke="#b9c2d6" stroke-width="1.4"/>
+  <path d="M214 114 l-7 -4 v8 z" fill="#b9c2d6"/>
+
+  <rect x="220" y="70" width="160" height="88" rx="8" fill="#ffffff" stroke="#cdd5e6" stroke-width="1"/>
+  <text x="300" y="94" fill="#1c202a" font-size="11px" text-anchor="middle" font-weight="600">② 判要不要说</text>
+  <text x="300" y="112" fill="#687082" font-size="10px" text-anchor="middle">换应用？换了页面？</text>
+  <text x="300" y="129" fill="#687082" font-size="10px" text-anchor="middle">还是太久没出声？</text>
+  <text x="300" y="147" fill="#969dac" font-size="10px" text-anchor="middle">开关：她会自己说话</text>
+
+  <line x1="380" y1="114" x2="414" y2="114" stroke="#b9c2d6" stroke-width="1.4"/>
+  <path d="M414 114 l-7 -4 v8 z" fill="#b9c2d6"/>
+
+  <rect x="420" y="70" width="160" height="88" rx="8" fill="#ffffff" stroke="#cdd5e6" stroke-width="1"/>
+  <text x="500" y="94" fill="#1c202a" font-size="11px" text-anchor="middle" font-weight="600">③ 拼提示词</text>
+  <text x="500" y="112" fill="#687082" font-size="10px" text-anchor="middle">应用名 + 停留时长</text>
+  <text x="500" y="129" fill="#687082" font-size="10px" text-anchor="middle">（＋屏幕文字，若开）</text>
+  <text x="500" y="147" fill="#a8442f" font-size="10px" text-anchor="middle">绝不发窗口标题</text>
+
+  <line x1="580" y1="114" x2="614" y2="114" stroke="#b9c2d6" stroke-width="1.4"/>
+  <path d="M614 114 l-7 -4 v8 z" fill="#b9c2d6"/>
+
+  <rect x="620" y="70" width="80" height="88" rx="8" fill="#fff8e8" stroke="#ecd9a8" stroke-width="1"/>
+  <text x="660" y="94" fill="#8a6a1f" font-size="11px" text-anchor="middle" font-weight="600">④ 说</text>
+  <text x="660" y="112" fill="#a08a52" font-size="10px" text-anchor="middle">生成后</text>
+  <text x="660" y="129" fill="#a08a52" font-size="10px" text-anchor="middle">过气泡仲裁</text>
+  <text x="660" y="147" fill="#a08a52" font-size="10px" text-anchor="middle">再显示</text>
+
+  <rect x="20" y="176" width="330" height="118" rx="8" fill="#ffffff" stroke="#e4e7ee" stroke-width="1"/>
+  <text x="40" y="200" fill="#1c202a" font-size="12px" font-weight="600">提示词里到底有什么</text>
+  <text x="40" y="222" fill="#3d7a3d" font-size="10px">✓ 应用名 —— 例：msedge、Code、notepad</text>
+  <text x="40" y="240" fill="#3d7a3d" font-size="10px">✓ 已停留时长（自动发言时）</text>
+  <text x="40" y="258" fill="#3d7a3d" font-size="10px">✓ 屏幕上的字 —— 仅当两个读屏开关都开</text>
+  <text x="40" y="278" fill="#a8442f" font-size="10px">✗ 窗口标题 —— 任何情况下都不发</text>
+
+  <rect x="370" y="176" width="330" height="118" rx="8" fill="#ffffff" stroke="#e4e7ee" stroke-width="1"/>
+  <text x="390" y="200" fill="#1c202a" font-size="12px" font-weight="600">手动触发是另一套说法</text>
+  <text x="390" y="220" fill="#687082" font-size="10px">你点托盘「让她说一句」时，她只说：</text>
+  <text x="390" y="240" fill="#2d54b4" font-size="10px">「他现在在用 X」＋ 屏幕上的字</text>
+  <text x="390" y="260" fill="#a8442f" font-size="10px">不带秒数、不说「刚换了窗口」</text>
+  <text x="390" y="280" fill="#969dac" font-size="10px">那两样在那一刻是假的 —— 实测踩过</text>
+
+  <rect x="20" y="306" width="680" height="72" rx="8" fill="#fdf4f2" stroke="#eccfc8" stroke-width="1"/>
+  <text x="40" y="330" fill="#a8442f" font-size="12px" font-weight="600">一个实测案例（2026-09-20）</text>
+  <text x="40" y="350" fill="#687082" font-size="10px">她说过一句「6秒，够你在里面找到想要的？」—— 但那个「6 秒」是上一次自动观察残留的读数，</text>
+  <text x="40" y="367" fill="#687082" font-size="10px">「他刚换到 X」压根没发生过。原因是手动触发那条路没取「上一条真实读数」，拿的是过期的前台窗口。</text>
+
+  <line x1="20" y1="392" x2="700" y2="392" stroke="#e4e7ee" stroke-width="1"/>
+  <text x="20" y="413" fill="#687082" font-size="10px">代价：这段链路上有 35 项（感知）＋ 44 项（表达）＋ 50 项（OCR 隐私门）离线判据盯着，每套都带负对照。</text>
+  <text x="20" y="431" fill="#969dac" font-size="10px">判据没被逼红过，它的绿就没有信息量 —— 所以每套测试都有 --no-xxx 开关，关掉被测机制后必须变红。</text>
+</svg>

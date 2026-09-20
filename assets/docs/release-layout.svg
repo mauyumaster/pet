@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 380" width="720" height="380" font-family="'Consolas','Cascadia Mono','Courier New',monospace">
+  <text x="20" y="30" fill="#1c202a" font-size="15px" font-weight="600" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">解压后是什么 —— 三个文件，位置不能动</text>
+  <text x="20" y="50" fill="#687082" font-size="11px" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">从 Releases 下载的 zip 解开后长这样。右边两列说明「删了会怎样」。</text>
+
+  <rect x="20" y="68" width="680" height="196" rx="8" fill="#ffffff" stroke="#e4e7ee" stroke-width="1"/>
+
+  <text x="44" y="98" fill="#687082" font-size="12px">AzhuPet-v0.1.0-win-x64/</text>
+
+  <rect x="44" y="108" width="592" height="42" rx="6" fill="#eef4ff"/>
+  <text x="62" y="126" fill="#1c202a" font-size="12px">├── pet.exe</text>
+  <text x="62" y="143" fill="#3e6ce0" font-size="10px">    ← 双击这个启动</text>
+  <text x="612" y="134" fill="#a8442f" font-size="10px" text-anchor="end">删了就没有程序</text>
+
+  <rect x="44" y="156" width="592" height="42" rx="6" fill="#f4f8f4"/>
+  <text x="62" y="174" fill="#1c202a" font-size="12px">├── persona.md</text>
+  <text x="62" y="190" fill="#687082" font-size="10px">她是「谁」：名字、称呼你的方式、说话的边界</text>
+  <text x="612" y="174" fill="#a8442f" font-size="10px" text-anchor="end">删了会退回内置骨架音色</text>
+
+  <rect x="44" y="204" width="592" height="50" rx="6" fill="#fdf4f2"/>
+  <text x="62" y="222" fill="#1c202a" font-size="12px">└── model/</text>
+  <text x="62" y="241" fill="#1c202a" font-size="12px">    └── chibi_maid_pet.glb</text>
+  <text x="316" y="241" fill="#687082" font-size="10px">3D 模型，13 MB</text>
+  <text x="612" y="222" fill="#a8442f" font-size="10px" text-anchor="end">删了双击直接弹错并退出</text>
+
+  <rect x="20" y="282" width="330" height="84" rx="8" fill="#fdf4f2" stroke="#eccfc8" stroke-width="1"/>
+  <text x="40" y="306" fill="#a8442f" font-size="12px" font-weight="600" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">⚠ 别把 pet.exe 单独拖出来</text>
+  <text x="40" y="328" fill="#687082" font-size="10px" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">它就靠同目录的 model/ 找模型，靠同目录的 persona.md</text>
+  <text x="40" y="345" fill="#687082" font-size="10px" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">知道「自己是谁」。想放到别处，请整个文件夹一起搬。</text>
+
+  <rect x="370" y="282" width="330" height="84" rx="8" fill="#f2f6fe" stroke="#c9d8f6" stroke-width="1"/>
+  <text x="390" y="306" fill="#2d54b4" font-size="12px" font-weight="600" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">找不到模型？程序会告诉你怎么办</text>
+  <text x="390" y="328" fill="#687082" font-size="10px" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">从源码运行时（模型不进 git），run-pet.cmd 会在启动前</text>
+  <text x="390" y="345" fill="#687082" font-size="10px" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">拦一道，给出三条修法，而不是甩一个看不懂的报错。</text>
+</svg>

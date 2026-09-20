@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 560" width="720" height="560" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif">
+  <rect x="8" y="8" width="704" height="544" rx="10" fill="#f7f8fa" stroke="#d8dce6" stroke-width="1"/>
+  <rect x="8" y="8" width="704" height="52" rx="10" fill="#ffffff"/>
+  <rect x="8" y="46" width="704" height="14" fill="#ffffff"/>
+  <line x1="8" y1="60" x2="712" y2="60" stroke="#e4e7ee" stroke-width="1"/>
+
+  <circle cx="34" cy="34" r="13" fill="#e8eefd"/>
+  <text x="34" y="39" fill="#3e6ce0" font-size="10px" text-anchor="middle" font-weight="700">阿</text>
+  <text x="56" y="31" fill="#1c202a" font-size="12px" font-weight="600">阿助</text>
+  <text x="56" y="46" fill="#969dac" font-size="10px">桌面伙伴 · 设置</text>
+  <text x="700" y="38" fill="#969dac" font-size="12px" text-anchor="end">✕</text>
+
+  <rect x="8" y="60" width="196" height="492" fill="#ffffff"/>
+  <line x1="204" y1="60" x2="204" y2="552" stroke="#e4e7ee" stroke-width="1"/>
+
+  <rect x="20" y="78" width="172" height="44" rx="7" fill="#e8eefd"/>
+  <text x="36" y="97" fill="#3e6ce0" font-size="12px">◍</text>
+  <text x="56" y="96" fill="#3e6ce0" font-size="12px" font-weight="600">说话与吐槽</text>
+  <text x="56" y="112" fill="#3e6ce0" font-size="10px">她会主动开口吗</text>
+
+  <text x="36" y="153" fill="#687082" font-size="12px">⌁</text>
+  <text x="56" y="152" fill="#1c202a" font-size="12px">模型通道</text>
+  <text x="56" y="168" fill="#969dac" font-size="10px">台词与小结算哪儿</text>
+
+  <text x="36" y="209" fill="#687082" font-size="12px">◉</text>
+  <text x="56" y="208" fill="#1c202a" font-size="12px">她能看见什么</text>
+  <text x="56" y="224" fill="#969dac" font-size="10px">读屏范围与隐私</text>
+
+  <text x="36" y="265" fill="#687082" font-size="12px">▤</text>
+  <text x="56" y="264" fill="#1c202a" font-size="12px">每小时小结</text>
+  <text x="56" y="280" fill="#969dac" font-size="10px">她替你写的日记</text>
+
+  <text x="36" y="321" fill="#687082" font-size="12px">◧</text>
+  <text x="56" y="320" fill="#1c202a" font-size="12px">外观与启动</text>
+  <text x="56" y="336" fill="#969dac" font-size="10px">尺寸、置顶、开机</text>
+
+  <text x="36" y="377" fill="#687082" font-size="12px">ⓘ</text>
+  <text x="56" y="376" fill="#1c202a" font-size="12px">关于与位置</text>
+  <text x="56" y="392" fill="#969dac" font-size="10px">配置在哪、怎么自检</text>
+
+  <line x1="20" y1="486" x2="192" y2="486" stroke="#e4e7ee" stroke-width="1"/>
+  <text x="24" y="506" fill="#969dac" font-size="10px">托盘右键 →「设置…」</text>
+  <text x="24" y="522" fill="#969dac" font-size="10px">只有一个配置入口</text>
+
+  <text x="228" y="96" fill="#1c202a" font-size="15px" font-weight="600">说话与吐槽</text>
+  <text x="228" y="116" fill="#687082" font-size="11px">控制她什么时候、以什么方式开口。</text>
+
+  <rect x="228" y="132" width="468" height="150" rx="8" fill="#ffffff" stroke="#e4e7ee" stroke-width="1"/>
+  <text x="248" y="158" fill="#1c202a" font-size="12px" font-weight="600">开口</text>
+  <text x="248" y="175" fill="#969dac" font-size="10px">关掉「她会自己说话」＝她只在你打字时回答，下面两项都会停。</text>
+
+  <rect x="248" y="190" width="30" height="17" rx="8.5" fill="#3e6ce0"/>
+  <circle cx="269" cy="198.5" r="6.5" fill="#ffffff"/>
+  <text x="290" y="198" fill="#1c202a" font-size="11px">她会自己说话</text>
+  <text x="290" y="211" fill="#969dac" font-size="10px">不依赖你的输入，主动冒话</text>
+
+  <rect x="248" y="224" width="30" height="17" rx="8.5" fill="#d5d9e3"/>
+  <circle cx="256" cy="232.5" r="6.5" fill="#ffffff"/>
+  <text x="290" y="232" fill="#1c202a" font-size="11px">台词用模型生成</text>
+  <text x="290" y="245" fill="#969dac" font-size="10px">关＝免费模板句；开＝走「模型通道」</text>
+
+  <rect x="228" y="294" width="468" height="96" rx="8" fill="#ffffff" stroke="#e4e7ee" stroke-width="1"/>
+  <text x="248" y="320" fill="#1c202a" font-size="12px" font-weight="600">触发节奏</text>
+  <text x="248" y="337" fill="#969dac" font-size="10px">这三条是「她多久冒一次话」的口径，暂时锁在默认值。</text>
+  <text x="248" y="358" fill="#687082" font-size="10px">• 停留多久才算「她看到了」：8 秒</text>
+  <text x="248" y="374" fill="#687082" font-size="10px">• 两次吐槽之间的最短间隔：200 秒</text>
+  <text x="248" y="390" fill="#687082" font-size="10px">• 每天最多主动说：200 句</text>
+
+  <line x1="228" y1="410" x2="696" y2="410" stroke="#e4e7ee" stroke-width="1"/>
+  <text x="228" y="430" fill="#969dac" font-size="10px">改了什么会立即生效、什么要重启 —— 都在这里说明。</text>
+
+  <rect x="576" y="446" width="120" height="30" rx="6" fill="#3e6ce0"/>
+  <text x="636" y="466" fill="#ffffff" font-size="10px" text-anchor="middle" font-weight="600">保存并应用</text>
+
+  <text x="228" y="500" fill="#687082" font-size="10px">面板里只放设置项，不放术语解释；高级项默认折起（渐进披露）。</text>
+  <text x="228" y="518" fill="#687082" font-size="10px">整窗只有一个主按钮，避免「改了哪一项没保存」。</text>
+  <text x="228" y="536" fill="#969dac" font-size="10px">命令行等价入口：pet.exe --settings</text>
+</svg>
