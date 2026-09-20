@@ -300,6 +300,85 @@ namespace AzhuPet
                 Check(false, "模型查找判据不该抛异常", ex.GetType().Name);
             }
 
+            // ================= ⑤之三 .cmd 行尾与编码守卫 =================
+            // ⚠⚠ 这条守的是「本地看着好好的，别人拿了就静默失效」。
+            //   cmd.exe 解析批处理对行尾敏感：LF-only 会在 goto / 标签 / 多行括号块上
+            //   **半途失效且零报错**（本项目真的踩过：start /b 那行没执行、末尾开浏览器
+            //   那行执行了 ⇒ 双击后 ERR_CONNECTION_REFUSED）。
+            //   而写文件接口生成的就是 LF —— 所以这不能靠人记，必须有判据。
+            //   编码同理：cmd.exe 按 OEM 码页（中文 Windows = 936/GBK）解码批处理，
+            //   UTF-8 中文会变乱码，3 字节汉字还可能「吞掉」紧随其后的 ASCII 字符。
+            try
+            {
+                string repoRoot = FindRepoRoot();
+                if (repoRoot == null)
+                {
+                    Console.WriteLine("  [skip] 附近没有仓库根（发布产物里没有它）");
+                }
+                else
+                {
+                    string[] cmds = Directory.GetFiles(repoRoot, "*.cmd", SearchOption.TopDirectoryOnly);
+                    Check(cmds.Length > 0, "仓库根至少有一个 .cmd（否则这条守卫没有对象）",
+                        cmds.Length + " 个");
+
+                    foreach (string f in cmds)
+                    {
+                        string name = Path.GetFileName(f);
+                        byte[] raw = File.ReadAllBytes(f);
+
+                        // ① 必须 CRLF：任何「LF 后面不跟 CR」或「CR 后面不跟 LF」都算坏
+                        int bareLf = 0, bareCr = 0;
+                        for (int i = 0; i < raw.Length; i++)
+                        {
+                            if (raw[i] == (byte)'\n' && (i == 0 || raw[i - 1] != (byte)'\r')) bareLf++;
+                            if (raw[i] == (byte)'\r' && (i + 1 >= raw.Length || raw[i + 1] != (byte)'\n')) bareCr++;
+                        }
+                        Check(bareLf == 0 && bareCr == 0,
+                            name + " 行尾全是 CRLF（LF-only 会让 cmd.exe 静默半途失效）",
+                            "裸 LF=" + bareLf + " 裸 CR=" + bareCr);
+
+                        // ② 必须 ASCII-only
+                        int nonAscii = 0;
+                        foreach (byte b in raw) if (b > 0x7f) nonAscii++;
+                        Check(nonAscii == 0,
+                            name + " 是 ASCII-only（cmd.exe 按 OEM 码页解码，UTF-8 中文会乱码）",
+                            "非 ASCII 字节=" + nonAscii);
+
+                        // ③ 每个 goto 的目标标签都要存在 —— goto 到不存在的标签会静默终止脚本
+                        string text = System.Text.Encoding.ASCII.GetString(raw);
+                        var labels = new List<string>();
+                        foreach (string ln in text.Split('\n'))
+                        {
+                            string t = ln.TrimEnd('\r').Trim();
+                            if (t.StartsWith(":") && t.Length > 1) labels.Add(t.Substring(1));
+                        }
+                        var gotos = new List<string>();
+                        foreach (string ln in text.Split('\n'))
+                        {
+                            string t = ln.TrimEnd('\r').Trim();
+                            int gi = t.IndexOf("goto ", StringComparison.OrdinalIgnoreCase);
+                            if (gi >= 0)
+                            {
+                                string target = t.Substring(gi + 5).Trim();
+                                if (target.Length > 0 && target[0] != ':') gotos.Add(target);
+                            }
+                        }
+                        var missing = new List<string>();
+                        foreach (string g in gotos)
+                            if (!labels.Contains(g) && !g.Equals("eof", StringComparison.OrdinalIgnoreCase)
+                                && !g.Equals("end", StringComparison.OrdinalIgnoreCase))
+                                missing.Add(g);
+                        Check(missing.Count == 0,
+                            name + " 的 goto 目标标签都存在（跳到不存在的标签会静默终止）",
+                            missing.Count == 0 ? gotos.Count + " 个 goto 全部有目标" : "缺：" + string.Join(",", missing));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Check(false, ".cmd 守卫不该抛异常", ex.GetType().Name + ": " + ex.Message);
+            }
+
             // ================= ⑥ 更新源地址自检 =================
             // ⚠⚠ 这条守一个「推上去才发现」的坑：raw.githubusercontent.com 路径**区分大小写**，
             //   而 404 在这条链路上只表现成「检查更新失败」，看不到「地址写错了」。
@@ -535,6 +614,19 @@ namespace AzhuPet
                     return (int)resp.StatusCode;
                 }
             }
+        }
+
+        /// <summary>从 exe 目录往上找到仓库根（含 .git 的目录）。找不到返回 null。</summary>
+        private static string FindRepoRoot()
+        {
+            string dir = AppDomain.CurrentDomain.BaseDirectory;
+            for (int up = 0; up < 7 && dir != null; up++)
+            {
+                if (Directory.Exists(Path.Combine(dir, ".git"))) return dir;
+                var parent = Directory.GetParent(dir);
+                dir = parent == null ? null : parent.FullName;
+            }
+            return null;
         }
 
         /// <summary>
