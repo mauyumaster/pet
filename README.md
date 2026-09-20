@@ -13,6 +13,7 @@
 - **读屏（可选，默认关）**：Windows 自带 OCR 读屏幕文字，把内容接进她的话里——全程本机，文字不出你的电脑
 - **每小时小结**：真模型替你写「这一小时做了什么」，落成 Markdown 日记
 - **余额显示**：可选，支持多来源（详见下文）
+- **自动更新**：会检查新版本、下载，**但换掉自己之前会问你**（详见下文）
 - **人格**：她有名字（阿助）、有称呼你的方式、有说话的边界——人格文本独立成文件，改完即生效
 
 ## 系统要求
@@ -24,8 +25,8 @@
 
 ```bash
 # 方式一：源码运行（需要 .NET 9 SDK）
-git clone https://github.com/mauyumaster/azhu-pet.git
-cd azhu-pet
+git clone https://github.com/mauyumaster/AzhuPet.git
+cd AzhuPet
 run-pet.cmd        # 或：dotnet run -c Release
 ```
 
@@ -100,6 +101,7 @@ pet.exe --calibertest    # 口径一致性 39 项
 pet.exe --bubbletest     # 气泡渲染
 pet.exe --settingstest   # 设置面板版式 13 项
 pet.exe --configtest     # 主配置转义对称性 23 项
+pet.exe --updatetest     # 自更新链路 48 项（版本比较 / feed 解析 / 替换回滚）
 pet.exe --shellprobe     # 真机窗口真值探针
 ```
 
@@ -121,16 +123,88 @@ pet.exe --fixconfig       # 备份 + 把膨胀的 vaultPath 重置为默认（�
 ⚠ 膨胀的路径**无法还原**成原值（多出来的反斜杠把路径段落吃掉了），所以是重置为默认库路径，
 不是「修回你原来写的那个路径」——若你曾自定义过库路径，修复后到设置面板重填一次即可。
 
+## 自动更新
+
+她**会检查更新，但不会背着你换掉自己**——下载可以自动，替换要你点一下。
+
+### 用户视角
+
+托盘 →「设置…」→「关于与位置」页顶部有「版本与更新」卡片：显示当前版本、一个「检查更新」按钮。
+有新版时出现「下载更新」→ 下完后按钮变成「重启并更新」。点它，程序退出、下一次启动就是新版。
+
+也会**静默检查**：启动时若发现上一次已经下好了新版本，直接就地换上（此时还没人碰过 exe 和
+`persona.md`，是最干净的时机）。
+
+### 为什么不自己偷偷重启
+
+- 「下载完不替换、下次启动才替换」——下载那一刻，`pet.exe` 正被自己占用、`persona.md` 可能
+  正被读；留到下次启动、在任何代码碰这两个文件之前做，最干净。
+- **实测确认**：Windows 允许正在运行的进程**重命名自己的 exe**（不是删、是改名）。这条事实
+  决定了不需要独立 updater 进程、不需要批处理、不需要辅助脚本——`ApplyPending` 就在进程内
+  把 `pet.exe` → `pet.exe.old`，再把新文件挪成 `pet.exe`。失败会回滚。
+- **不会把用户降级**：只有远端版本比当前**严格更新**才替换。
+- **两个文件必须一起换**：payload 里缺 `pet.exe` 或缺 `persona.md`，整包作废。只换程序不换人格
+  ＝「新程序配旧人格」，她说话会是错的——这正是本项目记过的「同一份数据两个落点」坑。
+
+### 更新源（唯一需要维护的地址）
+
+```
+https://raw.githubusercontent.com/mauyumaster/AzhuPet/main/version.json
+```
+
+`version.json` 长这样（由 `pack-release.cmd` 自动生成）：
+
+```json
+{
+  "version": "0.1.0",
+  "url": "https://github.com/mauyumaster/AzhuPet/releases/download/v0.1.0/AzhuPet-v0.1.0-win-x64.zip",
+  "notes": ""
+}
+```
+
+⚠ 三个易错点，判据都守着：
+
+1. **`raw.githubusercontent.com` 路径区分大小写**——`AzhuPet` ≠ `azhupet`。写错了返回 404，
+   而 404 在这条链路上只表现成「检查更新失败」，看不见「地址写错了」。
+2. **版本号不能按字符串比大小**——`"0.10.0"` 用字符串比会被判**旧于** `"0.9.0"`（`'1' < '9'`）。
+   症状是「明明有新版本却永远不提示」，且只在跨两位数时出现。代码里是逐段转数字比。
+3. **`--version` 只输出 LF、只输出一行**——`WriteLine` 在 Windows 上吐 CRLF，`pack-release.cmd`
+   用 `for /f` 抓它，一旦把 CR 带进变量，生成的文件名会变成 `AzhuPet-v0.1.0␍-win-x64.zip`
+   （带隐形字符）。所以是从 `Console.OpenStandardOutput()` 手写 ASCII 字节。
+
+### 发一版新版
+
+```bash
+# 1. 改版本号（唯一来源）
+#    pet.csproj  <Version>0.1.0</Version>   →   0.2.0
+
+pack-release.cmd        # 2. 生成 AzhuPet-v0.2.0-win-x64.zip + 更新 version.json
+```
+
+3. 在 GitHub 上建一个 Release，**tag 必须写 `v0.2.0`**（与版本号一致，`pack-release.cmd` 把
+   tag 拼进了下载地址，写错就 404），把 zip 传上去当附件。
+4. **把 `version.json` 提交并推送**——这一步最容易忘。不提交，raw 地址服务的就是旧版本号，
+   用户永远收不到更新提示，而本地一切正常。
+
 ## 构建 / 发布
 
 ```bash
 dotnet build -c Release        # 只编译
-pack-release.cmd               # 发布：编译 + 单文件 + 打包 zip（推荐）
+pack-release.cmd               # 发布：编译 + 单文件 + 打包 zip + 生成 version.json（推荐）
 ```
 
-`pack-release.cmd` 一条命令做完四件事：publish 单文件 → 把 `persona.md` 拷到 exe 同目录 → **守卫检查两个文件都在** → 打 zip。手工 publish 会漏掉后半段，而漏掉是**静默**的：解压后程序照样跑、照样说话，只是退回内置骨架的音色——所以这一步不该由人记。
+`pack-release.cmd` 一条命令做完五件事：从**已构建的 exe** 读版本 → publish 单文件 →
+把 `persona.md` 拷到 exe 同目录 → **守卫检查两个文件都在** → 打 zip → 写 `version.json`。
+手工 publish 会漏掉后半段，而漏掉是**静默**的：解压后程序照样跑、照样说话，只是退回内置骨架
+的音色——所以这一步不该由人记。
 
-产物 `AzhuPet-v0.1.0-win-x64.zip`（约 25 MB，框架依赖，需用户自装 .NET 9 Desktop Runtime），内容就两个文件：`pet.exe` ＋ `persona.md`。zip 已被 `.gitignore` 排除，挂到 GitHub Release 页即可，不进 git 历史。
+> 版本号从 exe 里读（`pet.exe --version`），不在脚本里另存一份。**版本号的唯一来源是
+> `pet.csproj` 的 `<Version>`**。若脚本自己也记一份，就可能出现「exe 说 0.2.0、feed 说 0.1.0」，
+> 更新器要么永远不提示、要么永远提示同一个。问二进制要版本，这件事就不可能发生。
+
+产物 `AzhuPet-v0.1.0-win-x64.zip`（约 25 MB，框架依赖，需用户自装 .NET 9 Desktop Runtime），
+内容就两个文件：`pet.exe` ＋ `persona.md`。zip 已被 `.gitignore` 排除，挂到 GitHub Release 页即可，
+不进 git 历史。
 
 底层等价命令（自己组合时别漏 `persona.md`）：
 
@@ -138,7 +212,8 @@ pack-release.cmd               # 发布：编译 + 单文件 + 打包 zip（推�
 dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
 ```
 
-> ⚠ Git Bash 里必须写 `-p:` 而不是 `/p:` —— 斜杠形式会被 shell 当成路径吞掉，报 `MSB1009: 项目文件不存在`，看着像项目坏了，其实是参数没传进去。
+> ⚠ Git Bash 里必须写 `-p:` 而不是 `/p:` —— 斜杠形式会被 shell 当成路径吞掉，报
+> `MSB1009: 项目文件不存在`，看着像项目坏了，其实是参数没传进去。
 
 ## License
 
