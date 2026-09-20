@@ -106,10 +106,21 @@ pet.exe --shellprobe     # 真机窗口真值探针
 ## 构建 / 发布
 
 ```bash
-dotnet build -c Release
-# 发布单文件产物（需用户自装 .NET 9 Desktop Runtime）：
-dotnet publish -c Release -r win-x64 --self-contained false /p:PublishSingleFile=true
+dotnet build -c Release        # 只编译
+pack-release.cmd               # 发布：编译 + 单文件 + 打包 zip（推荐）
 ```
+
+`pack-release.cmd` 一条命令做完四件事：publish 单文件 → 把 `persona.md` 拷到 exe 同目录 → **守卫检查两个文件都在** → 打 zip。手工 publish 会漏掉后半段，而漏掉是**静默**的：解压后程序照样跑、照样说话，只是退回内置骨架的音色——所以这一步不该由人记。
+
+产物 `AzhuPet-v0.1.0-win-x64.zip`（约 25 MB，框架依赖，需用户自装 .NET 9 Desktop Runtime），内容就两个文件：`pet.exe` ＋ `persona.md`。zip 已被 `.gitignore` 排除，挂到 GitHub Release 页即可，不进 git 历史。
+
+底层等价命令（自己组合时别漏 `persona.md`）：
+
+```bash
+dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
+```
+
+> ⚠ Git Bash 里必须写 `-p:` 而不是 `/p:` —— 斜杠形式会被 shell 当成路径吞掉，报 `MSB1009: 项目文件不存在`，看着像项目坏了，其实是参数没传进去。
 
 ## License
 

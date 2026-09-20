@@ -110,6 +110,15 @@ namespace AzhuPet
                 (int)Math.Round(bw * DipScale), (int)Math.Round(bh * DipScale)
             };
         }
+
+        /// <summary>气泡窗口**排版自己算出来的**宽度（DIP），由气泡流的内容决定。
+        /// ⚠ 给判据用：判「屏幕上的实际尺寸 == 排版该有的尺寸」才是判据该问的问题；
+        ///   判「它够不够大」是问错了 —— 宽度本就随文本长度变化（合法区间 69–263 DIP）。
+        ///   见 BubbleTest.Judge 里那段注释。</summary>
+        public double BubbleLayoutWidthDip { get { return _feed == null ? 0 : _feed.TotalWidth; } }
+
+        /// <summary>同上，高度。高度必须是行高与间距的整数组合，漂了就说明行数算错了。</summary>
+        public double BubbleLayoutHeightDip { get { return _feed == null ? 0 : _feed.TotalHeight; } }
         public bool Airborne { get { return _airborne; } }
         public string LastHitKind = "(未查询)";
         // 最近若干次 NCHITTEST 的原始输入与判定 —— 用来回答「点击到底被算到了哪里」
@@ -476,13 +485,19 @@ namespace AzhuPet
             }
         }
 
+        /// <summary>气泡窗口在气泡流**排版尺寸**之外留的环绕内边距（DIP）。
+        /// ⚠ 以前这个 2 是写死在 SyncBubbleWindow 里的裸数字，而判据那边也得知道它 ——
+        ///   「同一个数两个落点」是本项目反复踩的坑，所以提成常量、两边都引用它。
+        ///   本机实测：×DipScale(1.5) 后正好是 +3px，Δ3 就是这么来的。</summary>
+        public const double BubblePad = 2;
+
         /// <summary>每帧把气泡流推进的结果落到浮窗上：量窗尺寸、摆位。宠物移动也经此重定位。</summary>
         private void SyncBubbleWindow()
         {
             if (_bubbleWin == null || _feed == null || !_feed.AnyLive) return;
             if (_feed.TotalWidth < 1 || _feed.TotalHeight < 1) _feed.Step(_clock.Elapsed.TotalSeconds, 0.016);
-            _bubbleWin.Width = _feed.TotalWidth + 2;
-            _bubbleWin.Height = _feed.TotalHeight + 2;
+            _bubbleWin.Width = _feed.TotalWidth + BubblePad;
+            _bubbleWin.Height = _feed.TotalHeight + BubblePad;
             UpdateBubblePos();
         }
 

@@ -41,6 +41,14 @@ namespace AzhuPet
     internal static class BubbleTest
     {
         private const int DiffThr = 8;      // 通道最大差 > 8 才算「这里有像素变化」（屏摄噪声余量）
+        // 气泡尺寸的**退化下限**（不是「合理性下限」）。
+        // ⚠ 来历：原判据 `bw > 200 && bh > 40` 把「宽度」当尺寸合理性的代理，是错的 ——
+        //   宽度天生随文本长度变化（实测合法单行 69–263 DIP），200 这个数会让
+        //   "WorkBuddy 积分 1055"（147 DIP）这种完全正常的气泡被判红。
+        //   改法：尺寸合理性交给「与实际排版值逐像素比对」，这条只负责挡 0/负/1×1 这类退化。
+        //   取 40 的依据：最短合法状态行 = "检测出错" = 69 DIP，×最小常见 DPI 1.0 = 69px，
+        //   留近一倍余量取 40 —— 宁可挡不住「略微偏小」，也不许「合法的短句被自己人判红」。
+        private const int MinBubblePx = 40;
 
         public static int Run(Cli o)
         {
@@ -188,7 +196,38 @@ namespace AzhuPet
                 //   存在性因此交给运行时状态（下一行）＋落盘图人眼确认；像素判据只回答**位置**（③④）。
                 Info("bubble.dark_frac(旁证)", darkFrac.ToString("0.000", CultureInfo.InvariantCulture));
                 Info("bubble.changed_frac(旁证)", chgFrac.ToString("0.000", CultureInfo.InvariantCulture));
-                Chk("bubble.size_px", bw + "x" + bh, bw > 200 && bh > 40);
+
+                // ②' 气泡**几何自洽性**（2026-09-20 重做；原判据是 `bw > 200 && bh > 40`，是错的）
+                //
+                // ⚠⚠ 为什么原来那条错：**宽度本就该随文本长度变化**，拿「宽 > 200」去验「尺寸合理」
+                //   等于把「这句话够长」当成了「气泡没坏」。实测合法单行宽度跨度极大：
+                //     "检测出错"                  69 DIP
+                //     "余额 取不到"               84 DIP
+                //     "Trae 积分 1234"           105 DIP
+                //     "WorkBuddy 积分 1055"      147 DIP ← 本次运行抓到 158px，完全正常却判 FAIL
+                //     "网络 ✅ ｜ VPN ✅ ｜ 隧道" 263 DIP
+                //   即窗口 69–263 DIP（×DPI 缩放后 69–394 px）。阈值取 200 ⇒ 短句必红、长句必绿，
+                //   而红绿与实际好坏**无关**。深层原因和 settingstest 同类：不是测量不准，
+                //   是**判据问错了问题** —— 该问「它和自己该有的尺寸一致吗」，不是「它够大吗」。
+                //
+                // 正确的问法拆成两条，各自都能红：
+                //   ⓐ 宽度必须等于**排版自己算出来的宽 ＋ 气泡窗的固定内边距** —— 宽度漂了/被裁了必红
+                //   ⓑ 高度同理 —— 行数错了必红
+                //   ⓒ 再加一条**宽松的下限**，只用来挡退化（0、负、1×1 这种），不参与「大小是否好看」
+                //     下限怎么来的：最短的合法状态行 69 DIP，×最小常见 DPI 1.0 ⇒ 69px；取 40 留足余量，
+                //      宁可挡不住「略微偏小」，也不许再出现「合法的短句被自己人判红」。
+                // ⚠ 期望值必须走 PetWindow.BubblePad 这个常量，不许在这边再抄一个 2 ——
+                //   「同一个数两个落点」正是本项目反复踩的坑（第一版我写了 ±2 容差想「吸收」它，
+                //   实测 Δ 恒为 +3（＝ 2 × DipScale 1.5）⇒ 容差掩盖了一处真实的规格，不是解决）。
+                int expW = (int)Math.Round((w.BubbleLayoutWidthDip + PetWindow.BubblePad) * w.DipScale);
+                int expH = (int)Math.Round((w.BubbleLayoutHeightDip + PetWindow.BubblePad) * w.DipScale);
+                int dW = Math.Abs(bw - expW), dH = Math.Abs(bh - expH);
+                Chk("bubble.width_matches_layout", bw + " vs 排版 " + expW + " (Δ" + dW + ")",
+                    expW > 0 && dW <= 1);
+                Chk("bubble.height_matches_layout", bh + " vs 排版 " + expH + " (Δ" + dH + ")",
+                    expH > 0 && dH <= 1);
+                Chk("bubble.size_not_degenerate", bw + "x" + bh,
+                    bw >= MinBubblePx && bh >= MinBubblePx);
 
                 // ③ 宠物像素集合 + 与气泡矩形求交
                 petPx = 0; overlap = 0;

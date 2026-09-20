@@ -3,6 +3,11 @@ bin/
 obj/
 release/
 
+# 发布包（由 pack-release.cmd 生成）
+# ⚠ 26MB 的二进制属于 Release 附件，不属于 git 历史 —— 每次发布都提交一份
+#   会让仓库快速膨胀，而且二进制 diff 毫无信息量。挂到 GitHub Release 页即可。
+AzhuPet-v*.zip
+
 # ⚠⚠ 本目录曾存在 _spike_tmp/（126MB，含私钥）。它必须永远不进 git。
 _spike_tmp/
 _bak_*/
