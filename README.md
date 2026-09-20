@@ -101,7 +101,8 @@ pet.exe --calibertest    # 口径一致性 39 项
 pet.exe --bubbletest     # 气泡渲染
 pet.exe --settingstest   # 设置面板版式 13 项
 pet.exe --configtest     # 主配置转义对称性 23 项
-pet.exe --updatetest     # 自更新链路 48 项（版本比较 / feed 解析 / 替换回滚）
+pet.exe --updatetest     # 自更新链路 58 项（版本比较 / feed 解析 / 替换回滚）
+pet.exe --updatediag     # 自更新**联网**诊断：代理 / feed 可达 / 地址一致 / 资产存在
 pet.exe --shellprobe     # 真机窗口真值探针
 ```
 
@@ -177,6 +178,25 @@ https://raw.githubusercontent.com/mauyumaster/pet/main/version.json
    用 `for /f` 抓它，一旦把 CR 带进变量，生成的文件名会变成 `AzhuPet-v0.1.0␍-win-x64.zip`
    （带隐形字符）。所以是从 `Console.OpenStandardOutput()` 手写 ASCII 字节。
 
+### 检查更新失败？先跑诊断
+
+设置面板的「检查更新」只会说一句「失败」——因为那里空间小。要查原因：
+
+```bash
+pet.exe --updatediag
+```
+
+它逐段量出**代理是什么、feed 拉到没、地址与 `git remote` 一致吗、下载资产真的存在吗**，
+每条失败都告诉你下一步该查什么。真实例子（2026-09-21）：诊断报出
+
+```
+本进程的代理 : http://127.0.0.1:61827（走环境变量 HTTPS_PROXY）
+失败：网络不可达 —— 系统代理是 http://127.0.0.1:61827…请关掉代理再试
+```
+
+那个端口**根本没有进程在听**（Clash 实际在 7897）——是某个已关闭程序留下的环境变量。
+没有这段诊断，这件事只能靠猜。
+
 ### 发一版新版
 
 ```bash
@@ -190,6 +210,8 @@ pack-release.cmd        # 2. 生成 AzhuPet-v0.2.0-win-x64.zip + 更新 version.
    tag 拼进了下载地址，写错就 404），把 zip 传上去当附件。
 4. **把 `version.json` 提交并推送**——这一步最容易忘。不提交，raw 地址服务的就是旧版本号，
    用户永远收不到更新提示，而本地一切正常。
+5. 自查一次：`pet.exe --updatediag`。它会告诉你代理是什么、feed 拉到没、地址与 git remote
+   一致吗、**下载资产真的存在吗**（HEAD 探测）。第 4 步忘了提交的话，这里会立刻显形。
 
 ## 构建 / 发布
 
@@ -198,20 +220,25 @@ dotnet build -c Release        # 只编译
 pack-release.cmd               # 发布：编译 + 单文件 + 打包 zip + 生成 version.json（推荐）
 ```
 
-`pack-release.cmd` 一条命令做完五件事：从**已构建的 exe** 读版本 → publish 单文件 →
-把 `persona.md` 拷到 exe 同目录 → **守卫检查两个文件都在** → 打 zip → 写 `version.json`。
-手工 publish 会漏掉后半段，而漏掉是**静默**的：解压后程序照样跑、照样说话，只是退回内置骨架
-的音色——所以这一步不该由人记。
+`pack-release.cmd` 一条命令做完六件事：从**已构建的 exe** 读版本 → publish 单文件 →
+把 `persona.md` 拷到 exe 同目录 → **把 `../model/chibi_maid_pet.glb` 拷进 `model/`** →
+**守卫检查三个文件都在** → 打 zip → 写 `version.json`。手工 publish 会漏掉后半段，而漏掉是
+**静默**的：解压后程序照跑、照说话，只是退回内置骨架音色；漏掉模型更糟——**双击直接弹
+「找不到 model/chibi_maid_pet.glb」然后退出**。所以这一步不该由人记。
+
+> ⚠ 模型文件住在 `pet` 的**父目录**（`阿助娘化形象/model/`，13 MB，不进 git），所以脚本里写的是
+> `..\model\chibi_maid_pet.glb`。它必须出现在 zip 里的 `model/` 子目录下，与 `pet.exe` 并排——
+> 程序找模型时**优先看 exe 同目录**。
 
 > 版本号从 exe 里读（`pet.exe --version`），不在脚本里另存一份。**版本号的唯一来源是
 > `pet.csproj` 的 `<Version>`**。若脚本自己也记一份，就可能出现「exe 说 0.2.0、feed 说 0.1.0」，
 > 更新器要么永远不提示、要么永远提示同一个。问二进制要版本，这件事就不可能发生。
 
-产物 `AzhuPet-v0.1.0-win-x64.zip`（约 25 MB，框架依赖，需用户自装 .NET 9 Desktop Runtime），
-内容就两个文件：`pet.exe` ＋ `persona.md`。zip 已被 `.gitignore` 排除，挂到 GitHub Release 页即可，
-不进 git 历史。
+产物 `AzhuPet-v0.1.0-win-x64.zip`（约 39 MB，框架依赖，需用户自装 .NET 9 Desktop Runtime），
+内容三个文件：`pet.exe` ＋ `persona.md` ＋ `model/chibi_maid_pet.glb`。zip 已被 `.gitignore`
+排除，挂到 GitHub Release 页即可，不进 git 历史。
 
-底层等价命令（自己组合时别漏 `persona.md`）：
+底层等价命令（自己组合时别漏 `persona.md` 和模型）：
 
 ```bash
 dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
