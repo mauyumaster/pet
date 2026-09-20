@@ -38,21 +38,36 @@ namespace AzhuPet
         // ⚠ 这是唯一需要维护的地址。发布时把 version.json 与 zip 一起挂到 GitHub Release，
         //   地址改了只改这一处（别在别处再写一份 URL）。
         //   用 raw 直链读 json（轻、无需 API token）；zip 走 release 直链。
-        // ⚠⚠ 大小写敏感：仓库名是 AzhuPet（用户 2026-09-21 建仓时定），
-        //   `raw.githubusercontent.com` 路径**区分大小写** —— 写成 azhupet 会 404，
+        // ⚠⚠ 大小写敏感：仓库名是 **pet**（GitHub Desktop 用文件夹名建的仓，2026-09-21 实测确认）。
+        //   `raw.githubusercontent.com` 路径**区分大小写** —— 写成 AzhuPet 会 404，
         //   而 404 在这条链路上表现为「检查更新失败」，看不到「地址写错了」。
+        //   ⚠ 实测教训：本地文件夹叫「阿助娘化形象」、代码命名空间叫 AzhuPet，都会让人误以为
+        //   仓库名也是 AzhuPet。**别猜仓库名，去看 `git remote -v`。**
         public const string DefaultFeedUrl =
-            "https://raw.githubusercontent.com/mauyumaster/AzhuPet/main/version.json";
+            "https://raw.githubusercontent.com/mauyumaster/pet/main/version.json";
 
         /// <summary>仓库主页（设置面板「关于」栏给用户点的那个链接）。</summary>
-        public const string RepoUrl = "https://github.com/mauyumaster/AzhuPet";
+        public const string RepoUrl = "https://github.com/mauyumaster/pet";
 
         // ==== 状态落点：都在配置目录下，不进 Obsidian 库 ====
         private static string StageDir { get { return Path.Combine(PetConfig.Dir, "update"); } }
         private static string PendingFlag { get { return Path.Combine(StageDir, "pending.json"); } }
 
-        // ==== 下载来的 zip 里必须是这两个文件（与 pack-release.cmd 的产物一致）====
-        private static readonly string[] PayloadNames = { "pet.exe", "persona.md" };
+        // ==== 下载来的 zip 里必须有的文件（与 pack-release.cmd 的产物一致）====
+        // ⚠ 这三件是「缺一不可」：少 pet.exe 没得跑；少 persona.md 她退回骨架音色；
+        //   少 model/ 她启动就弹「找不到 chibi_maid_pet.glb」直接退出（2026-09-21 真实翻车）。
+        //   所以模型也从「可选」升格成「必须有」—— 校验的核心价值就是拦住「装完反而不能用」。
+        private static readonly string[] PayloadNames =
+            { "pet.exe", "persona.md", "model/chibi_maid_pet.glb" };
+
+        // ⚠ 向后兼容：2026-09-21 之前的发布包（v0.1.0 及更早）**没有模型**。
+        //   如果一口咬定「没有模型就作废」，那些版本永远无法被更新覆盖。
+        //   判据：**核心文件（pet.exe/persona.md）缺一即作废；模型缺失则容忍**，
+        //   但一旦包里带了模型，就必须完整（有名字、非空）。
+        private static bool IsCorePayload(string name)
+        {
+            return name == "pet.exe" || name == "persona.md";
+        }
 
         // ---------------------------------------------------------------- 版本号
 
@@ -243,16 +258,62 @@ namespace AzhuPet
 
         private static string DescribeNetworkError(Exception ex)
         {
+            return DescribeNetworkErrorPublic(ex);
+        }
+
+        /// <summary>给诊断入口用的公开版本（DescribeNetworkError 本身是 private）。</summary>
+        public static string DescribeNetworkErrorPublic(Exception ex)
+        {
             // 网络问题对用户来说只有两种有意义：连不上 / 超时。其余归「暂时无法检查」。
             if (ex is TaskCanceledException || ex is OperationCanceledException) return "连接超时";
+
+            // ⚠⚠ 代理是我们真实踩过的坑（2026-09-21）：环境变量里的 *_PROXY 指向一个
+            //   **已经关掉的进程留下的死端口**，HttpClient 照着走 ⇒ 502 / 连不上，
+            //   而用户只看到「检查更新失败」，完全不知道该去查代理。
+            //   所以这里把「系统当前用的代理」原样报出来 —— 用户一眼就知道去哪儿改。
             var e = ex;
             while (e != null)
             {
                 if (e is System.Net.Http.HttpRequestException)
-                    return "网络不可达（可能未联网或代理问题）";
+                {
+                    string via = CurrentProxyDescription();
+                    return via == null
+                        ? "网络不可达（可能未联网）"
+                        : "网络不可达 —— 系统代理是 " + via + "，若它没在运行请关掉代理再试";
+                }
                 e = e.InnerException;
             }
             return "暂时无法检查更新";
+        }
+
+        /// <summary>
+        /// 报出「本进程当前会走哪个代理」—— 诊断用，绝不抛异常。
+        /// 返回 null 表示判定为直连。返回形如 "http://127.0.0.1:61827（走环境变量）"。
+        /// </summary>
+        public static string CurrentProxyDescription()
+        {
+            try
+            {
+                // 顺序与 .NET 实际取值一致：环境变量优先于 IE/系统设置
+                foreach (string name in new string[] { "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy" })
+                {
+                    string v = Environment.GetEnvironmentVariable(name);
+                    if (!string.IsNullOrWhiteSpace(v))
+                        return v.Trim() + "（走环境变量 " + name + "）";
+                }
+                var wi = System.Net.WebRequest.GetSystemWebProxy();
+                if (wi != null)
+                {
+                    var u = wi.GetProxy(new Uri("https://raw.githubusercontent.com/"));
+                    if (u != null && u.Host != "raw.githubusercontent.com")
+                        return u.ToString() + "（走系统设置）";
+                }
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // ---------------------------------------------------------------- ② 下载
@@ -265,6 +326,8 @@ namespace AzhuPet
                                                      int timeoutMs = 120000)
         {
             if (plan == null || !plan.HasUpdate || string.IsNullOrEmpty(plan.DownloadUrl)) return false;
+
+            DownloadError = null;   // 清掉上一次的残留，别把旧错误报成这次的
 
             // 用一个全新的临时目录做暂存，避免上次的残留混进来
             string tmp = StageDir + ".tmp-" + Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -304,11 +367,19 @@ namespace AzhuPet
                 Directory.CreateDirectory(payloadDir);
                 ZipFile.ExtractToDirectory(zipPath, payloadDir);
 
-                // ==== 校验：两个文件都必须存在且非空（缺一不替换）====
+                // ==== 校验：核心文件必须存在且非空；模型若带则必须完整 ====
+                // 核心（pet.exe/persona.md）缺一 ⇒ 整包作废（装上去反而不能用）
+                // 模型：包里带了就必须非空；没带则容忍（= 兼容 v0.1.0 及更早的旧包，
+                //   它们没有模型，若不兼容则那些版本永远更新不上来）
                 foreach (string name in PayloadNames)
                 {
                     string f = Path.Combine(payloadDir, name);
-                    if (!File.Exists(f)) { Cleanup(tmp); return false; }
+                    bool exists = File.Exists(f);
+                    if (!exists)
+                    {
+                        if (IsCorePayload(name)) { Cleanup(tmp); return false; }
+                        continue;   // 非核心缺失：容忍
+                    }
                     if (new FileInfo(f).Length == 0) { Cleanup(tmp); return false; }
                 }
 
@@ -338,12 +409,18 @@ namespace AzhuPet
                     new UTF8Encoding(false));
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
                 Cleanup(tmp);
+                DownloadError = DescribeNetworkError(ex);
                 return false;
             }
         }
+
+        /// <summary>最后一次 DownloadAsync 失败的原因（成功时为 null）。
+        /// ⚠ 光返回 false 的话，调用方只能显示「下载失败」，用户不知道是断网、代理还是别的事；
+        ///   而我们确实踩过代理的坑（见 DescribeNetworkError）。所以把原因留在外面。</summary>
+        public static string DownloadError { get; private set; }
 
         private static void Cleanup(string dir)
         {
@@ -375,8 +452,14 @@ namespace AzhuPet
             {
                 foreach (string name in PayloadNames)
                 {
-                    string f = Path.Combine(StageDir, "payload", name);
-                    if (!File.Exists(f) || new FileInfo(f).Length == 0) return false;
+                    string f = Path.Combine(StageDir, "payload", name.Replace('/', Path.DirectorySeparatorChar));
+                    if (!File.Exists(f))
+                    {
+                        // 与下载期的口径一致：核心缺一即无效；非核心缺失只是容忍
+                        if (IsCorePayload(name)) return false;
+                        continue;
+                    }
+                    if (new FileInfo(f).Length == 0) return false;
                 }
                 return true;
             }
@@ -417,11 +500,23 @@ namespace AzhuPet
             {
                 foreach (string name in PayloadNames)
                 {
-                    string src = Path.Combine(payloadDir, name);
-                    string dst = Path.Combine(appDir, name);
+                    // ⚠ 名字可能带子目录（"model/chibi_maid_pet.glb"），必须换成分隔符并按需建目录
+                    string rel = name.Replace('/', Path.DirectorySeparatorChar);
+                    string src = Path.Combine(payloadDir, rel);
+                    string dst = Path.Combine(appDir, rel);
                     string old = dst + ".old";
 
-                    if (!File.Exists(src)) { detail = "暂存里缺 " + name; Rollback(appDir, done); return false; }
+                    if (!File.Exists(src))
+                    {
+                        // 非核心缺失：跳过（把旧的留在原地，比删掉好）
+                        if (!IsCorePayload(name)) { detail = "（" + name + " 不在包里，保留原文件）"; continue; }
+                        detail = "暂存里缺 " + name; Rollback(appDir, done); return false;
+                    }
+
+                    // 目标可能在新目录（首次带模型发布时 model/ 还不存在）
+                    string dstDir = Path.GetDirectoryName(dst);
+                    try { if (!string.IsNullOrEmpty(dstDir) && !Directory.Exists(dstDir)) Directory.CreateDirectory(dstDir); }
+                    catch (Exception ex) { detail = "无法创建目录 " + dstDir + "：" + ex.GetType().Name; Rollback(appDir, done); return false; }
 
                     // 清掉上一次留下的 .old（可能还占着，删不掉就留着，不影响）
                     try { if (File.Exists(old)) File.Delete(old); } catch { }
@@ -443,7 +538,7 @@ namespace AzhuPet
                         Rollback(appDir, done);
                         return false;
                     }
-                    done.Add(name);
+                    done.Add(rel);
                 }
 
                 // ④ 成功：清掉标记与暂存

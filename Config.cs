@@ -339,6 +339,8 @@ namespace AzhuPet
         public bool UpdateTest;                 // --updatetest：离线验自更新（版本比较／feed 解析／staging 校验／替换）
         public bool ApplyUpdate;                // --applyupdate：显式兑现待替换版本（用户点「立即更新」走这条）
         public bool Version;                    // --version：只打印版本号（pack-release.cmd 靠它取名）
+        public bool UpdateDiag;                 // --updatediag：联网诊断更新链路（代理／可达性／版本），自助排查用
+        public string FeedUrl;                  // --feed <url>：覆盖更新源（诊断／自测用；不写就用 DefaultFeedUrl）
         public string InstallBalanceTemplate;   // --install-balance-template sui-xiang：只装结构，不装凭据
         public bool ForceBubbleOnPet;           // --force-bubble-on-pet：负对照（故意压在模型上，该判据必须变红）
         public string DeepSeekKey;              // 命令行传入的 DeepSeek key（会写入配置）
@@ -444,10 +446,12 @@ namespace AzhuPet
                 || EyeTest || OcrTest || OcrProbe || OcrVis
                 || StatusTest || CaliberTest || BubbleTest
                 || BalanceConfigTest || ConfigTest || FixConfig || UpdateTest
+                || UpdateDiag
                 || SettingsTest || SummaryTest || SummaryNow
                 || BalanceSettings || Settings
                 || PixDir != null || ProbeFile != null
                 || Chat != null
+                || FeedUrl != null
                 || !string.IsNullOrEmpty(InstallBalanceTemplate);
         }
 
@@ -475,6 +479,8 @@ namespace AzhuPet
                     case "--updatetest": c.UpdateTest = true; break;
                     case "--applyupdate": c.ApplyUpdate = true; break;
                     case "--version": c.Version = true; break;
+                    case "--updatediag": c.UpdateDiag = true; break;
+                    case "--feed": c.FeedUrl = Nxt(a, ref i); break;
                     case "--install-balance-template": c.InstallBalanceTemplate = Nxt(a, ref i); break;
                     case "--force-bubble-on-pet": c.ForceBubbleOnPet = true; break;
                     case "--force-through": c.ForceThrough = true; break;
@@ -568,10 +574,27 @@ namespace AzhuPet
 
         public int SizeIndex { get { return Size == "S" ? 0 : Size == "L" ? 2 : 1; } }
 
-        /// <summary>从 exe 所在目录往上找 model/chibi_maid_pet.glb（工程目录布局）。</summary>
+        /// <summary>找 model/chibi_maid_pet.glb。优先级：
+        ///   ① --model 显式路径
+        ///   ② **exe 同目录**的 model/（发布包的布局：解压出来 pet.exe 与 model/ 并排）
+        ///   ③ 从 exe 目录 / 当前工作目录**往上**找 model/（开发布局：pet/bin/.../ 往上到工程根的 model/）
+        ///
+        /// ⚠ ② 是 2026-09-21 补的，起因是一次真实的翻车：发布包原来只含 pet.exe + persona.md，
+        ///   模型 13MB 留在工程根没进包 ⇒ 用户解压双击，弹「找不到 model/chibi_maid_pet.glb」。
+        ///   而旧逻辑只会往上找（为开发方便写的），**发布包解压后往上什么也找不到**。
+        ///   两条路都要留：开发时用 ③，发布后用 ②。</summary>
         public static string ResolveModel(string explicitPath)
         {
             if (!string.IsNullOrEmpty(explicitPath) && File.Exists(explicitPath)) return explicitPath;
+
+            // ② exe 同目录（发布布局）—— 明说「就在我旁边」，不往上爬
+            try
+            {
+                string beside = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "model", "chibi_maid_pet.glb");
+                if (File.Exists(beside)) return beside;
+            }
+            catch { }
+
             // 两个搜索起点：exe 所在目录（正常启动）＋ 当前工作目录（从源码树/临时构建目录跑测试时）。
             // ⚠ 少了第二个，从 D:/_petbuild 跑 --bubbletest / --pix 就得每次手写 --model 全路径
             //   —— 而手写全路径这件事本身就会在不经意间指向上一版的模型文件。
@@ -587,5 +610,8 @@ namespace AzhuPet
             }
             return null;
         }
+
+        /// <summary>模型文件在发布包里的相对路径（pack-release.cmd 与判据共用同一份口径）。</summary>
+        public const string ModelRelPath = "model/chibi_maid_pet.glb";
     }
 }

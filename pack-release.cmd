@@ -39,6 +39,8 @@ if "%VER%"=="" goto :nover
 
 set "ZIP=AzhuPet-v%VER%-win-x64.zip"
 set "FEED=version.json"
+rem Relative path of the model INSIDE the release (must match PetConfig.ModelRelPath).
+set "MODELREL=model\chibi_maid_pet.glb"
 
 echo          version = %VER%
 echo [1/5] publish (framework-dependent single file)...
@@ -54,26 +56,39 @@ rem write into version.json is the one actually inside the zip.
 for /f "usebackq tokens=*" %%V in (`"%PUBDIR%\pet.exe" --version`) do set "VER=%%V"
 set "ZIP=AzhuPet-v%VER%-win-x64.zip"
 
-echo [2/5] stage persona.md next to the exe...
+echo [2/6] stage persona.md next to the exe...
 copy /y "persona.md" "%PUBDIR%\persona.md" >nul
 if errorlevel 1 goto :failed
 
-echo [3/5] guard: the release must contain BOTH files...
-if not exist "%PUBDIR%\persona.md" goto :nopersona
-
-echo [4/5] zip...
-rem tar is present on Windows 10 1803+ and does zip without extra tooling.
-if exist "%ZIP%" del /q "%ZIP%"
-tar -a -c -f "%ZIP%" -C "%PUBDIR%" pet.exe persona.md
+echo [3/6] stage %MODELREL% next to the exe...
+rem WHY: the 13MB GLB lives in the PARENT folder (..\model) during development --
+rem pet.exe used to walk UP the tree to find it. In a released zip there is no
+rem tree to walk, so the app died with "cannot find model/chibi_maid_pet.glb".
+rem Put it beside the exe so ResolveModel() finds it without any tree.
+if not exist "..\model\chibi_maid_pet.glb" goto :nomodel
+if not exist "%PUBDIR%\model" mkdir "%PUBDIR%\model"
+copy /y "..\model\chibi_maid_pet.glb" "%PUBDIR%\model\chibi_maid_pet.glb" >nul
 if errorlevel 1 goto :failed
 
-echo [5/5] write %FEED% (the updater's feed)...
+echo [4/6] guard: the release must contain ALL THREE files...
+if not exist "%PUBDIR%\persona.md" goto :nopersona
+if not exist "%PUBDIR%\model\chibi_maid_pet.glb" goto :nomodel
+
+echo [5/6] zip...
+rem tar is present on Windows 10 1803+ and does zip without extra tooling.
+if exist "%ZIP%" del /q "%ZIP%"
+tar -a -c -f "%ZIP%" -C "%PUBDIR%" pet.exe persona.md model/chibi_maid_pet.glb
+if errorlevel 1 goto :failed
+
+echo [6/6] write %FEED% (the updater's feed)...
 rem NOTE: the zip URL points at a GitHub Release asset. Bump this by hand when
 rem you cut a new tag -- it cannot be derived from the version alone.
 rem ASCII only; the updater parses it with a tiny hand-rolled reader.
+rem WARNING: keep the owner/repo exactly as `git remote -v` reports it.
+rem The repo is mauyumaster/pet (NOT AzhuPet) -- we shipped 404s once by guessing.
 > "%FEED%" echo {
 >>"%FEED%" echo   "version": "%VER%",
->>"%FEED%" echo   "url": "https://github.com/mauyumaster/AzhuPet/releases/download/v%VER%/AzhuPet-v%VER%-win-x64.zip",
+>>"%FEED%" echo   "url": "https://github.com/mauyumaster/pet/releases/download/v%VER%/AzhuPet-v%VER%-win-x64.zip",
 >>"%FEED%" echo   "notes": ""
 >>"%FEED%" echo }
 if not exist "%FEED%" goto :nofeed
@@ -121,5 +136,13 @@ exit /b 1
 echo.
 echo [x] persona.md did not make it into the release folder.
 echo     Shipping without it means she falls back to the skeleton voice.
+pause
+exit /b 1
+
+:nomodel
+echo.
+echo [x] The 3D model did not make it into the release folder.
+echo     Looked for: ..\model\chibi_maid_pet.glb  (13MB, lives beside the pet folder)
+echo     Without it the app dies at startup with "cannot find model/chibi_maid_pet.glb".
 pause
 exit /b 1

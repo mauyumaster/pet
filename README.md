@@ -25,7 +25,7 @@
 
 ```bash
 # 方式一：源码运行（需要 .NET 9 SDK）
-git clone https://github.com/mauyumaster/AzhuPet.git
+git clone https://github.com/mauyumaster/pet.git
 cd AzhuPet
 run-pet.cmd        # 或：dotnet run -c Release
 ```
@@ -149,7 +149,7 @@ pet.exe --fixconfig       # 备份 + 把膨胀的 vaultPath 重置为默认（�
 ### 更新源（唯一需要维护的地址）
 
 ```
-https://raw.githubusercontent.com/mauyumaster/AzhuPet/main/version.json
+https://raw.githubusercontent.com/mauyumaster/pet/main/version.json
 ```
 
 `version.json` 长这样（由 `pack-release.cmd` 自动生成）：
@@ -157,15 +157,20 @@ https://raw.githubusercontent.com/mauyumaster/AzhuPet/main/version.json
 ```json
 {
   "version": "0.1.0",
-  "url": "https://github.com/mauyumaster/AzhuPet/releases/download/v0.1.0/AzhuPet-v0.1.0-win-x64.zip",
+  "url": "https://github.com/mauyumaster/pet/releases/download/v0.1.0/AzhuPet-v0.1.0-win-x64.zip",
   "notes": ""
 }
 ```
 
 ⚠ 三个易错点，判据都守着：
 
-1. **`raw.githubusercontent.com` 路径区分大小写**——`AzhuPet` ≠ `azhupet`。写错了返回 404，
-   而 404 在这条链路上只表现成「检查更新失败」，看不见「地址写错了」。
+1. **别猜仓库名，去看 `git remote -v`**——本项目**真踩过**：本地文件夹叫「阿助娘化形象」、
+   C# 命名空间叫 `AzhuPet`，于是更新源写成了 `mauyumaster/AzhuPet`。但 GitHub Desktop
+   是用**文件夹名**建的仓，线上其实是 `mauyumaster/pet`。两个地址都「看起来对」，
+   而 `raw.githubusercontent.com` 路径**区分大小写**、写错就 404 —— 404 在这条链路上
+   只表现成「检查更新失败」，看不见「地址写错了」。
+   现在判据会**直接读 `.git/config` 里的 remote 地址来比对**，而不是只跟硬编码字符串比
+   （跟硬编码比＝验证副本，仓库改名时照样全绿）。
 2. **版本号不能按字符串比大小**——`"0.10.0"` 用字符串比会被判**旧于** `"0.9.0"`（`'1' < '9'`）。
    症状是「明明有新版本却永远不提示」，且只在跨两位数时出现。代码里是逐段转数字比。
 3. **`--version` 只输出 LF、只输出一行**——`WriteLine` 在 Windows 上吐 CRLF，`pack-release.cmd`

@@ -86,6 +86,7 @@ namespace AzhuPet
             if (o.ConfigTest) return ConfigTest.Run(o);
             if (o.FixConfig) return ConfigFix.Run(o);
             if (o.UpdateTest) return UpdateTest.Run(o);
+            if (o.UpdateDiag) return UpdateTest.DiagRun(o);
             if (o.SummaryTest) return SummaryTest.Run(o);
             if (o.SummaryNow) return SummaryTest.NowRun(o);      // 真调模型一次，总结「现在往前 60 分钟」
             if (!string.IsNullOrEmpty(o.InstallBalanceTemplate)) return BalanceTemplateInstaller.Run(o.InstallBalanceTemplate);
