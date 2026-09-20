@@ -59,7 +59,9 @@ namespace AzhuPet
         public double WDip { get { return Sizes[SizeIndex][0]; } }
         public double HDip { get { return Sizes[SizeIndex][1]; } }
 
-        private static string Dir
+        /// <summary>配置与内部状态的落点（%LOCALAPPDATA%\AzhuPet）。
+        /// ⚠ public：设置面板要显示它（「配置在哪」是用户第一个会问的问题）。</summary>
+        public static string Dir
         {
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AzhuPet"); }
         }

@@ -810,6 +810,26 @@ namespace AzhuPet
                            : Cfg.SpeechLlm ? (ISpeaker)new LlmSpeaker() : new StubSpeaker();
         }
 
+        /// <summary>
+        /// **配置下发唯一入口**（2026-09-20，主面板引入）。
+        /// 把「改配置 → 让改动即时生效」的全部动作收在一处：托盘勾选项、主设置面板、
+        /// 将来任何配置入口都调它 —— 否则每个入口各写一套同步，迟早分叉
+        /// （本仓老毛病「同一份数据两个落点」；旧版托盘里就这么写过一次 `OcrEye.SendText = ...`）。
+        ///
+        /// 覆盖的静态位：`OcrEye.Enabled`／`OcrEye.SendText`（D 档）、`WatchLoop.RoastOn`／
+        /// `Watcher.AdaptiveOn`（自动感知）、窗口置顶、说话人。
+        /// ⚠ 它**不** Save —— 落盘是调用方的事（有些入口改的是内存态）。
+        /// </summary>
+        public void ApplyConfig()
+        {
+            OcrEye.Enabled = Cfg.OcrOn;
+            OcrEye.SendText = Cfg.OcrSendText;
+            WatchLoop.RoastOn = Cfg.RoastOn;
+            Watcher.AdaptiveOn = true;
+            Topmost = Cfg.Topmost;
+            RebuildSpeaker();
+        }
+
         /// <summary>⚠ 这一回调**可能在后台线程上**被调（真 LLM 是异步的）⇒ 一律切回 UI 线程再碰控件。</summary>
         private void OnVerdict(Verdict v, Observation obs, DateTime at)
         {

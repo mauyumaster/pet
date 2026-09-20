@@ -430,6 +430,76 @@ namespace AzhuPet
                     "等 1.5 秒后开口 " + gs.Brain.Spoken + " 次（期望 1）—— 异步结果必须真的送到出口");
             }
 
+            // ================= H2. 配置下发唯一入口（2026-09-20 主面板引入）=================
+            // ⚠ 这条是**接线判据**，不是行为判据：它盯的是「有没有人绕过 ApplyConfig 手写同步」。
+            //   本项目老毛病「同一份数据两个落点」——旧托盘里就写过一次裸的 `OcrEye.SendText = ...`。
+            //   判据读源码文本（同 PersonaTest 的做法）：扫两个 UI 文件里有没有静态位的裸赋值。
+            //   为什么值得一条判据：绕过的后果是「某个入口改了配置但没生效」，而现象只是
+            //   「勾了没反应」—— 那正是本项目最贵的一类 bug（功能可用性寄生在别处）。
+            //
+            // ⚠⚠ 首版**假绿**（2026-09-20 当场抓到）：扫描起点用了 `AppDomain.CurrentDomain.BaseDirectory`
+            //   （＝ bin/Release/.../），而**源码不在那儿** ⇒ `File.Exists` 全 false ⇒ 全部 continue
+            //   ⇒ 一条都没扫，判据恒绿。**判据扫的对象必须真的存在** —— 找不到源码要报红，不许沉默跳过。
+            //   这是「扫描对象必须是输入，不是处理结果」的第三种形态：这次扫的是**空集**。
+            {
+                // 宿主目录（exe）＋ 工作目录（从源码树跑时）＋ 开发环境的固定路径，三处找源码；
+                // 一个都找不到 ⇒ **报红**（发布目录里当然没有源码，但发布版也不跑这条判据 —— 见下）。
+                var roots = new List<string>
+                {
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    Directory.GetCurrentDirectory(),
+                };
+                // 从源码树跑（本项目常态）：向上找含 pet.csproj 的目录。
+                foreach (string start in roots.ToArray())
+                {
+                    string walk = start;
+                    for (int i = 0; i < 6 && !string.IsNullOrEmpty(walk); i++)
+                    {
+                        if (File.Exists(Path.Combine(walk, "pet.csproj"))) { roots.Add(walk); break; }
+                        string up = Path.GetDirectoryName(walk.TrimEnd(Path.DirectorySeparatorChar));
+                        if (string.IsNullOrEmpty(up) || up == walk) break;
+                        walk = up;
+                    }
+                }
+
+                string srcDir = null;
+                foreach (string r in roots)
+                {
+                    if (!string.IsNullOrEmpty(r) && File.Exists(Path.Combine(r, "Tray.cs"))) { srcDir = r; break; }
+                }
+
+                if (srcDir == null)
+                    Check("configApplyIsSingleEntry", false,
+                        "找不到源码（Tray.cs）—— 这条判据扫不到任何文件就没资格通过。"
+                        + "从源码树跑，或从含 pet.csproj 的目录跑。");
+                else
+                {
+                    var offenders = new List<string>();
+                    foreach (string uiFile in new[] { "Tray.cs", "SettingsWindow.cs", "ModelSettingsWindow.cs" })
+                    {
+                        string uiPath = Path.Combine(srcDir, uiFile);
+                        if (!File.Exists(uiPath)) continue;              // 该文件不存在（如已删除）＝没事，不是失败
+                        string src = File.ReadAllText(uiPath);
+                        foreach (string banned in new[] { "OcrEye.SendText =", "OcrEye.Enabled =", "WatchLoop.RoastOn =" })
+                        {
+                            int at = src.IndexOf(banned, StringComparison.Ordinal);
+                            while (at >= 0)
+                            {
+                                int lineStart = src.LastIndexOf('\n', at) + 1;
+                                string line = src.Substring(lineStart, at - lineStart);
+                                // 注释里提到名字不算（那是文档）；只拦真正的赋值语句。
+                                if (!line.TrimStart().StartsWith("//")) { offenders.Add(uiFile + "@" + banned); break; }
+                                at = src.IndexOf(banned, at + 1, StringComparison.Ordinal);
+                            }
+                        }
+                    }
+                    Check("configApplyIsSingleEntry", offenders.Count == 0,
+                        offenders.Count == 0
+                            ? "扫了 " + srcDir + " 的 3 个 UI 文件：没有裸写静态位（一律走 PetWindow.ApplyConfig）"
+                            : "发现绕过唯一入口的裸赋值：" + string.Join("；", offenders));
+                }
+            }
+
             // ================= H. 落点 =================
             string realPath = Path.Combine(Memory.Dir(), "memory.jsonl");
             bool outside = realPath.IndexOf("40 Projects", StringComparison.OrdinalIgnoreCase) < 0

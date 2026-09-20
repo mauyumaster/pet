@@ -14,8 +14,10 @@ namespace AzhuPet
         private readonly PetWindow _w;
         private readonly NotifyIcon _ni;
         private readonly ContextMenuStrip _menu = new ContextMenuStrip();
-        private readonly ToolStripMenuItem _miShow, _miTop, _miLock, _miNight, _miAuto;
-        private ToolStripMenuItem _miSpeech, _miLlm, _miScreen;
+        // ⚠ 2026-09-20 主面板引入后，托盘只留**高频 / 单手**的那些项。
+        //   原先散在这里的配置勾选（说话／读屏／模型）已并入「设置…」——
+        //   同一件事有两个入口，就是本项目那条老毛病（同一份数据两个落点）的温床。
+        private readonly ToolStripMenuItem _miShow, _miLock;
         private IntPtr _iconHandle = IntPtr.Zero;
 
         public PetMenu(PetWindow w, bool wantTray)
@@ -23,27 +25,7 @@ namespace AzhuPet
             _w = w;
 
             _miShow = new ToolStripMenuItem("隐藏阿助", null, (s, e) => ToggleShow()) { CheckOnClick = false };
-            _miTop = new ToolStripMenuItem("始终置顶", null, (s, e) => { _w.Topmost = !_w.Topmost; _w.Cfg.Topmost = _w.Topmost; _w.Cfg.Save(); }) { CheckOnClick = false };
             _miLock = new ToolStripMenuItem("鼠标穿透（锁住）", null, (s, e) => SetLocked(!Locked)) { CheckOnClick = false };
-            _miNight = new ToolStripMenuItem("夜间调光", null, (s, e) => { _w.Cfg.NightDim = !_w.Cfg.NightDim; _w.Cfg.Save(); }) { CheckOnClick = false };
-            _miAuto = new ToolStripMenuItem("开机自启", null, (s, e) => ToggleAutostart()) { CheckOnClick = false };
-            _miSpeech = new ToolStripMenuItem("她会自己说话", null,
-                (s, e) => { _w.Cfg.SpeechOn = !_w.Cfg.SpeechOn; _w.Cfg.Save(); }) { CheckOnClick = false };
-            _miLlm = new ToolStripMenuItem("台词用模型生成", null,
-                (s, e) => { _w.Cfg.SpeechLlm = !_w.Cfg.SpeechLlm; _w.Cfg.Save(); _w.RebuildSpeaker(); }) { CheckOnClick = false };
-            // ⚠⚠ 这一项是**跨线开关**：勾上之后，屏幕上的文字会被放进发给模型的提示（出本机）。
-            //   它默认关（与 EyeOn 同一种理由：不可逆的事不能靠口头承诺）。
-            //   ⚠ 勾选必须**同时**改进程内静态位 —— 只改配置的话要重启才生效，
-            //     而「勾了没反应」正是本仓那条老毛病（功能可用性不能寄生在别的东西上）。
-            //   ⚠ 不在这里弹气泡：勾选状态本身在菜单里看得见，而「会／不会发出去」这句
-            //     写在「她看见了什么…」那个气泡里（那里才是你核对后果的地方）。
-            _miScreen = new ToolStripMenuItem("说话时带上屏幕上的字", null,
-                (s, e) =>
-                {
-                    _w.Cfg.OcrSendText = !_w.Cfg.OcrSendText;
-                    OcrEye.SendText = _w.Cfg.OcrSendText;
-                    _w.Cfg.Save();
-                }) { CheckOnClick = false };
 
             var size = new ToolStripMenuItem("大小");
             size.DropDownItems.Add(new ToolStripMenuItem("小", null, (s, e) => _w.SetSize(0)));
@@ -52,10 +34,8 @@ namespace AzhuPet
 
             _menu.Items.Add(_miShow);
             _menu.Items.Add(new ToolStripSeparator());
-            _menu.Items.Add(_miTop);
             _menu.Items.Add(_miLock);
             _menu.Items.Add(size);
-            _menu.Items.Add(_miNight);
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(new ToolStripMenuItem("回到右下角", null, (s, e) => _w.GoHome()));
             _menu.Items.Add(new ToolStripMenuItem("打个盹", null, (s, e) => _w.NapNow()));
@@ -65,19 +45,13 @@ namespace AzhuPet
             _menu.Items.Add(new ToolStripMenuItem("她看见了什么…", null, (s, e) => _w.ShowScreenRead()));
             _menu.Items.Add(new ToolStripMenuItem("和桌宠说话…", null, (s, e) => OpenChat()));
             _menu.Items.Add(new ToolStripMenuItem("让她说一句", null, (s, e) => _w.ForceSpeak()));
-            _menu.Items.Add(_miSpeech);
-            _menu.Items.Add(_miLlm);
-            _menu.Items.Add(new ToolStripMenuItem("台词模型设置…", null, (s, e) =>
-                _w.Dispatcher.InvokeAsync(() =>
-                {
-                    using (var dlg = new ModelSettingsWindow(_w)) dlg.ShowDialog();
-                    _w.RebuildSpeaker();     // 配完即时生效（通道在 ChatAsync 入口路由，但改了开关状态仍要重建说话人）
-                })));
-            _menu.Items.Add(_miScreen);
-            _menu.Items.Add(new ToolStripMenuItem("余额配置…", null, (s, e) =>
+            _menu.Items.Add(new ToolStripMenuItem("余额…", null, (s, e) =>
                 _w.Dispatcher.InvokeAsync(OpenBalanceSettings)));
+            // ⚠ 一切**配置**收在这一个入口（说话／模型通道／读屏／产出／外观），
+            //   见 SettingsWindow.cs 文件头三条纪律。
+            _menu.Items.Add(new ToolStripMenuItem("设置…", null, (s, e) =>
+                _w.Dispatcher.InvokeAsync(OpenSettings)));
             _menu.Items.Add(new ToolStripSeparator());
-            _menu.Items.Add(_miAuto);
             _menu.Items.Add(new ToolStripMenuItem("关于…", null, (s, e) => About()));
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(new ToolStripMenuItem("退出", null, (s, e) => Shutdown()));
@@ -129,23 +103,9 @@ namespace AzhuPet
         private void Sync()
         {
             _miShow.Text = _w.ManualHidden ? "显示阿助" : "隐藏阿助";
-            _miTop.Checked = _w.Topmost;
             _miLock.Checked = Locked;
-            _miNight.Checked = _w.Cfg.NightDim;
-            _miAuto.Checked = PetConfig.AutostartOn();
-            _miSpeech.Checked = _w.Cfg.SpeechOn;
-            _miLlm.Checked = _w.Cfg.SpeechLlm;
-            _miScreen.Checked = _w.Cfg.OcrSendText;
-            // ⚠ 本机读字关着的时候，这一项**必须灰掉** —— 否则你会勾上一个永远不会生效的开关
-            //   （闸的第一道就是 OcrOn，勾了也只是看着开了）。
-            _miScreen.Enabled = _w.Cfg.OcrOn;
-            // ⚠⚠ 「勾了却什么都不会变」＝静默无效，本仓明令要避免。
-            //   而这里正好有一个真实的空档：默认说话人是**模板**（StubSpeaker），
-            //   它根本不读屏幕文字 ⇒ 只勾这一项不会有任何效果，且完全看不出来。
-            //   所以把话写在标签上，不靠用户自己领悟。
-            _miScreen.Text = _w.Cfg.OcrSendText && !_w.Cfg.SpeechLlm
-                ? "说话时带上屏幕上的字（需先开上一项「台词用模型生成」）"
-                : "说话时带上屏幕上的字";
+            // ⚠ 配置类勾选项（置顶／调光／自启／说话／读屏／模型）已并入「设置…」面板 ⇒ 这里不再同步它们。
+            //   托盘只剩「显示/穿透/大小」这些高频动作 —— 每个入口都写一套 Sync，正是分叉的来源。
         }
 
         private void ToggleShow()
@@ -197,8 +157,7 @@ namespace AzhuPet
         }
 
         private void OpenBalanceSettings()
-        {
-            // 桌宠通常置顶；设置窗若是普通窗口，会被宠物盖住右下角按钮。
+        {            // 桌宠通常置顶；设置窗若是普通窗口，会被宠物盖住右下角按钮。
             // 打开工作区期间临时放下桌宠，关闭后恢复用户原来的置顶选择。
             bool wasTopmost = _w.Topmost;
             _w.Topmost = false;
@@ -208,9 +167,19 @@ namespace AzhuPet
             panel.Activate();
         }
 
-        private void About()
+        /// <summary>设置主面板 —— 一切配置的唯一入口（说话／模型通道／读屏／产出／外观）。</summary>
+        private void OpenSettings()
         {
-            var m = _w.R; 
+            // 桌宠通常置顶；设置窗若是普通窗口会被宠物盖住右下角按钮（同余额窗的处理）。
+            bool wasTopmost = _w.Topmost;
+            _w.Topmost = false;
+            using (var dlg = new SettingsWindow(_w))
+                dlg.ShowDialog();
+            _w.Topmost = wasTopmost;
+        }
+
+        private void About()
+        {            var m = _w.R; 
             MessageBox.Show(
                 "阿助桌宠 · 自建轻量壳 v1\r\n\r\n"
                 + "渲染：" + m.Stats + "\r\n"

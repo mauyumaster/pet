@@ -44,7 +44,9 @@ run-pet.cmd        # 或：dotnet run -c Release
 | **OpenAI 兼容端点**（推荐） | 任意 OpenAI 兼容服务的 key | 大多数人：DeepSeek / 硅基流动 / OpenRouter / 本地 ollama 都行 |
 | **Trae 通道** | 需已安装并登录 Trae，凭据从客户端抓取 | 进阶；非官方接口，随时可能失效 |
 
-**配置 OpenAI 兼容通道**：托盘右键 →「台词模型设置…」→ 填三项（接口地址 / 模型名 / API key）。例如 DeepSeek：`https://api.deepseek.com` ＋ `deepseek-chat` ＋ 你的 `sk-…`。本地 ollama：`http://localhost:11434` ＋ `qwen2.5` ＋ key 留 `ollama`。填空即走 Trae 通道。
+**配置入口只有一个**：托盘右键 →「设置…」。说话方式、模型通道、读屏与隐私、每小时小结、外观与启动，全在那一个窗里。
+
+**配置 OpenAI 兼容通道**：设置面板的「模型通道」分区填三项（接口地址 / 模型名 / API key）。例如 DeepSeek：`https://api.deepseek.com` ＋ `deepseek-chat` ＋ 你的 `sk-…`。本地 ollama：`http://localhost:11434` ＋ `qwen2.5` ＋ key 留 `ollama`。两项都填才走它，否则回落 Trae 通道。
 
 命令行等价：
 
@@ -52,7 +54,7 @@ run-pet.cmd        # 或：dotnet run -c Release
 pet.exe --openai-base https://api.deepseek.com --openai-model deepseek-chat --openai-key sk-xxx
 ```
 
-**读屏吐槽**要她「看得见」，需在托盘同时勾选：「台词用模型生成」＋「说话时带上屏幕上的字」——只勾后者零效果。
+**读屏吐槽**要她「看得见」，需在设置里同时勾选：「台词用模型生成」＋「把读到的字放进提示」。只勾后者零效果（模板说话人不读屏幕文字）。
 
 ## 隐私（先说清楚她往外发什么）
 
