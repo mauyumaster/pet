@@ -2,7 +2,7 @@
 
 一只会说人话的 Windows 桌宠。她不只会眨眼——她会**观察**你换了哪个窗口、**读**你屏幕上的字（可选）、**吐槽**你正在看的内容，还会**每小时写一篇**使用小结。
 
-纯 WPF 实现（无第三方游戏引擎），代码里带着 9 套离线判据与负对照——这个项目的每一步都有"怎么验"的答案。
+纯 WPF 实现（无第三方游戏引擎），代码里带着 11 套离线判据与负对照——这个项目的每一步都有"怎么验"的答案。
 
 > 个人项目，仍在快速迭代中。Issues / PR 欢迎。
 
@@ -44,9 +44,27 @@ run-pet.cmd        # 或：dotnet run -c Release
 | **OpenAI 兼容端点**（推荐） | 任意 OpenAI 兼容服务的 key | 大多数人：DeepSeek / 硅基流动 / OpenRouter / 本地 ollama 都行 |
 | **Trae 通道** | 需已安装并登录 Trae，凭据从客户端抓取 | 进阶；非官方接口，随时可能失效 |
 
-**配置入口只有一个**：托盘右键 →「设置…」。说话方式、模型通道、读屏与隐私、每小时小结、外观与启动，全在那一个窗里。
+**配置入口只有一个**：托盘右键 →「设置…」——一个窗，左侧六个栏目，右侧是当前栏目的内容：
 
-**配置 OpenAI 兼容通道**：设置面板的「模型通道」分区填三项（接口地址 / 模型名 / API key）。例如 DeepSeek：`https://api.deepseek.com` ＋ `deepseek-chat` ＋ 你的 `sk-…`。本地 ollama：`http://localhost:11434` ＋ `qwen2.5` ＋ key 留 `ollama`。两项都填才走它，否则回落 Trae 通道。
+| 栏目 | 管什么 |
+| --- | --- |
+| 说话与吐槽 | 她会不会主动开口、换应用时评不评、安静多久冒一句 |
+| 模型通道 | 台词与小结算走哪条通道（模板 / OpenAI 兼容 / Trae） |
+| 她能看见什么 | 读屏开关与隐私边界、要不要把读到的字放进提示 |
+| 每小时小结 | 她替你写的那篇日记：开关、时段、落到哪 |
+| 外观与启动 | 尺寸、置顶、开机自启、全屏隐退 |
+| 关于与位置 | 配置与数据落在哪、几个自检入口怎么跑 |
+
+面板里只放**设置项**，不放术语解释；每栏顶上一句副标题说清它管什么。高级项默认折起（渐进披露），整窗只有一个主按钮「保存并应用」，底部常驻一条状态条说明「改了什么会立即生效、什么要重启」。
+
+命令行等价入口（托盘够不着时用，自动化/排障方便）：
+
+```bash
+pet.exe --settings        # 直接打开设置面板
+pet.exe --settingstest    # 离线验版式（13 项判据，不碰真配置）
+```
+
+**配置 OpenAI 兼容通道**：设置面板的「模型通道」栏目填三项（接口地址 / 模型名 / API key）。例如 DeepSeek：`https://api.deepseek.com` ＋ `deepseek-chat` ＋ 你的 `sk-…`。本地 ollama：`http://localhost:11434` ＋ `qwen2.5` ＋ key 留 `ollama`。两项都填才走它，否则回落 Trae 通道。
 
 命令行等价：
 
@@ -71,11 +89,15 @@ pet.exe --openai-base https://api.deepseek.com --openai-model deepseek-chat --op
 
 ```bash
 pet.exe --watchtest      # 感知状态机 35 项
-pet.exe --speaktest      # 表达链路 43 项
+pet.exe --speaktest      # 表达链路 44 项
 pet.exe --summarytest    # 小时总结 14 项
 pet.exe --ocrtest        # OCR 隐私门 50 项
 pet.exe --fstest         # 全屏判定 10 项
 pet.exe --personatest    # 人格注入 11 项
+pet.exe --eyetest        # 读屏口径 10 项
+pet.exe --calibertest    # 口径一致性 39 项
+pet.exe --bubbletest     # 气泡渲染
+pet.exe --settingstest   # 设置面板版式 13 项
 pet.exe --shellprobe     # 真机窗口真值探针
 ```
 

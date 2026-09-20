@@ -86,8 +86,8 @@ namespace AzhuPet
                 if (trae || oa) return;
                 _ni.BalloonTipTitle = "阿助：台词模型还没配";
                 _ni.BalloonTipText = "「台词用模型生成」开着，但 Trae 凭据和 OpenAI 兼容端点都没配，"
-                    + "现在会用免费模板台词。右键托盘 →「台词模型设置…」可接任何 OpenAI 兼容服务"
-                    + "（DeepSeek／硅基流动／本地 ollama…）；只想用模板台词的话，取消勾选即可。";
+                    + "现在会用免费模板台词。右键托盘 →「设置…」→「模型通道」可接任何 OpenAI 兼容服务"
+                    + "（DeepSeek／硅基流动／本地 ollama…）；只想用模板台词的话，把那一项关掉即可。";
                 _ni.BalloonTipIcon = ToolTipIcon.Info;
                 _ni.ShowBalloonTip(9000);
             }

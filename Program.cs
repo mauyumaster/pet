@@ -22,7 +22,12 @@ namespace AzhuPet
             Glb.VFlip = o.VFlip;
             PetWindow.ForceHitThrough = o.ForceThrough;
             // apphost 的副本命名为 pet-settings.exe 时可无参数直达配置中心，便于桌面快捷方式与 UI 验收。
-            if ((System.IO.Path.GetFileNameWithoutExtension(Environment.ProcessPath) ?? "")
+            // ⚠⚠ 必须带 `!o.Settings` 守卫 —— 否则 `pet.exe --settings` 会被这一条**抢走**，
+            //   落到旧的 RunBalanceSettings（那张简陋的单页表），命令行开关形同虚设。
+            //   判据 `settingstest` 只测 SettingsWindow 这个类，测不到「入口被抢走」，
+            //   所以这个顺序问题只能靠视觉验收发现 —— 第一轮就是这么栽的。
+            if (o.Settings == false
+                && (System.IO.Path.GetFileNameWithoutExtension(Environment.ProcessPath) ?? "")
                 .IndexOf("settings", StringComparison.OrdinalIgnoreCase) >= 0)
                 return RunBalanceSettings();
             if (o.ProbeFile != null) return Probe.Run(o);
@@ -53,6 +58,8 @@ namespace AzhuPet
             if (o.SummaryNow) return SummaryTest.NowRun(o);      // 真调模型一次，总结「现在往前 60 分钟」
             if (!string.IsNullOrEmpty(o.InstallBalanceTemplate)) return BalanceTemplateInstaller.Run(o.InstallBalanceTemplate);
             if (o.BalanceSettings) return RunBalanceSettings();
+            if (o.SettingsTest) return SettingsTest.Run(o);
+            if (o.Settings) return RunSettings(o);
             return RunNormal(o);
         }
 
@@ -82,6 +89,40 @@ namespace AzhuPet
             app.MainWindow = w;
             w.Show();
             return app.Run();
+        }
+
+        /// <summary>--settings：独立打开设置主面板。
+        /// 为什么要它：设置面板平时只能从托盘进 —— 而托盘菜单在截屏／自动化里够不着，
+        /// 「面板长什么样」就变成只能靠人眼验收的东西。这条入口把它变成可复现的一步。
+        /// ⚠ 面板需要一个 PetWindow 才能读写 Cfg 并调 ApplyConfig；这里按 RunNormal 的同一方式
+        ///   造一个**不显示的**宿主窗口（同一个渲染器类型、同一份 PetConfig 真值，不产生第二份配置）。</summary>
+        private static int RunSettings(Cli o)
+        {
+            string model = Cli.ResolveModel(o.ModelPath);
+            if (model == null) { MessageBox.Show("找不到 model/chibi_maid_pet.glb", "阿助桌宠"); return 2; }
+            GlbModel gm;
+            try { gm = Glb.Load(model); }
+            catch (Exception ex) { MessageBox.Show("读取模型失败：" + ex.Message, "阿助桌宠"); return 3; }
+
+            // ⚠⚠ 这里**不能**用 WPF 的 `app.Run()` 去驱动一个 WinForms 窗体（真实事故，2026-09-20）：
+            //   设置面板（SettingsWindow）是 **WinForms Form**，而 PetWindow 是 WPF Window。
+            //   若用 `new System.Windows.Application` + `app.Run()`，跑的是 WPF 的 Dispatcher 循环，
+            //   WinForms 的 `Form.Show()` 没有消息泵去驱动它 ——
+            //   现象极具迷惑性：**进程活着、内存涨到 250MB、不报任何错，但一个窗口都不出现**，
+            //   然后 `app.Run()` 静默返回、进程退出（退出码 0）。
+            //   ⇒ 判据是「窗口/进程都对了」这种假绿：它从不抛异常，只是什么都不做。
+            //   正确做法：WinForms 窗体就用 **WinForms 的消息循环**（`System.Windows.Forms.Application.Run`）。
+            //   不需要 WPF Application 实例 —— WpfPetRenderer 只是被 PetWindow 持有着，
+            //   面板只用到它的 `Cfg` 与 `ApplyConfig()`，不依赖 Dispatcher 在转。
+            var r = new WpfPetRenderer(gm);
+            var host = new PetWindow(r, PetConfig.Load());
+            host.Show();
+            host.Hide();                    // 只要它的 Cfg 与 ApplyConfig，不要它出现在桌面上
+            GC.KeepAlive(r);
+
+            var w = new SettingsWindow(host);
+            System.Windows.Forms.Application.Run(w);
+            return 0;
         }
 
         private static int RunNormal(Cli o)

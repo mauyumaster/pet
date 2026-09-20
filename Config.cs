@@ -213,6 +213,9 @@ namespace AzhuPet
         public bool CaliberTest;                // --calibertest：离线验积分口径（合成响应，不联网/不读凭据）
         public bool BubbleTest;                 // --bubbletest：像素验「气泡浮在宠物之外、不遮模型」
         public bool BalanceSettings;            // --balance-settings：独立打开余额配置中心（无需先找到托盘菜单）
+        public bool Settings;                   // --settings：独立打开设置主面板（便于 UI 验收与截图）
+        public bool SettingsTest;               // --settingstest：离线验设置面板版式（裁剪／重叠／跟随缩放）
+        public bool NoLayout;                   // --no-layout：负对照 —— 跳过重排，版式判据必须变红
         public bool BalanceConfigTest;          // --balanceconfigtest：离线验保存/备份/坏 JSON/凭据隔离
         public string InstallBalanceTemplate;   // --install-balance-template sui-xiang：只装结构，不装凭据
         public bool ForceBubbleOnPet;           // --force-bubble-on-pet：负对照（故意压在模型上，该判据必须变红）
@@ -315,6 +318,9 @@ namespace AzhuPet
                     case "--calibertest": c.CaliberTest = true; break;
                     case "--bubbletest": c.BubbleTest = true; break;
                     case "--balance-settings": c.BalanceSettings = true; break;
+                    case "--settings": c.Settings = true; break;
+                    case "--settingstest": c.SettingsTest = true; break;
+                    case "--no-layout": c.NoLayout = true; break;
                     case "--balanceconfigtest": c.BalanceConfigTest = true; break;
                     case "--install-balance-template": c.InstallBalanceTemplate = Nxt(a, ref i); break;
                     case "--force-bubble-on-pet": c.ForceBubbleOnPet = true; break;

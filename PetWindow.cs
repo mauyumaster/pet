@@ -20,12 +20,16 @@ using System.Windows.Threading;
 
 namespace AzhuPet
 {
-    internal sealed class PetWindow : Window
+    internal sealed partial class PetWindow : Window, ISettingsHost
     {
         public readonly IPetRenderer R;
         public readonly PoseEngine Pose = new PoseEngine();
         public readonly PetConfig Cfg;
         public PetMenu Menu;
+
+        /// <summary>ISettingsHost 要求的是「属性」，而 Cfg 是 readonly 字段（保持既有调用面不变）。
+        /// 显式实现把两者接起来 —— 同一个对象，不产生第二份配置真值。</summary>
+        PetConfig ISettingsHost.Cfg { get { return Cfg; } }
 
         // ---- 自检可读的量（全部是算术，不靠人眼）----
         public int RenderedFrames;
