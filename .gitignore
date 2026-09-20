@@ -1,0 +1,22 @@
+# 构建产物
+bin/
+obj/
+release/
+
+# ⚠⚠ 本目录曾存在 _spike_tmp/（126MB，含私钥）。它必须永远不进 git。
+_spike_tmp/
+_bak_*/
+_report/
+
+# 测试/诊断产物（下划线开头 = 可随时删除的东西）
+_desktop_check*
+_icon_*
+_verify_*
+_tmp_*
+# 当年抓 Trae 接口的探针脚本 —— 教人抓凭据的脚本不适合公开发布
+trae_chat_spike.ps1
+
+# IDE / 系统
+*.user
+.vs/
+Thumbs.db

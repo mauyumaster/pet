@@ -1,0 +1,239 @@
+// 姿态引擎 —— 与「用什么渲染器」无关的那一半。
+//
+// 模型没有骨骼、没有动画（单 node 静态网格），所以「活感」只能程序化给。
+// 这里产出的是一组**语义化姿态量**（浮沉／偏航／倾摆／前倾／伸缩），
+// 由渲染器决定怎么落到像素上：
+//   WPF 渲染器  → Transform3DGroup
+//   three.js 渲染器 → pivot.position / rotation / scale（参数与 pet-preview.html 完全一致）
+//   预烘序列渲染器 → 查表选帧
+// ⇒ 换渲染器不用动这段，换这段不用动渲染器。
+//
+// ⚠ 幅度必须是算术，不能靠「看着在动」：第一版呼吸 ±5.5 mm 在 560 px 画布上只有
+//   4.02 px，等于没动。现在按身高 ~2% 给（±12 mm）。Extremes 把实际幅度记下来，
+//   自检时一次读出来，不靠盯屏幕。
+using System;
+
+namespace AzhuPet
+{
+    internal enum DozeState { Awake, Dozing, Asleep }
+
+    internal sealed class Pose
+    {
+        public double Lift;     // 米，+ 向上（呼吸浮沉、跳跃）
+        public double Yaw;      // 弧度，绕 Y（转头）
+        public double Roll;     // 弧度，绕 Z（缓摆）
+        public double Pitch;    // 弧度，绕 X（打盹前倾、瞌睡点头）
+        public double ScaleX = 1, ScaleY = 1, ScaleZ = 1;
+    }
+
+    internal sealed class PoseEngine
+    {
+        // ---- 节奏参数：与 pet-preview.html 的 CONFIG 一一对应，改一处两边都变 ----
+        public double BreatheT = 3.4;
+        public double SwayT = 5.7;
+        public double JumpT = 0.44;          // 跳跃周期（秒）。0.62 太"飘"，压到 0.44 = 峰值速度 +41%，顶点停留也等比缩短
+        public double BreatheAmp = 0.012;   // 米 ≈ 身高 1.05%
+        public double SwayAmp = 0.028;      // 弧度
+        public double ScaleAmp = 0.012;
+        public double FollowMax = 0.50;     // 弧度：跟随模式转头上限（约 ±29°），面向用户 = 0
+
+        // ---- 形变（squash & stretch）幅度：与 pet-preview.html CONFIG 一一对应 ----
+        // ⚠ 纵向拉伸**从脚底往上长**（ScaleTransform3D 中心 = 模型原点 = 脚底），
+        //   所以要拿「取景留白」当上限。模型占视野高 1/1.30 ⇒ 框顶 = 1.15 × 身高 = 1.310 m。
+        //   跳跃最高点 = 身高 × (1 + JumpStretch) + JumpLift + 侧倾抬升
+        //   ⇒ 0.09 / 0.060 时 1.242 + 0.060 + 0.004 = 1.306 m（余 0.004 m ≈ 1 DIP）
+        //      0.11 / 0.062 就削顶了。改这三个数之前先重做这条算术 —— `--selftest` 的
+        //      pose.jumpTopInFrame 行就是它的守门人（现已把侧倾项算进去，见 SelfTest）。
+        //   ⚠ 「拉伸」和「浮起」抢的是**同一份**留白：想让跳跃更高，就得先砍拉伸。
+        public double JumpStretch = 0.09;   // 起跳拉伸：纵向 +9%（横向收细一半，近似保体积）
+        public double JumpLift = 0.060;     // 跳跃浮起峰值（米）：4.8% → 5.3% 身高
+        public double LandSquash = 0.36;    // 落地挤压：纵向最深 -36%（横向鼓起一半）
+        public double JumpLandBounce = 0.55;   // 点击跳跃落地时给的一次挤压强度（0..1，抛物落地满值 1.0）
+        //   横向这边不用守：视野横框 = 1.40 × 宽（0.821 m）= 1.185 m，鼓起 18% 才 0.969 m，余量足。
+
+        // ---- 状态 ----
+        public bool IdleOn = true;          // 待机动作总开关（拖拽时可暂时关掉）
+        public double CursorYaw;            // 由壳写入：跟随模式目标偏航（限定在 ±FollowMax）
+        public bool Dragging;               // 由壳写入：是否正在拖拽（拖拽时翻滚）
+        public bool Airborne;               // 由壳写入：是否处于自由落体（抛物，也翻滚）
+        public double SpinDrive;            // 由壳写入：横向速度(px/s,带符号)，用于给角速度；非拖拽/飞行=0
+        public bool Near;                   // 光标靠近 → 呼吸变快
+        public bool Turntable;              // 转台模式（调试用）
+
+        // ⚠ 冻结 = 输出恒等姿态。这是「做差法量像素」的前提：
+        //   量测要连拍好几张（空壳／只有影子／全画），只要呼吸还在动，
+        //   两张图就错位，差值里混进一圈幽灵边缘，统计量跟着失真。
+        public bool Freeze;
+
+        public double IdleSeconds;          // 由壳写入：距上次键鼠输入
+        public double DozeAfter = 45;       // 秒，进入打盹
+        public double SleepAfter = 180;     // 秒，进入熟睡
+        public double DozeK { get; private set; }   // 0..1，打盹强度（平滑过渡）
+        public double Pulse { get; private set; }   // 外壳可用：交互触发的「精神一下」
+
+        public DozeState State
+        {
+            get { return DozeK > 0.66 ? DozeState.Asleep : (DozeK > 0.05 ? DozeState.Dozing : DozeState.Awake); }
+        }
+
+        // ---- 极值记录（自检用）----
+        public int Frames;
+        public double LiftMin = double.MaxValue, LiftMax = double.MinValue;
+        public double RollMin = double.MaxValue, RollMax = double.MinValue;
+        public double YawMin = double.MaxValue, YawMax = double.MinValue;
+        public double PitchMin = double.MaxValue, PitchMax = double.MinValue;
+        public double SyMin = double.MaxValue, SyMax = double.MinValue;
+
+        private const double TAU = Math.PI * 2;
+        private const double SpinK = 0.006;     // 角速度增速系数：∫SpinDrive·SpinK·dt
+        private const double SpinDecay = 1.4;   // 角速度衰减率（1/秒），越小旋转越持久
+        private double _spinVel;                // 当前翻滚角速度（弧度/秒，带符号）
+        private double _retFrom, _retT, _retDur, _retTargetYaw;   // 回正贝塞尔动画
+        private bool _retAnim;
+        private double _t, _yaw, _drift, _driftTarget, _driftTimer = 4, _jump = -1, _dozeTarget;
+        private double _bounce = -1, _bounceAmp = 1;
+
+        public void TriggerJump() { _jump = 0; _driftTimer = 0; DozeKReset(); }
+        // ⚠ 顺手唤醒不是装饰：打盹时 Pitch 最大 0.09 rad，前倾会让**后脑**抬高 ≈ TopHalfDepth·sin(Pitch)，
+        //   把纵向形变那点取景余量吃光（量过会削顶）。跳一下当然该醒。
+
+        /// <summary>落地／撞墙的挤压回弹。strength 0..1（由撞击速度换算）。</summary>
+        public void TriggerBounce(double strength)
+        {
+            _bounce = 0;
+            _bounceAmp = Math.Min(1.0, Math.Max(0.25, strength));
+        }
+
+        /// <summary>叫醒：清掉打盹强度（不必等它自己降下来）。</summary>
+        public void DozeKReset() { DozeK = 0; _dozeTarget = 0; }
+
+        public Pose Step(double dt)
+        {
+            if (dt <= 0) dt = 1.0 / 30;
+            if (Freeze) { Frames++; return new Pose(); }   // 量测模式：恒等姿态，连拍可逐像素相减
+            _t += dt;
+
+            // 打盹强度平滑过渡（不然「突然睡着」很假）
+            if (IdleSeconds >= SleepAfter) _dozeTarget = 1.0;
+            else if (IdleSeconds >= DozeAfter) _dozeTarget = 0.55;
+            else _dozeTarget = 0.0;
+            DozeK += (_dozeTarget - DozeK) * Math.Min(1, dt / 1.5);
+            Pulse *= Math.Max(0, 1 - dt / 2.5);
+
+            // 呼吸／缓摆的节奏随状态变：打盹更慢更深，光标靠近则略快
+            double breatheT = BreatheT * (1 + 1.7 * DozeK) * (Near ? 0.78 : 1.0);
+            double breatheAmp = BreatheAmp * (1 + 0.45 * DozeK);
+            double swayAmp = SwayAmp * (1 - 0.55 * DozeK);
+
+            // 偏航：鼠标跟随 ＋ 每 6~11 秒自己转一下（像在看别处）
+            _driftTimer -= dt;
+            if (_driftTimer <= 0)
+            {
+                _driftTimer = 6 + Random_.NextDouble() * 5;
+                _driftTarget = (Random_.NextDouble() * 2 - 1) * 0.16;
+            }
+            _drift += (_driftTarget - _drift) * Math.Min(1, dt * 1.2);
+            if (Dragging || Airborne)
+            {
+                // 左右拖拽/自由落体：按横向速度(SpinDrive)持续给角速度，角速度随时间衰减
+                _spinVel += SpinK * SpinDrive * dt;
+                _spinVel *= Math.Exp(-SpinDecay * dt);
+                _yaw += _spinVel * dt;
+            }
+            else
+            {
+                // 回正：沿**贝塞尔曲线**（easeInOutCubic）趋近目标，缓慢回正面向用户
+                _spinVel = 0;
+                double target = CursorYaw + _drift;
+                if (!_retAnim || Math.Abs(target - _retTargetYaw) > 0.22)
+                {
+                    _retTargetYaw = target; _retFrom = _yaw; _retT = 0;
+                    _retDur = Math.Clamp(0.16 + 0.9 * Math.Abs(target - _yaw), 0.18, 0.55);
+                    _retAnim = true;
+                }
+                double u = Math.Min(1, _retT / _retDur);
+                _yaw = _retFrom + (target - _retFrom) * BezierEase(u);
+                _retT += dt;
+                if (u >= 1) { _yaw = target; _retAnim = false; }
+            }
+
+            var p = new Pose();
+            double b = 0, s = 0;
+            if (IdleOn)
+            {
+                b = Math.Sin(_t * TAU / breatheT);
+                s = Math.Sin(_t * TAU / SwayT);
+                p.Lift = b * breatheAmp;
+                p.ScaleY = 1 + b * ScaleAmp;
+                p.ScaleX = p.ScaleZ = 1 - b * ScaleAmp * 0.4;
+                p.Roll = s * swayAmp;
+            }
+            // 打盹：身体前倾 ＋ 慢点头
+            p.Pitch = 0.060 * DozeK + Math.Sin(_t * TAU / (breatheT * 2.4)) * 0.030 * DozeK;
+            if (Turntable) _yaw += dt * 0.9;
+            p.Yaw = _yaw;
+
+            // 点击跳跃：靠 sin 包络做「起—落」，落地压一下。
+            // ⚠ 点击跳跃原本**没有落地形变**（只有起跳抻长），首尾不对称就显得"轻飘飘"；
+            //   这里在包络跑完的那一帧补一次 TriggerBounce（挤压是变矮，不占取景额度，白赚）。
+            if (_jump >= 0)
+            {
+                _jump += dt;
+                double q = _jump / JumpT;
+                if (q >= 1) { _jump = -1; TriggerBounce(JumpLandBounce); }
+                else
+                {
+                    double hgo = Math.Sin(q * Math.PI);
+                    p.Lift += hgo * JumpLift;
+                    p.ScaleY *= 1 + hgo * JumpStretch;
+                    p.ScaleX *= 1 - hgo * JumpStretch * 0.5;
+                    p.ScaleZ *= 1 - hgo * JumpStretch * 0.5;
+                }
+            }
+
+            // 落地挤压回弹（抛物落地的「软着陆」全靠这个包络）
+            if (_bounce >= 0)
+            {
+                _bounce += dt;
+                double q = _bounce / 0.30;
+                if (q >= 1) _bounce = -1;
+                else
+                {
+                    double e = (1 - q) * Math.Sin(q * Math.PI);
+                    p.ScaleY *= 1 - e * LandSquash * _bounceAmp;
+                    p.ScaleX *= 1 + e * LandSquash * 0.5 * _bounceAmp;
+                    p.ScaleZ *= 1 + e * LandSquash * 0.5 * _bounceAmp;
+                }
+            }
+
+            Frames++;
+            LiftMin = Math.Min(LiftMin, p.Lift); LiftMax = Math.Max(LiftMax, p.Lift);
+            RollMin = Math.Min(RollMin, p.Roll); RollMax = Math.Max(RollMax, p.Roll);
+            YawMin = Math.Min(YawMin, p.Yaw); YawMax = Math.Max(YawMax, p.Yaw);
+            PitchMin = Math.Min(PitchMin, p.Pitch); PitchMax = Math.Max(PitchMax, p.Pitch);
+            SyMin = Math.Min(SyMin, p.ScaleY); SyMax = Math.Max(SyMax, p.ScaleY);
+            return p;
+        }
+
+        public void ResetExtremes()
+        {
+            Frames = 0;
+            LiftMin = RollMin = YawMin = PitchMin = SyMin = double.MaxValue;
+            LiftMax = RollMax = YawMax = PitchMax = SyMax = double.MinValue;
+        }
+
+        /// <summary>三次贝塞尔缓动（easeInOutCubic）：慢→快→慢，用于回正动画调速。</summary>
+        private static double BezierEase(double t)
+        {
+            if (t <= 0) return 0;
+            if (t >= 1) return 1;
+            return t < 0.5 ? 4 * t * t * t : 1 - Math.Pow(-2 * t + 2, 3) / 2;
+        }
+
+        internal static class Random_
+        {
+            private static readonly System.Random R = new System.Random(12345);
+            public static double NextDouble() { return R.NextDouble(); }
+        }
+    }
+}

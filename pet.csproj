@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 阿助桌宠 · 最小可行壳
+       目标：轻量（框架依赖模式，产物 < 1 MB，零新下载）、透明、置顶、
+             逐像素命中，且**每一步都能自查**（见 SelfTest.cs）。
+       渲染层是可替换的（IPetRenderer）：v1 = WPF 原生 3D（无外部依赖、可截图核验）。 -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- ⚠⚠ TFM 带 Windows SDK 版本号，是为了拿到 WinRT 投影（Windows.Media.Ocr）——
+         本机离线 OCR 靠它。代价：**产物目录名会跟着变**（net9.0-windows →
+         net9.0-windows10.0.19041.0），所以 run-pet.cmd 里的 PETEXE 必须同步改。
+         改一边不改另一边 = 启动器跑上一版二进制，而现象只是「改了没效果」。
+         同一个坑本项目踩过一次（Debug/Release 分家），所以两个文件互相点名。 -->
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>pet</AssemblyName>
+    <RootNamespace>AzhuPet</RootNamespace>
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+    <StartupObject>AzhuPet.Program</StartupObject>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <ApplicationIcon>pet.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <!-- 构建闸：输出目录里绝不允许出现凭据文件。
+       凭据只该放 %LOCALAPPDATA%\AzhuPet\（不进 Obsidian 库 ⇒ 不进坚果云）。
+       为什么要在构建期拦：bin/ 也在库内，一旦有人把凭据丢进 bin/ 让它「好用」，
+       就会同时造成 ①凭据上云 ②两份真值（exe 同级那份可能是旧的）——
+       上轮事故正是 bin 里有 balance_secret.txt 而没有 workbuddy_secret.txt，
+       于是 Trae 正常、WorkBuddy 整行消失，看起来像「积分接口坏了」。 -->
+  <Target Name="GuardNoSecretsInOutputDir" AfterTargets="Build">
+    <ItemGroup>
+      <StraySecret Include="$(OutDir)*secret*.txt" />
+    </ItemGroup>
+    <Error Condition="'@(StraySecret)' != ''"
+           Text="构建输出目录里出现了凭据文件：@(StraySecret) —— 凭据只应放 %LOCALAPPDATA%\AzhuPet\，请删掉这些副本。" />
+  </Target>
+
+</Project>
