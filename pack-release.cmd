@@ -27,38 +27,83 @@ cd /d "%~dp0"
 
 rem MUST match <TargetFramework> in pet.csproj -- the folder name IS the TFM.
 set "PUBDIR=bin\Release\net9.0-windows10.0.19041.0\win-x64\publish"
-set "ZIP=AzhuPet-v0.1.0-win-x64.zip"
 
-echo [1/4] publish (framework-dependent single file)...
+rem ---- version: read from the BUILT EXE, never from a hardcoded string ----
+rem WHY: the version lives in exactly one place (pet.csproj <Version>). If this
+rem script kept its own copy, a release could ship an exe that says 0.2.0 while
+rem the feed says 0.1.0 -- and the updater would then either never offer the
+rem update or offer it forever. Asking the binary makes that impossible.
+rem NOTE: pet.exe -v prints the version (see Program.cs RunVersion).
+for /f "usebackq tokens=*" %%V in (`"%PUBDIR%\pet.exe" --version`) do set "VER=%%V"
+if "%VER%"=="" goto :nover
+
+set "ZIP=AzhuPet-v%VER%-win-x64.zip"
+set "FEED=version.json"
+
+echo          version = %VER%
+echo [1/5] publish (framework-dependent single file)...
 rem NOTE: `-p:` not `/p:` -- Git Bash eats the slash form.
 dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -v q --nologo
 if errorlevel 1 goto :failed
 
 if not exist "%PUBDIR%\pet.exe" goto :nobinary
 
-echo [2/4] stage persona.md next to the exe...
+rem Re-read after publish: the exe we asked a moment ago may have been the
+rem PREVIOUS build. Reading it back after publish guarantees the version we
+rem write into version.json is the one actually inside the zip.
+for /f "usebackq tokens=*" %%V in (`"%PUBDIR%\pet.exe" --version`) do set "VER=%%V"
+set "ZIP=AzhuPet-v%VER%-win-x64.zip"
+
+echo [2/5] stage persona.md next to the exe...
 copy /y "persona.md" "%PUBDIR%\persona.md" >nul
 if errorlevel 1 goto :failed
 
-echo [3/4] guard: the release must contain BOTH files...
+echo [3/5] guard: the release must contain BOTH files...
 if not exist "%PUBDIR%\persona.md" goto :nopersona
 
-echo [4/4] zip...
+echo [4/5] zip...
 rem tar is present on Windows 10 1803+ and does zip without extra tooling.
 if exist "%ZIP%" del /q "%ZIP%"
 tar -a -c -f "%ZIP%" -C "%PUBDIR%" pet.exe persona.md
 if errorlevel 1 goto :failed
 
+echo [5/5] write %FEED% (the updater's feed)...
+rem NOTE: the zip URL points at a GitHub Release asset. Bump this by hand when
+rem you cut a new tag -- it cannot be derived from the version alone.
+rem ASCII only; the updater parses it with a tiny hand-rolled reader.
+> "%FEED%" echo {
+>>"%FEED%" echo   "version": "%VER%",
+>>"%FEED%" echo   "url": "https://github.com/mauyumaster/AzhuPet/releases/download/v%VER%/AzhuPet-v%VER%-win-x64.zip",
+>>"%FEED%" echo   "notes": ""
+>>"%FEED%" echo }
+if not exist "%FEED%" goto :nofeed
+
 echo.
 echo   [+] %ZIP%
 for %%F in ("%ZIP%") do echo       %%~zF bytes
+echo   [+] %FEED%
 echo.
 echo   Contents:
 tar -t -f "%ZIP%"
 echo.
 echo   Next: this is a LOCAL artifact only. Nothing was uploaded.
-echo         To publish, attach this zip to a GitHub Release (tag v0.1.0).
+echo         To publish, attach this zip to a GitHub Release (tag v%VER%), then
+echo         commit %FEED% so the raw feed URL serves the new version.
 exit /b 0
+
+:nover
+echo.
+echo [x] Could not read the version from "%PUBDIR%\pet.exe".
+echo     Run a build first: dotnet build -c Release
+pause
+exit /b 1
+
+:nofeed
+echo.
+echo [x] %FEED% was not written.
+echo     Without it the updater has nothing to read and will never offer updates.
+pause
+exit /b 1
 
 :failed
 echo.

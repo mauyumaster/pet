@@ -5,6 +5,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Windows;
 
@@ -16,6 +17,34 @@ namespace AzhuPet
         private static int Main(string[] args)
         {
             Cli o = Cli.Parse(args);
+
+            // ==== 自更新：先「兑现」上次下载好的新版本，再干别的 ====
+            // ⚠⚠ 必须是**第一件事**（在任何窗口、任何文件读取之前）：
+            //   替换会改掉 pet.exe / persona.md 这两个文件本身，趁没人碰过它们时做最干净。
+            // ⚠ 自检模式（--xxxtest）**不执行**替换 —— 判据必须是无副作用的，
+            //   跑一次测试就把用户的程序换了，那是灾难。
+            // ⚠ --applyupdate 是给「用户点了「立即重启更新」」用的显式入口：
+            //   那种情况下要报清楚结果（更换了什么、失败原因）。
+            if (o.ApplyUpdate) return RunApplyUpdate();
+            // --version：**必须最先处理且只打印版本号这一行**。
+            // ⚠⚠ 用 `Write` + 显式 "\n"，**不用 `WriteLine`** ——
+            //   WriteLine 在 Windows 上输出 CRLF，而 pack-release.cmd 用 `for /f` 抓它。
+            //   cmd 的 `for /f` 对行尾 CR 的处理依上下文而变，一旦 CR 被带进变量，
+            //   生成的文件名就变成 `AzhuPet-v0.1.0␍-win-x64.zip` —— **看起来几乎一样**，
+            //   但 zip 名、version.json 里的 url、以及 git 提交的文件名全都会带上这个隐形字符。
+            //   这类「看不见的字符导致的失配」在本项目出现过多次，所以从源头掐掉：
+            //   只输出 LF，让 for /f 无论怎么处理都拿到干净的一行。
+            // 另外：**只准打这一行**，多打一行会被一起抓进变量。
+            if (o.Version)
+            {
+                var so = Console.OpenStandardOutput();
+                byte[] bytes = Encoding.ASCII.GetBytes(Updater.CurrentVersion + "\n");
+                so.Write(bytes, 0, bytes.Length);
+                so.Flush();
+                return 0;
+            }
+            if (!o.AnyTest()) ApplyPendingQuietly();
+
             // 模型覆盖必须在任何 ChatAsync 之前生效（四条通路共用这一个开关）。
             if (!string.IsNullOrEmpty(o.LlmModel)) TraeChat.ModelOverride = o.LlmModel;
             WpfPetRenderer.MatMode = o.Mat == "flat" ? 1 : o.Mat == "emissive" ? 2 : o.Mat == "uv" ? 3 : 0;
@@ -56,6 +85,7 @@ namespace AzhuPet
             if (o.BalanceConfigTest) return BalanceConfigTest.Run();
             if (o.ConfigTest) return ConfigTest.Run(o);
             if (o.FixConfig) return ConfigFix.Run(o);
+            if (o.UpdateTest) return UpdateTest.Run(o);
             if (o.SummaryTest) return SummaryTest.Run(o);
             if (o.SummaryNow) return SummaryTest.NowRun(o);      // 真调模型一次，总结「现在往前 60 分钟」
             if (!string.IsNullOrEmpty(o.InstallBalanceTemplate)) return BalanceTemplateInstaller.Run(o.InstallBalanceTemplate);
@@ -63,6 +93,42 @@ namespace AzhuPet
             if (o.SettingsTest) return SettingsTest.Run(o);
             if (o.Settings) return RunSettings(o);
             return RunNormal(o);
+        }
+
+        /// <summary>正常启动时的静默兑现：如果上次下好了新版本，在这里换掉。**不弹任何东西。**
+        /// 失败就当作没发生 —— 下次启动再试。用户不该因为更新失败而看到错误对话框弹在桌宠上。</summary>
+        private static void ApplyPendingQuietly()
+        {
+            try
+            {
+                if (Updater.PendingVersion() == null) return;
+                string detail;
+                Updater.ApplyPending(out detail);
+                Updater.CleanupOldFiles();     // 顺手清掉上次替换留下的 .old（这次删不掉就留着）
+            }
+            catch { }
+        }
+
+        /// <summary>--applyupdate：显式兑现一次待替换版本，并把结果打到控制台。
+        /// 给「设置面板点了立即更新」和排障用。返回值：0 = 换了，1 = 没得换/换失败。</summary>
+        private static int RunApplyUpdate()
+        {
+            string pending = Updater.PendingVersion();
+            if (pending == null)
+            {
+                Console.WriteLine("没有待替换的版本。当前版本 " + Updater.CurrentVersion);
+                return 1;
+            }
+            Console.WriteLine("当前版本 " + Updater.CurrentVersion + " → 待替换 " + pending);
+            string detail;
+            bool ok = Updater.ApplyPending(out detail);
+            Console.WriteLine((ok ? "✅ " : "❌ ") + detail);
+            if (ok)
+            {
+                Console.WriteLine("下次启动即为新版本。");
+                Updater.CleanupOldFiles();
+            }
+            return ok ? 0 : 1;
         }
 
         private static int ChatOneShot(string text)

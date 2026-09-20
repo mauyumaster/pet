@@ -24,6 +24,12 @@
     <DebugType>none</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <ApplicationIcon>pet.ico</ApplicationIcon>
+    <!-- ==== 版本号：自更新唯一真值 ====
+         ⚠⚠ 这里**是**版本号的单一来源，别再在 .cs 里硬编码一份（本项目踩过「同一份数据两个落点」）。
+         程序运行时用 Updater.CurrentVersion 读它（走 AssemblyInformationalVersion），
+         pack-release.cmd 打出 version.json 时也从这里取 —— 两边同源，不可能对不上。
+         Version 决定 InformationalVersion；三段式 x.y.z 就够（比较逻辑只看三段）。 -->
+    <Version>0.1.0</Version>
   </PropertyGroup>
 
   <!-- 构建闸：输出目录里绝不允许出现凭据文件。

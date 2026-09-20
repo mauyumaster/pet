@@ -601,9 +601,237 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
         // ==================================================================================
         // 第 6 栏：关于与位置
         // ==================================================================================
+        // ==================================================================================
+        // 版本与更新（「关于」栏第一张卡）
+        // ==================================================================================
+        // 交互口径（用户 2026-09-21 拍板）：**能查、能下、但不悄悄换** ——
+        //   ① 打开面板时只显示当前版本，**不自动联网**（免得一开设置就卡一下）
+        //   ② 用户点「检查更新」才去拉 version.json
+        //   ③ 有新版：显示版本号 + 说明，给一个「下载并重启更新」按钮
+        //   ④ 点了之后：下载 → 落 pending → 提示重启；**重启才真正替换**
+        // 为什么不做成全静默自动更新：更新是**唯一会改程序自身**的动作，
+        //   一旦出错后果比「配置写坏」严重得多（程序直接没了）。所以第一版把
+        //   「要不要换」这个决定留给人 —— 基础设施全做了，风险动作有人确认。
+
+        private Label _updStatus;
+        private Panel _updBtnRow;
+        private Button _updCheckBtn, _updApplyBtn;
+
+        private void BuildUpdateCard(FlowLayoutPanel flow)
+        {
+            var pal = SettingsTheme.Pal;
+            var card = BeginCard(flow, "版本与更新", "当前装的是哪一版、有没有新的。");
+
+            // ---- 第一行：当前版本 + 仓库链接 ----
+            AddRow(card, NoteBox("当前版本：" + Updater.CurrentVersion
+                + "\n项目主页：" + Updater.RepoUrl, pal.Muted));
+
+            // ---- 第二行：状态文字（检查/下载的结果都显示在这里）----
+            _updStatus = new Label
+            {
+                Text = "点下面的按钮看看有没有新版本。", AutoSize = false, Height = 34,
+                ForeColor = pal.Faint, Font = SettingsTheme.Small,
+                BackColor = Color.Transparent,
+            };
+            AddRow(card, _updStatus);
+
+            // ---- 第三行：按钮 ----
+            _updBtnRow = new Panel { Height = 34, BackColor = pal.Card };
+            _updCheckBtn = SmallButton("检查更新", 96);
+            _updCheckBtn.Click += (s, e) => StartCheckUpdate();
+            _updBtnRow.Controls.Add(_updCheckBtn);
+
+            _updApplyBtn = SmallButton("下载并更新", 116);
+            _updApplyBtn.Left = 104;
+            _updApplyBtn.Visible = false;                  // 只有发现有新版才出现
+            _updApplyBtn.Click += (s, e) => OnApplyButton();
+            _updBtnRow.Controls.Add(_updApplyBtn);
+
+            AddRow(card, _updBtnRow);
+            FinishCard(card);
+
+            // ⚠ 打开面板时**不自动检查** —— 一次网络请求会让「打开设置」慢一下，
+            //   而用户打开设置多半是想改别的。真要自动检查应该后台做、结果落盘，
+            //   那是下一版的事；现在保持「点一下才查」这种可预期的行为。
+        }
+
+        /// <summary>统一的小按钮样式（与「打开余额配置」那一颗同款）。</summary>
+        private Button SmallButton(string text, int width)
+        {
+            var b = new Button
+            {
+                Text = text, Location = new Point(0, 2), Width = width, Height = 30,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = SettingsTheme.Pal.Field,
+                ForeColor = SettingsTheme.Pal.Text,
+            };
+            b.FlatAppearance.BorderColor = SettingsTheme.Pal.Line;
+            return b;
+        }
+
+        // ---- 状态小工具：所有更新动作都在 UI 线程上改这两处，不在别处直接动控件 ----
+
+        private void SetUpdStatus(string text, bool bad = false, bool good = false)
+        {
+            if (_updStatus == null) return;
+            var pal = SettingsTheme.Pal;
+            _updStatus.Text = text;
+            _updStatus.ForeColor = bad ? pal.Warn : (good ? pal.Text : pal.Faint);
+        }
+
+        private void SetUpdBusy(bool busy, string what)
+        {
+            if (_updCheckBtn != null) _updCheckBtn.Enabled = !busy;
+            if (_updApplyBtn != null) _updApplyBtn.Enabled = !busy;
+            if (busy) SetUpdStatus(what);
+        }
+
+        /// <summary>检查更新。⚠ **必须异步** —— 同步发 HTTP 会把整个面板冻住几秒，
+        /// 那正是我们刚花大力气修掉的症状，不能自己再造一个。</summary>
+        private void StartCheckUpdate()
+        {
+            SetUpdBusy(true, "正在检查…");
+            if (_updApplyBtn != null) _updApplyBtn.Visible = false;
+
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                var r = await Updater.CheckAsync().ConfigureAwait(false);
+                RunOnUi(() => ReportCheckResult(r));
+            });
+        }
+
+        private void ReportCheckResult(Updater.CheckResult r)
+        {
+            SetUpdBusy(false, null);
+            if (!r.Ok)
+            {
+                // ⚠ 检查失败是**正常情况**（离线、代理、raw 被墙都可能），
+                //   措辞要让人放心，别写得像程序坏了。
+                SetUpdStatus("没查到更新信息：" + (r.Message ?? "暂时无法检查") + "。（不影响使用）", bad: false);
+                return;
+            }
+            if (!r.HasUpdate)
+            {
+                SetUpdStatus("已经是最新版本（" + r.RemoteVersion + "）。", good: true);
+                return;
+            }
+            SetUpdStatus("发现新版本 " + r.RemoteVersion + "（当前 " + Updater.CurrentVersion + "）。"
+                + (string.IsNullOrEmpty(r.Notes) ? "" : "\n" + r.Notes), good: true);
+            if (_updApplyBtn != null)
+            {
+                _updApplyBtn.Text = "下载 v" + r.RemoteVersion;
+                _updApplyBtn.Visible = true;
+            }
+            _pendingPlan = r;
+            _updApplyStage = 1;                      // 待下载
+        }
+
+        private Updater.CheckResult _pendingPlan;    // 上次检查发现的可用更新
+        private int _updApplyStage;                  // 1 = 待下载，2 = 已下载待重启
+
+        /// <summary>那颗「下载并更新」按钮的分流：同一颗按钮在两个阶段做两件事。
+        /// ⚠ 用显式阶段标志而不是反复 += / -= 处理器 —— WinForms 里漏 -= 的症状是
+        ///   「点一下触发两次」，而它只在真机上出现，判据很难覆盖。</summary>
+        private void OnApplyButton()
+        {
+            if (_updApplyStage == 2) DoRestartToUpdate();
+            else StartDownloadUpdate();
+        }
+
+        /// <summary>下载更新包并落 pending。**下载完不替换** —— 只告诉用户「重启生效」。</summary>
+        private void StartDownloadUpdate()
+        {
+            var plan = _pendingPlan;
+            if (plan == null) { SetUpdStatus("请先点「检查更新」。"); return; }
+
+            SetUpdBusy(true, "正在下载…");
+            if (_updApplyBtn != null) _updApplyBtn.Visible = false;
+
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                bool ok = await Updater.DownloadAsync(plan, pct =>
+                {
+                    RunOnUi(() => SetUpdStatus("正在下载… " + pct + "%"));
+                }).ConfigureAwait(false);
+                RunOnUi(() => ReportDownloadResult(ok, plan));
+            });
+        }
+
+        private void ReportDownloadResult(bool ok, Updater.CheckResult plan)
+        {
+            SetUpdBusy(false, null);
+            if (!ok)
+            {
+                SetUpdStatus("下载失败。可能是网络问题，也可能是新版本的包还没传完 —— 过会儿再试。"
+                    + "（你的程序没被改动）", bad: true);
+                return;
+            }
+            // 下载成功：给「立即生效」的路子
+            SetUpdStatus("v" + plan.RemoteVersion + " 已下载好，重启后生效。", good: true);
+            if (_updApplyBtn != null)
+            {
+                _updApplyBtn.Text = "立即重启更新";
+                _updApplyBtn.Visible = true;
+                // 按钮同一个，但此刻要做的事变成了「替换 + 重启」——
+                // 用一次性订阅换掉原来的「下载」处理器，避免两个 handler 同时挂着导致点一下下载两次。
+                // ⚠ WinForms 没有「移除全部 Click 处理器」的公开 API ⇒ 用一个标志位分流，
+                //   比反复 += / -= 更不容易漏（漏了的症状是「点一下触发两次」）。
+                _updApplyStage = 2;
+            }
+        }
+
+        /// <summary>「立即重启更新」：先兑现替换，再重启自己。
+        /// ⚠ 替换后**当前进程仍在跑旧代码**（旧文件句柄），所以必须重启才真的切过去。</summary>
+        private void DoRestartToUpdate()
+        {
+            try
+            {
+                string detail;
+                bool ok = Updater.ApplyPending(out detail);
+                if (!ok)
+                {
+                    MessageBox.Show("更新没有完成：" + detail + "\n\n你的程序仍在正常版本上。",
+                        "阿助桌宠", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                // 重启：把自己再拉起来（新文件已在原位），然后退出当前进程
+                string me = Environment.ProcessPath;
+                if (!string.IsNullOrEmpty(me))
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = me,
+                        UseShellExecute = true,
+                    });
+                }
+                Close();
+                System.Windows.Forms.Application.Exit();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("更新时出错：" + ex.Message + "\n\n你的程序应该仍然可用。",
+                    "阿助桌宠", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        /// <summary>把一段代码丢回 UI 线程执行。⚠ WinForms 控件只能在建它的线程上碰 ——
+        /// 后台线程直接改 _updStatus.Text 会抛跨线程异常（而且往往只在用户真点时炸）。</summary>
+        private void RunOnUi(Action a)
+        {
+            try
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                if (InvokeRequired) BeginInvoke(a);
+                else a();
+            }
+            catch { }
+        }
+
         private void BuildPageAbout()
         {
             var flow = BeginPage("关于与位置", "出问题时你会想知道的两件事：东西在哪、怎么自证。");
+
+            BuildUpdateCard(flow);
 
             var c1 = BeginCard(flow, "本机位置");
             AddRow(c1, NoteBox("配置与内部状态：\n" + PetConfig.Dir + "\n\n"

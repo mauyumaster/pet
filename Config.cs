@@ -336,6 +336,9 @@ namespace AzhuPet
         public bool BalanceConfigTest;          // --balanceconfigtest：离线验保存/备份/坏 JSON/凭据隔离
         public bool ConfigTest;                 // --configtest：离线验主配置「写/读转义对称 + 不膨胀」
         public bool FixConfig;                  // --fixconfig：把被「转义不对称」写胖的 config.json 修回来
+        public bool UpdateTest;                 // --updatetest：离线验自更新（版本比较／feed 解析／staging 校验／替换）
+        public bool ApplyUpdate;                // --applyupdate：显式兑现待替换版本（用户点「立即更新」走这条）
+        public bool Version;                    // --version：只打印版本号（pack-release.cmd 靠它取名）
         public string InstallBalanceTemplate;   // --install-balance-template sui-xiang：只装结构，不装凭据
         public bool ForceBubbleOnPet;           // --force-bubble-on-pet：负对照（故意压在模型上，该判据必须变红）
         public string DeepSeekKey;              // 命令行传入的 DeepSeek key（会写入配置）
@@ -422,6 +425,32 @@ namespace AzhuPet
         public bool Freeze;
         public bool VFlip;                      // 把 UV 的 V 翻成 1-v（默认否，见 Glb.cs 文件头）
 
+        /// <summary>这一轮跑的是不是「自检／工具模式」（而非正常当桌宠跑）。
+        ///
+        /// ⚠⚠ 存在的理由：自更新要在启动时**替换 exe 本身**。但判据必须无副作用 ——
+        ///   跑一次 `--configtest` 就把用户的程序换掉是灾难。所以「要不要兑现待替换版本」
+        ///   得先问一句「这次是自检吗」。
+        /// ⚠ 维护性警告：**新增任何 --xxxtest 开关，都要同步加进这里**。
+        ///   漏加的症状很隐蔽：新判据跑起来会顺手把用户的桌宠更新了。
+        ///   之所以不做成「名字里带 test 就算」的自动判断 —— 那样 `--no-xxx` 负对照开关、
+        ///   `--fixconfig` 这类**真会改文件**的工具模式分不清，宁可显式列举。
+        ///   （自检 UpdateTest 里有一条判据专门守这里，见 UpdateTest.cs。）</summary>
+        public bool AnyTest()
+        {
+            return SelfTest || ClickTest || DragTest || PersonaTest
+                || WatchTest || WatchProbe || ShellProbe
+                || FsTest || FsProbe
+                || SpeakTest || SpeakProbe || SpeakVis || LlmTest
+                || EyeTest || OcrTest || OcrProbe || OcrVis
+                || StatusTest || CaliberTest || BubbleTest
+                || BalanceConfigTest || ConfigTest || FixConfig || UpdateTest
+                || SettingsTest || SummaryTest || SummaryNow
+                || BalanceSettings || Settings
+                || PixDir != null || ProbeFile != null
+                || Chat != null
+                || !string.IsNullOrEmpty(InstallBalanceTemplate);
+        }
+
         public static Cli Parse(string[] a)
         {
             var c = new Cli();
@@ -443,6 +472,9 @@ namespace AzhuPet
                     case "--balanceconfigtest": c.BalanceConfigTest = true; break;
                     case "--configtest": c.ConfigTest = true; break;
                     case "--fixconfig": c.FixConfig = true; break;
+                    case "--updatetest": c.UpdateTest = true; break;
+                    case "--applyupdate": c.ApplyUpdate = true; break;
+                    case "--version": c.Version = true; break;
                     case "--install-balance-template": c.InstallBalanceTemplate = Nxt(a, ref i); break;
                     case "--force-bubble-on-pet": c.ForceBubbleOnPet = true; break;
                     case "--force-through": c.ForceThrough = true; break;
