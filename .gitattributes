@@ -17,6 +17,12 @@
 *.json text eol=lf
 *.csproj text eol=lf
 
+# README 配图与自检脚本（2026-09-21 加）。
+# ⚠ *.svg 也必须锁 LF —— 它同时被两个 Python 判据按「文本」读并正则匹配，
+#   行尾不统一会让「同一份文件两个落点」的老毛病在判据侧复现。
+*.svg  text eol=lf
+*.py   text eol=lf
+
 # 二进制：不许碰。
 *.exe  binary
 *.ico  binary
