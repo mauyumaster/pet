@@ -172,13 +172,14 @@ pet.exe --speaktest      # 表达链路 44 项
 pet.exe --summarytest    # 小时总结 14 项
 pet.exe --ocrtest        # OCR 隐私门 50 项
 pet.exe --fstest         # 全屏判定 10 项
-pet.exe --personatest    # 人格注入 11 项
+pet.exe --personatest    # 人格注入 12 项
 pet.exe --eyetest        # 读屏口径 10 项
 pet.exe --calibertest    # 口径一致性 39 项
 pet.exe --bubbletest     # 气泡渲染
 pet.exe --settingstest   # 设置面板版式 13 项
-pet.exe --configtest     # 主配置转义对称性 23 项
-pet.exe --updatetest     # 自更新链路 58 项（版本比较 / feed 解析 / 替换回滚）
+pet.exe --configtest     # 主配置转义对称性 29 项
+pet.exe --updatetest     # 自更新链路 111 项（版本比较 / feed 解析 / 替换回滚）
+pet.exe --spintest       # 拎起旋转 20 项（固定角加速度 / 角速度上限 / 左右半屏方向）
 pet.exe --updatediag     # 自更新**联网**诊断：代理 / feed 可达 / 地址一致 / 资产存在
 pet.exe --shellprobe     # 真机窗口真值探针
 ```

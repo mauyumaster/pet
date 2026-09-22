@@ -57,6 +57,9 @@ namespace AzhuPet
         public bool Dragging;               // 由壳写入：是否正在拖拽（拖拽时翻滚）
         public bool Airborne;               // 由壳写入：是否处于自由落体（抛物，也翻滚）
         public double SpinDrive;            // 由壳写入：横向速度(px/s,带符号)，用于给角速度；非拖拽/飞行=0
+        public double SpinAccel;            // 由壳写入：拎起时的**固定角加速度**(rad/s²,带符号)；非拖拽=0
+                                            //   ⚠ 符号由壳在**按下的那一刻**按「她在屏幕左/右半边」锁定（见 SpinDirFor），
+                                            //     不在拖拽途中重算 —— 跨中线翻转方向会看着像卡了一下。
         public bool Near;                   // 光标靠近 → 呼吸变快
         public bool Turntable;              // 转台模式（调试用）
 
@@ -85,8 +88,15 @@ namespace AzhuPet
         public double SyMin = double.MaxValue, SyMax = double.MinValue;
 
         private const double TAU = Math.PI * 2;
-        private const double SpinK = 0.006;     // 角速度增速系数：∫SpinDrive·SpinK·dt
+        private const double SpinK = 0.006;     // 角速度增速系数：∫SpinDrive·SpinK·dt（**飞行**阶段用）
         private const double SpinDecay = 1.4;   // 角速度衰减率（1/秒），越小旋转越持久
+
+        // ---- 拎起旋转（2026-09-22）：**固定角加速度** ＋ **角速度上限** ----
+        // 需求原话：「拎起桌宠时，让桌宠进行角速度迅速增加的旋转（给定一个固定的加速度）。
+        //   左半边屏幕就从右往左转，右边屏幕就从左往右转」＋「也需要限定一个最大角速度」。
+        // ⚠ 这两个是**实例字段**（不是 const）：自检要能构造不同参数去逼红。
+        public double SpinAccelMag = 16.0;      // rad/s² ≈ 917°/s² ⇒ 约 0.5 秒到上限（这就是「迅速」）
+        public double SpinMaxVel = 8.0;         // rad/s ≈ 458°/s ≈ 1.27 圈/秒（角速度上限）
         private double _spinVel;                // 当前翻滚角速度（弧度/秒，带符号）
         private double _retFrom, _retT, _retDur, _retTargetYaw;   // 回正贝塞尔动画
         private bool _retAnim;
@@ -133,9 +143,20 @@ namespace AzhuPet
                 _driftTarget = (Random_.NextDouble() * 2 - 1) * 0.16;
             }
             _drift += (_driftTarget - _drift) * Math.Min(1, dt * 1.2);
-            if (Dragging || Airborne)
+            if (Dragging)
             {
-                // 左右拖拽/自由落体：按横向速度(SpinDrive)持续给角速度，角速度随时间衰减
+                // 拎起：**固定角加速度**（SpinAccel，带符号）⇒ 角速度线性上升，撞到 SpinMaxVel 后**保持**。
+                // ⚠ 这里**故意不读 SpinDrive**：拎起来转多快不该取决于你手甩得多快，
+                //   只取决于「拎起那一刻她在屏幕哪半边」（决定方向）。手抖不该改变转速。
+                // ⚠ 也**不衰减**：有 SpinMaxVel 兜着就不必靠衰减收敛；否则「迅速增加」会被衰减吃掉，
+                //   永远到不了上限（旧口径的终端速度 = SpinK·SpinDrive/SpinDecay，是个速度的函数）。
+                _spinVel = Math.Clamp(_spinVel + SpinAccel * dt, -SpinMaxVel, SpinMaxVel);
+                _yaw += _spinVel * dt;
+            }
+            else if (Airborne)
+            {
+                // 自由落体：按横向速度(SpinDrive)持续给角速度，角速度随时间衰减
+                // ⚠ 松手瞬间 _spinVel 会**沿用拖拽末刻的角速度** ⇒ 拎起来转起来的惯性自然接得上
                 _spinVel += SpinK * SpinDrive * dt;
                 _spinVel *= Math.Exp(-SpinDecay * dt);
                 _yaw += _spinVel * dt;
@@ -220,6 +241,27 @@ namespace AzhuPet
             Frames = 0;
             LiftMin = RollMin = YawMin = PitchMin = SyMin = double.MaxValue;
             LiftMax = RollMax = YawMax = PitchMax = SyMax = double.MinValue;
+        }
+
+        /// <summary>
+        /// 拎起时的旋转方向：**左半屏 → -1（从右往左转），右半屏 → +1（从左往右转）**。
+        ///
+        /// ⚠ 符号约定的两条独立依据（想改符号之前必须先重验这两条，不要凭感觉翻）：
+        ///   ① **跟随鼠标**：`CursorYaw = FollowMax·clamp(dx/(400·DipScale), -1, 1)`，
+        ///      dx = 光标X − 她中心X ⇒ 光标在她右边时 dx&gt;0 ⇒ CursorYaw&gt;0；
+        ///      而「跟随」的语义就是转头看向光标 ⇒ **yaw 为正 = 面向屏幕右侧**。
+        ///   ② **渲染**：`Renderer.cs` 里 `_ay.Angle = p.Yaw·180/π`（绕 +Y 轴）。右手系下
+        ///      绕 +Y 转 θ 把 (0,0,1) 送到 (sinθ, 0, cosθ) ⇒ 正角转向 +X = 屏幕右。
+        /// ⇒「从左往右转」= yaw 增加 = **+1**；「从右往左转」= yaw 减小 = **-1**。
+        ///
+        /// 参数用三个裸 double（而不是 Rect）是为了**能被离线判据直接喂合成输入** ——
+        /// 依赖真屏幕、真窗口的函数没有资格失败。
+        /// ⚠ 边界：正好落在中线时判为 **+1**（右半屏）；`--spintest` 有一条专门钉这个边界。
+        /// </summary>
+        public static int SpinDirFor(double centerX, double left, double right)
+        {
+            double mid = (left + right) / 2.0;
+            return centerX < mid ? -1 : +1;
         }
 
         /// <summary>三次贝塞尔缓动（easeInOutCubic）：慢→快→慢，用于回正动画调速。</summary>

@@ -381,6 +381,7 @@ namespace AzhuPet
         public double ForcedIdle = -1;      // >=0 则强制空闲秒数（自检打盹用）
         public bool ClickTest;
         public bool DragTest;
+        public bool SpinTest;                   // --spintest：离线验「拎起旋转」（固定角加速度／角速度上限／左右半屏方向）
         public bool StatusTest;                 // --statustest：无头跑状态探针（网络/VPN/积分），写 JSON
         public bool CaliberTest;                // --calibertest：离线验积分口径（合成响应，不联网/不读凭据）
         public bool BubbleTest;                 // --bubbletest：像素验「气泡浮在宠物之外、不遮模型」
@@ -494,7 +495,7 @@ namespace AzhuPet
         ///   （自检 UpdateTest 里有一条判据专门守这里，见 UpdateTest.cs。）</summary>
         public bool AnyTest()
         {
-            return SelfTest || ClickTest || DragTest || PersonaTest
+            return SelfTest || ClickTest || DragTest || SpinTest || PersonaTest
                 || WatchTest || WatchProbe || ShellProbe
                 || FsTest || FsProbe
                 || SpeakTest || SpeakProbe || SpeakVis || LlmTest
@@ -521,6 +522,7 @@ namespace AzhuPet
                     case "--selftest": c.SelfTest = true; break;
                     case "--clicktest": c.ClickTest = true; break;
                     case "--dragtest": c.DragTest = true; break;
+                    case "--spintest": c.SpinTest = true; break;
                     case "--statustest": c.StatusTest = true; break;
                     case "--calibertest": c.CaliberTest = true; break;
                     case "--bubbletest": c.BubbleTest = true; break;

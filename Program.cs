@@ -64,6 +64,7 @@ namespace AzhuPet
             if (o.SelfTest) return SelfTest.Run(o);
             if (o.ClickTest) return ClickTest.Run(o);
             if (o.DragTest) return DragTest.Run(o);
+            if (o.SpinTest) return SpinTest.Run(o);
             if (o.Chat != null) return ChatOneShot(o.Chat);
             if (o.PersonaTest) return PersonaTest.Run(o);
             if (o.WatchTest) return WatchTest.Run(o);

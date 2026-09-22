@@ -146,6 +146,8 @@ namespace AzhuPet
         private double _dragLeft0, _dragTop0, _lastX, _lastY, _lastMoveT;
         private double _vx, _vy;
         private bool _airborne;
+        private int _spinDir;                   // 本次拎起的旋转方向：-1 = 从右往左（左半屏），+1 = 从左往右（右半屏）
+                                                //   ⚠ 在**按下的那一刻**锁定，拖拽途中不重算（跨中线翻转会看着像卡了一下）
         private double _hideTarget;
         private bool _hidden;
 
@@ -375,6 +377,16 @@ namespace AzhuPet
             _dragging = true;
             _airborne = false;
             Pose.Dragging = true; Pose.Airborne = false; Pose.SpinDrive = 0;   // 新一次拖拽从停转开始
+            // 拎起旋转：**就在这一刻锁定方向** —— 左半屏从右往左转，右半屏从左往右转（见 Pose.SpinDirFor）。
+            // ⚠ 三条口径要求：
+            //   ① 判据取「窗口**中心**」而不是光标位置 —— 她转到哪边只跟她在哪有关，
+            //      跟鼠标按在她身上哪一点无关（按左脚和按右肩不该转成两个方向）；
+            //   ② 用 `WorkArea()` 而**不是** `SystemParameters.WorkArea`（后者恒为**主**显示器）
+            //      ⇒ 多显示器下，副屏上的她仍按**副屏**的左右半边判方向；
+            //   ③ 单位对齐：Left/ActualWidth 是 DIP，×DipScale 才是物理像素，而 wa 是物理像素。
+            var waDown = WorkArea();
+            _spinDir = PoseEngine.SpinDirFor((Left + ActualWidth / 2) * DipScale, waDown.Left, waDown.Right);
+            Pose.SpinAccel = _spinDir * Pose.SpinAccelMag;   // 引擎侧再 clamp 到 ±SpinMaxVel
             _vx = _vy = 0;
             Native.GetCursorPos(out _dragOrigin);
             _dragLeft0 = Left * DipScale;
@@ -402,7 +414,9 @@ namespace AzhuPet
                 _vy = _vy * 0.55 + ivy * 0.45;
                 _lastX = nx; _lastY = ny; _lastMoveT = now;
             }
-            // 左右拖拽：把横向速度喂给引擎，它按速度给角速度、随时间衰减
+            // 横向速度仍写进 SpinDrive（飞行阶段要同一个 _vx 口径）。
+            // ⚠ 但**拖拽阶段已经不读它了** —— 拎起的转速只由固定加速度决定（Pose.Step 的 Dragging 分支）。
+            //   「甩得越快转得越快」是 2026-09-22 之前的旧口径，按需求换成了「固定加速度 ＋ 角速度上限」。
             Pose.SpinDrive = _vx;
             Left = nx / DipScale; Top = ny / DipScale;
         }
@@ -416,11 +430,19 @@ namespace AzhuPet
             ReleaseMouseCapture();
             Cursor = null;
             double dist = Math.Abs(Left * DipScale - _dragLeft0) + Math.Abs(Top * DipScale - _dragTop0);
-            if (dist < 4) { Pose.Dragging = false; Pose.Airborne = false; Pose.SpinDrive = 0; Pose.TriggerJump(); return; }   // 没动 = 点了一下 → 跳
+            if (dist < 4)
+            {
+                // 没动 = 点了一下 → 跳。⚠ 顺手清 SpinAccel：留着的话，下次万一进 Dragging 分支
+                //   会拿这次的方向/加速度继续转（陈旧值），症状是「点一下之后她开始自转」。
+                Pose.Dragging = false; Pose.Airborne = false; Pose.SpinDrive = 0; Pose.SpinAccel = 0;
+                Pose.TriggerJump(); return;
+            }
             _vx = Clamp(_vx, -3500, 3500);
             _vy = Clamp(_vy, -3500, 3500);
             _airborne = true;
-            Pose.Dragging = false; Pose.Airborne = true;    // 自由落体：角速度沿用拖拽末刻值，随衰减继续翻滚
+            // 自由落体：角速度**沿用拖拽末刻值**（_spinVel 在引擎里是连续状态，不在松手时复位）
+            //   ⇒ 拎起来转起来的惯性会自然接上，而不是「啪」地停住或跳变。
+            Pose.Dragging = false; Pose.Airborne = true; Pose.SpinDrive = 0; Pose.SpinAccel = 0;
         }
 
         private void OnRight(object sender, MouseButtonEventArgs e)
@@ -701,7 +723,7 @@ namespace AzhuPet
                 if (x - wa.Left < 44 * DipScale) x = wa.Left + 8 * DipScale;
                 else if (wa.Right - (x + wPx) < 44 * DipScale) x = wa.Right - wPx - 8 * DipScale;
                 _airborne = false;
-                Pose.Airborne = false; Pose.SpinDrive = 0;   // 落定 → 回跟随，贝塞尔曲线缓慢回正面向用户
+                Pose.Airborne = false; Pose.SpinDrive = 0; Pose.SpinAccel = 0;   // 落定 → 回跟随，贝塞尔曲线缓慢回正面向用户
                 Cfg.X = x; Cfg.Y = y;                       // 记住落点
             }
             Left = x / DipScale; Top = y / DipScale;
@@ -724,7 +746,7 @@ namespace AzhuPet
                 Pose.Near = d < 260 * DipScale;
                 if (_dragging)
                 {
-                    Pose.Dragging = true;                       // 拖拽：翻滚由 OnMove 每帧写 SpinRate（∝横向速度）
+                    Pose.Dragging = true;                       // 拖拽：转速由 Pose.SpinAccel 驱动（拎起那一刻锁定方向）
                 }
                 else
                 {
