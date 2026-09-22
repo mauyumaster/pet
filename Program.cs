@@ -210,6 +210,9 @@ namespace AzhuPet
 
                 var cfg = PetConfig.Load();
                 cfg.SizeIndex = o.SizeIndex;
+                // 自启自愈：只在注册表里那个旧目标**已不存在**时才纠正（理由见 PetConfig.HealAutostartIfOn）。
+                // 放在窗口出现之前 —— 它只碰注册表，且内部吞掉全部异常，失败不影响启动。
+                PetConfig.HealAutostartIfOn();
                 // D 档（文字档）两个开关落到进程内的静态位上（与 ScreenEye.Enabled 同一种接法）。
                 OcrEye.Enabled = cfg.OcrOn;
                 OcrEye.SendText = cfg.OcrSendText;

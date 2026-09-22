@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -120,7 +121,37 @@ namespace AzhuPet
             Check("injectNoDuplicate", kept.Count == 2 && FirstSystemText(kept) == "临时口吻",
                 "已有 system → 条数保持 " + kept.Count + "，且不覆盖显式传入的那条");
 
-            // ---- 5. 落盘 + 自验 ----
+            // ---- 5. 落点一致性：真值与发布副本是两个文件，靠手抄同步 ----
+            // ⚠ 为什么必须有这条：Resolve 按优先级只取**第一个**存在的落点。所以两份漂移时，
+            //   她读到哪一份取决于「从哪儿启动」，而运行时**一个错都不报** —— 你只会觉得
+            //   「今天她有点怪」，查起来极难。真值 `40 Projects\阿助（桌宠）\persona.md`
+            //   与发布副本 `pet\persona.md`（多一个 CC BY-NC-SA 许可头）正是这样的两个落点。
+            //   把「剥掉注释后内容不同」变成红灯，它就没法悄悄存在。
+            //   实测（2026-09-22）：两份并存、正文逐字节相同（608 字同 sha1）。
+            var sources = Persona.ExistingSources();
+            var prints = new List<string>();
+            string firstBody = null;
+            bool allSame = true;
+            foreach (string sp in sources)
+            {
+                string body, print;
+                try
+                {
+                    string raw = File.ReadAllText(sp, Encoding.UTF8).Replace("\r\n", "\n").Replace("\r", "\n");
+                    body = Regex.Replace(Persona.StripComments(Persona.StripFrontmatter(raw)), @"\n{3,}", "\n\n").Trim();
+                    print = Fingerprint(body);
+                }
+                catch (Exception ex) { body = null; print = "读取失败：" + ex.Message; allSame = false; }
+                if (firstBody == null) firstBody = body;
+                else if (body != firstBody) allSame = false;
+                prints.Add(Short(sp) + "=" + print);
+            }
+            Check("sourcesConsistent", allSame,
+                sources.Count <= 1
+                    ? "只有一个落点，无从漂移：" + (sources.Count == 1 ? Short(sources[0]) : "（一个都没有）")
+                    : "落点 " + sources.Count + " 个 ｜ " + string.Join(" ／ ", prints));
+
+            // ---- 6. 落盘 + 自验 ----
             var report = new Dictionary<string, object>
             {
                 ["ok"] = ok,
@@ -162,6 +193,27 @@ namespace AzhuPet
             // 读不到结论就不许报成功（「总数变小 ＋ 全绿」是最危险的假通过）。
             if (text.Length == 0) { Console.WriteLine("  [x] 正文为空 —— 读不到内容，判为 FAIL"); ok = false; }
             return ok ? 0 : 1;
+        }
+
+        /// <summary>正文指纹（sha1 前 12 位十六进制 ＋ 字数）。用于判断两份 persona.md 的内容是否一致。</summary>
+        private static string Fingerprint(string body)
+        {
+            if (body == null) return "(null)";
+            using (var sha = SHA1.Create())
+            {
+                byte[] h = sha.ComputeHash(Encoding.UTF8.GetBytes(body));
+                var sb = new StringBuilder();
+                for (int i = 0; i < 6; i++) sb.Append(h[i].ToString("x2"));
+                return body.Length + "字/" + sb.ToString();
+            }
+        }
+
+        /// <summary>把长路径压成「…\40 Projects\阿助（桌宠）\persona.md」，好让红灯一眼看出是哪一份。</summary>
+        private static string Short(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return "(null)";
+            int i = path.IndexOf("40 Projects", StringComparison.OrdinalIgnoreCase);
+            return i > 0 ? "…\\" + path.Substring(i) : path;
         }
 
         private static List<string> Hits(string s, string[] words)

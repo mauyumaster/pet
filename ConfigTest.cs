@@ -182,6 +182,28 @@ namespace AzhuPet
                 Check(new string('\\', 400).Length > 64,
                     "自检：本用例的素材确实越过了垃圾线（> 64）",
                     "素材反斜杠 = 400");
+
+                // ---- 开机自启自愈（纯函数 AutostartHealTarget）----
+                // ⚠ 守的是「两个运行形态不打架」：她既能从开发树的 bin\Release\... 跑，也能从
+                //   固定安装目录（D:\AzhuPet）跑，两者都能开自启。若自愈无条件跟随当前进程，
+                //   两个形态就会来回抢那个注册表值，而症状只是「开机后起来的怎么是旧版本」
+                //   —— 极难查。所以「旧目标还在就绝不改」是这条逻辑的核心，必须被锁住。
+                const string meExe = @"D:\AzhuPet\pet.exe";
+                const string meQuoted = "\"" + @"D:\AzhuPet\pet.exe" + "\"";
+                const string oldQuoted = "\"D:\\old\\pet.exe\"";
+
+                Check(PetConfig.AutostartHealTarget(null, meExe, p => true) == null,
+                    "自愈：没开自启时不擅自开", "current=null → 不动");
+                Check(PetConfig.AutostartHealTarget(oldQuoted, meExe, p => true) == null,
+                    "自愈：旧目标仍存在时不抢（两形态可共存）", "旧目标 alive → 不动");
+                Check(PetConfig.AutostartHealTarget(oldQuoted, meExe, p => false) == meQuoted,
+                    "自愈：旧目标已消失时纠正到当前 exe", "旧目标 dead → 写新值");
+                Check(PetConfig.AutostartHealTarget(meQuoted, meExe, p => true) == null,
+                    "自愈：已指向当前 exe 时不动（幂等）", "同值 → 不动");
+                Check(PetConfig.AutostartHealTarget(oldQuoted, null, p => false) == null,
+                    "自愈：拿不到自身路径时不写", "me=null → 不动");
+                Check(PetConfig.AutostartHealTarget("", meExe, p => true) == null,
+                    "自愈：空值不触发", "空串 → 不动");
             }
             catch (Exception ex)
             {

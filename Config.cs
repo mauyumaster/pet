@@ -311,6 +311,61 @@ namespace AzhuPet
             }
             catch { return false; }
         }
+
+        /// <summary>
+        /// 自启自愈：**仅当注册表里记的那个 exe 文件已经不存在时**，把它改成当前这个 exe。
+        ///
+        /// ⚠ 为什么条件卡得这么死（只在旧目标不存在时才动）：
+        ///   她有两种运行形态 —— 开发树的 `bin\Release\...` 与固定安装目录（如 D:\AzhuPet）。
+        ///   两者都能启动、都能开自启。若无条件「跟随当前进程」，两个形态就会互相抢那个
+        ///   注册表值：谁后启动谁写赢，自启目标在两者之间来回漂移，而用户完全看不见
+        ///   （症状是「开机后起来的怎么是旧版本」）。
+        ///   只在旧目标**真的没了**（被搬走、被删、被 dotnet clean 清掉）时才纠正 ——
+        ///   这既是「自愈」的本意，也不会让两个形态打架。
+        ///
+        /// 背景：这条自愈是为「给她一个固定安装位置」配套的。此前自启写的是构建产物路径
+        ///   （…\bin\Release\net9.0-windows10.0.19041.0\pet.exe），一次 dotnet clean 或
+        ///   一次 TFM 变更就静默失效，只在注册表里留一个指向不存在文件的死值。
+        /// </summary>
+        public static void HealAutostartIfOn()
+        {
+            try
+            {
+                string me = Environment.ProcessPath;
+                if (string.IsNullOrEmpty(me)) return;
+
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, true))
+                {
+                    if (k == null) return;
+                    string cur = k.GetValue(RunName) as string;
+                    string target = AutostartHealTarget(cur, me, File.Exists);
+                    if (target == null) return;                 // 不动（绝大多数情况走这里）
+                    k.SetValue(RunName, target);                // 旧目标没了 ⇒ 纠正
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 纯函数：算出注册表**应该**被改成什么值；返回 null = 不要动。
+        ///
+        /// ⚠ 抽成纯函数是为了它能被**判据逼红**。靠真注册表验的判据有两个毛病：
+        ///   ① 危险 —— 会真去改用户的开机自启；
+        ///   ② 覆盖不全 —— 「旧目标还在所以不该动」这类**正面**场景没法构造。
+        ///   exists 由调用方传进来（而不是内部直接调 File.Exists），就是为了判据能造任意组合。
+        /// </summary>
+        public static string AutostartHealTarget(string currentValue, string me, Func<string, bool> exists)
+        {
+            if (string.IsNullOrEmpty(me)) return null;              // 不知道自己是谁 ⇒ 别乱写
+            string want = "\"" + me + "\"";
+            if (string.IsNullOrEmpty(currentValue)) return null;    // 没开自启 ⇒ 不擅自开
+            if (currentValue == want) return null;                  // 已经对
+
+            string old = currentValue.Trim().Trim('"');
+            if (string.IsNullOrEmpty(old)) return want;             // 值是空的 ⇒ 直接纠正
+            if (exists != null && exists(old)) return null;         // 旧目标还在 ⇒ 不抢（见 HealAutostartIfOn）
+            return want;                                            // 旧目标没了 ⇒ 纠正
+        }
     }
 
     internal sealed class Cli

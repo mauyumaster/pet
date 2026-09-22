@@ -360,9 +360,19 @@ namespace AzhuPet
                             if (gi >= 0)
                             {
                                 string target = t.Substring(gi + 5).Trim();
-                                if (target.Length > 0 && target[0] != ':') gotos.Add(target);
+                                // ⚠ 归一化掉可选的 ':'（`goto failed` 与 `goto :failed` 都合法）。
+                                //   这里原来写的是「跳过以 : 开头的目标」—— 那等于让**所有**带冒号的
+                                //   goto 悄悄溜过判据。deliver.cmd 恰好全篇用带冒号写法，于是它的这条
+                                //   判据一个 goto 都没检查，却报「0 个 goto 全部有目标」并全绿。
+                                //   ⚠ 空转的判据比没有判据更坏：它看起来在守，其实什么都没守。
+                                if (target.StartsWith(":", StringComparison.Ordinal)) target = target.Substring(1).Trim();
+                                if (target.Length > 0) gotos.Add(target);
                             }
                         }
+                        // 把「有没有对象可查」本身也变成判据 —— 否则上面那条在空集上恒真。
+                        Check(gotos.Count > 0,
+                            name + " 能提出至少一个 goto（否则「目标都存在」是空转）",
+                            gotos.Count + " 个");
                         var missing = new List<string>();
                         foreach (string g in gotos)
                             if (!labels.Contains(g) && !g.Equals("eof", StringComparison.OrdinalIgnoreCase)

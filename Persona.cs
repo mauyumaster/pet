@@ -25,8 +25,41 @@ namespace AzhuPet
         private static readonly Regex FrontmatterRe = new Regex(
             @"\A\s*---\r?\n[\s\S]*?\r?\n---[ \t]*\r?\n", RegexOptions.Compiled);
 
-        /// <summary>库里那份真值的相对落点（相对仓库根）。</summary>
-        private static readonly string[] RelativePath = { "40 Projects", "阿助（桌宠）", "persona.md" };
+        /// <summary>库里那份真值的文件名。</summary>
+        private const string PersonaFileName = "persona.md";
+
+        /// <summary>真值所在的上一层锚点（相对仓库根）。</summary>
+        private const string ProjectsAnchor = "40 Projects";
+
+        /// <summary>
+        /// 项目目录名的**候选**（真值所在处，按优先级排列）。
+        ///
+        /// ⚠⚠ 这里留一段**误判的自述，给以后的人（包括我）**：
+        ///   2026-09-22 我看到这行是「阿助（桌宠）」，而 `40 Projects\` 下还有个
+        ///   「阿助娘化形象」目录，就去查 `阿助娘化形象\persona.md` —— File not found，
+        ///   于是断言「目录名写错了 ⇒ 这条路从来没成功过」，还据此动手"修"了代码。
+        ///   结果**负对照没红**，追下去才发现：`40 Projects\阿助（桌宠）\persona.md`
+        ///   **真的存在**（2605 B，那是她的「人设集」目录，里面有 她是谁.md、阿助（桌宠）.md）。
+        ///   原来那句一直是**对的**，错的是我的搜索。
+        ///   ⇒ 老坑重演：「我在本机没找到」被升级成了「它不存在」。
+        ///     **搜索返回空不是证据，只说明我搜的路径不对。**
+        /// 所以这里**保持原优先级**：「阿助（桌宠）」是真值，新目录名只作后备韧性。
+        /// </summary>
+        private static readonly string[] ProjectDirNames = { "阿助（桌宠）", "阿助娘化形象" };
+
+        /// <summary>
+        /// 真值在项目目录内的相对子路径候选，**顺序即优先级**。
+        /// 第 1 项是真值；第 2 项是发布副本（带 CC BY-NC-SA 许可头，见 pack-release.cmd 的说明）。
+        /// ⚠ 两份的**正文目前逐字节相同**（剥掉 frontmatter 与注释后 sha1 一致，
+        ///   2026-09-22 实测 608 字；raw 差 156 B 就是那个许可头）。
+        ///   但它们是**两个落点、靠手抄同步** —— 一旦漂移，「她是谁」就会取决于从哪儿启动，
+        ///   而运行时不报任何错。防漂移判据见 PersonaTest 的 sourcesConsistent。
+        /// </summary>
+        private static readonly string[][] SubPathCandidates =
+        {
+            new[] { PersonaFileName },
+            new[] { "pet", PersonaFileName },
+        };
 
         /// <summary>
         /// 找不到 persona.md 时的骨架。⚠ 这是**副本，不是真值** —— 一旦被用上就是一处分叉，
@@ -61,7 +94,16 @@ namespace AzhuPet
             string path = Resolve(explicitPath);
             if (path == null)
             {
-                UseSkeleton("找不到 persona.md（已从 exe 目录与工作目录各向上找 8 层，并查了 --persona 与 AZHU_PERSONA）。");
+                // ⚠ 诊断信息必须**可执行**：只说「找不到」没用，要写清找过哪些具体候选，
+                //   否则下次她变得不像她时，还得靠人重读源码才知道该把文件放哪儿。
+                //   候选列表从常量算出来，不手写 —— 免得改了候选、诊断还说着旧的。
+                List<string> subs = new List<string>();
+                foreach (string[] s in SubPathCandidates) subs.Add(string.Join("\\", s));
+                UseSkeleton("找不到 persona.md。查过 --persona 与 AZHU_PERSONA；也试过两个起点"
+                    + "（exe 目录 " + AppDomain.CurrentDomain.BaseDirectory
+                    + " ／ 工作目录 " + Directory.GetCurrentDirectory() + "）下的裸 " + PersonaFileName
+                    + "，以及各自向上 8 层内的 " + ProjectsAnchor + "\\{"
+                    + string.Join("|", ProjectDirNames) + "}\\{" + string.Join("|", subs) + "}。");
                 return;
             }
             SourcePath = path;
@@ -113,38 +155,99 @@ namespace AzhuPet
             return string.IsNullOrEmpty(text) ? "" : CommentRe.Replace(text, "");
         }
 
-        /// <summary>按「显式参数 &gt; 环境变量 &gt; 向上搜仓库」定位 persona.md。</summary>
+        /// <summary>按「显式参数 &gt; 环境变量 &gt; 候选落点」定位 persona.md。</summary>
         public static string Resolve(string explicitPath)
         {
             if (!string.IsNullOrEmpty(explicitPath) && File.Exists(explicitPath)) return explicitPath;
             string env = Environment.GetEnvironmentVariable("AZHU_PERSONA");
             if (!string.IsNullOrEmpty(env) && File.Exists(env)) return env;
 
-            // 两个起点：exe 目录（正常启动）＋ 工作目录（从源码树跑自检时）。
-            // 与 Cli.ResolveModel 同一套路 —— 少了第二个，从别处跑 --personatest 就得每次手写全路径。
-            // ⚠ 发布形态（zip 解压后 exe 与 persona.md 同目录）也要能找到：Release 里没有库结构，
-            //   「向上搜仓库」永远撞不到 —— 所以先查 exe 目录／工作目录下的**裸 persona.md**。
-            //   这一步放最前：与 exe 同目录的文件优先于仓库深处的同名文件（部署的比源码树的更「真」）。
-            foreach (string start in new[] { AppDomain.CurrentDomain.BaseDirectory, Directory.GetCurrentDirectory() })
+            foreach (string p in EnumerateCandidates())
+                if (File.Exists(p)) return p;
+            return null;
+        }
+
+        /// <summary>
+        /// 所有候选落点（**含不存在的**），按优先级排列。Resolve 取第一个存在的。
+        ///
+        /// 两个起点：exe 目录（正常启动）＋ 工作目录（从源码树跑自检时）。
+        /// 与 Cli.ResolveModel 同一套路 —— 少了第二个，从别处跑 --personatest 就得每次手写全路径。
+        /// ⚠ 发布形态（zip 解压后 exe 与 persona.md 同目录）也要能找到：Release 里没有库结构，
+        ///   「向上搜仓库」永远撞不到 —— 所以先列 exe 目录／工作目录下的**裸 persona.md**。
+        ///   这一步放最前：与 exe 同目录的文件优先于仓库深处的同名文件（部署的比源码树的更「真」）。
+        ///
+        /// ⚠ 把它从 Resolve 里抽出来，是为了 ExistingSources() 能复用同一份枚举 ——
+        ///   否则「解析用一套顺序、检查用另一套」，判据查的和实际读的就不是同一个东西了。
+        /// </summary>
+        public static List<string> EnumerateCandidates()
+        {
+            var list = new List<string>();
+            Action<string> add = delegate (string p)
+            {
+                if (string.IsNullOrEmpty(p)) return;
+                string full;
+                try { full = Path.GetFullPath(p); } catch { return; }
+                if (!list.Exists(delegate (string x) { return string.Equals(x, full, StringComparison.OrdinalIgnoreCase); }))
+                    list.Add(full);
+            };
+
+            string[] starts = { AppDomain.CurrentDomain.BaseDirectory, Directory.GetCurrentDirectory() };
+
+            // 第 1 轮：两个起点下的**裸** persona.md，必须单独成轮且放最前。
+            // ⚠ 注释里那句「与 exe 同目录的文件优先于仓库深处的同名文件」就是这一轮的意义。
+            //   发布形态（zip 解压后 exe 与 persona.md 同目录）全靠它 —— 一旦让「向上搜」
+            //   插到前面，只要安装目录附近存在一个 40 Projects，她就会去读那儿的人格。
+            //   （这一轮是我 2026-09-22 重构时差点弄丢的语义：当时把两轮并成了一轮交叉执行。）
+            foreach (string start in starts)
             {
                 if (string.IsNullOrEmpty(start)) continue;
-                string bare = Path.Combine(start.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), RelativePath[2]);
-                if (File.Exists(bare)) return bare;
+                string d0 = start.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                add(Path.Combine(d0, PersonaFileName));
             }
-            foreach (string start in new[] { AppDomain.CurrentDomain.BaseDirectory, Directory.GetCurrentDirectory() })
+
+            // 第 2 轮：向上搜「项目目录内的相对落点」（开发布局用）。
+            foreach (string start in starts)
             {
                 if (string.IsNullOrEmpty(start)) continue;
                 string d = start.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
                 for (int i = 0; i < 8 && !string.IsNullOrEmpty(d); i++)
                 {
-                    string p = Path.Combine(d, RelativePath[0], RelativePath[1], RelativePath[2]);
-                    if (File.Exists(p)) return p;
+                    // 目录名 × 子路径 逐个试：两个维度里任一写死，这条路就静默失效（见 ProjectDirNames）。
+                    foreach (string dirName in ProjectDirNames)
+                    {
+                        string projDir = Path.Combine(d, ProjectsAnchor, dirName);
+                        foreach (string[] sub in SubPathCandidates)
+                        {
+                            string[] full = new string[sub.Length + 1];
+                            full[0] = projDir;
+                            Array.Copy(sub, 0, full, 1, sub.Length);
+                            add(Path.Combine(full));
+                        }
+                    }
                     string up = Path.GetDirectoryName(d);
                     if (string.IsNullOrEmpty(up) || up == d) break;
                     d = up;
                 }
             }
-            return null;
+            return list;
+        }
+
+        /// <summary>
+        /// 所有**实际存在**的 persona.md 落点（真值 ＋ 发布副本 ＋ 裸文件），按优先级排列。
+        ///
+        /// ⚠ 为什么专门有这个：真值（她的「人设集」目录 `40 Projects\阿助（桌宠）\persona.md`）
+        ///   与发布副本（`pet\persona.md`，多一个 CC BY-NC-SA 许可头）是**两个落点、靠手抄同步**。
+        ///   一旦漂移，「她是谁」就取决于从哪儿启动 —— 而运行时**一个错都不报**，
+        ///   你只会觉得「今天她有点怪」，查起来极难。所以让 --personatest 把它判红。
+        ///   实测（2026-09-22）：两份并存且正文逐字节相同（剥 frontmatter/注释后 608 字同 sha1）。
+        /// </summary>
+        public static List<string> ExistingSources()
+        {
+            var found = new List<string>();
+            foreach (string p in EnumerateCandidates())
+                if (File.Exists(p)) found.Add(p);
+            return found;
         }
 
         /// <summary>
