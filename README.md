@@ -179,7 +179,7 @@ pet.exe --bubbletest     # 气泡渲染
 pet.exe --settingstest   # 设置面板版式 13 项
 pet.exe --configtest     # 主配置转义对称性 29 项
 pet.exe --updatetest     # 自更新链路 111 项（版本比较 / feed 解析 / 替换回滚）
-pet.exe --spintest       # 拎起旋转 20 项（固定角加速度 / 角速度上限 / 左右半屏方向）
+pet.exe --spintest       # 拎起旋转 35 项（固定角加速度 / 角速度上限 / 左右半屏方向 / 跨半屏换向 / 壳侧接线）
 pet.exe --updatediag     # 自更新**联网**诊断：代理 / feed 可达 / 地址一致 / 资产存在
 pet.exe --shellprobe     # 真机窗口真值探针
 ```

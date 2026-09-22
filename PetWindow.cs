@@ -56,6 +56,7 @@ namespace AzhuPet
         //   Down>0 而窗口没位移 ⇒ 卡在 OnMove/坐标。
         public int DownCount, MoveCount, UpCount;
         public int DownRejectedHit, DownRejectedLock;
+        public int SpinFlipCount;       // 拖拽途中「跨半屏换向」发生了几次（诊断 + 端到端判据读它）
         public bool Dragging { get { return _dragging; } }
 
         // ---- 测试可读：气泡几何（**物理像素**，与截图坐标系一致）----
@@ -147,7 +148,8 @@ namespace AzhuPet
         private double _vx, _vy;
         private bool _airborne;
         private int _spinDir;                   // 本次拎起的旋转方向：-1 = 从右往左（左半屏），+1 = 从左往右（右半屏）
-                                                //   ⚠ 在**按下的那一刻**锁定，拖拽途中不重算（跨中线翻转会看着像卡了一下）
+                                                //   ⚠ 按下时定初值；拖拽途中**跨过半屏会翻**（带迟滞，见 OnMove）。
+                                                //     翻的时候**只改 Pose.SpinAccel**、不碰角速度 ⇒ 引擎那边角速度连续演化。
         private double _hideTarget;
         private bool _hidden;
 
@@ -419,6 +421,26 @@ namespace AzhuPet
             //   「甩得越快转得越快」是 2026-09-22 之前的旧口径，按需求换成了「固定加速度 ＋ 角速度上限」。
             Pose.SpinDrive = _vx;
             Left = nx / DipScale; Top = ny / DipScale;
+
+            // ---- 跨半屏换向（2026-09-22 追加需求）：角速度**不突变**，只让加速度反向 ----
+            // ⚠⚠ 这里**只写 `Pose.SpinAccel`**、绝不碰角速度 —— `_spinVel` 是引擎里的连续状态。
+            //   换向后它会先被原加速度刹到 0、再由反向加速度从 0 带起来，整段 Δω 逐帧恒为 A·dt，
+            //   一次跳变都没有。**这就是「不突变」的全部实现方式。**
+            //   哪怕只是为了「马上换方向」而图省事写一句 `_spinVel = 0`，那一帧 Δω 就是 A·dt 的几十倍，
+            //   `--spintest` 的 I 组会立刻变红。
+            // ⚠ 位置必须在**更新 Left/Top 之后**：判据要用她的**新**位置，用旧位置会晚一帧才换向。
+            //   同理，跨到**另一台显示器**时这里也自然跟着换（WorkArea() 取的是她当前所在那块屏）。
+            // ⚠ 迟滞（Pose.SpinHystPx）是必须的：判据取窗口中心，它在中线附近随手抖会来回越界，
+            //   无迟滞时加速度以帧率翻转 ⇒ 净增量正负相消 ⇒「贴在中线附近僵住不转」。
+            var waMove = WorkArea();
+            int dirNow = PoseEngine.SpinDirForHyst(
+                (Left + ActualWidth / 2) * DipScale, waMove.Left, waMove.Right, _spinDir, Pose.SpinHystPx);
+            if (dirNow != _spinDir)
+            {
+                _spinDir = dirNow;
+                Pose.SpinAccel = _spinDir * Pose.SpinAccelMag;   // ← 换向的**唯一**动作：改加速度符号
+                SpinFlipCount++;
+            }
         }
 
         private void OnUp(object sender, MouseButtonEventArgs e)

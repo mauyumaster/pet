@@ -58,8 +58,12 @@ namespace AzhuPet
         public bool Airborne;               // 由壳写入：是否处于自由落体（抛物，也翻滚）
         public double SpinDrive;            // 由壳写入：横向速度(px/s,带符号)，用于给角速度；非拖拽/飞行=0
         public double SpinAccel;            // 由壳写入：拎起时的**固定角加速度**(rad/s²,带符号)；非拖拽=0
-                                            //   ⚠ 符号由壳在**按下的那一刻**按「她在屏幕左/右半边」锁定（见 SpinDirFor），
-                                            //     不在拖拽途中重算 —— 跨中线翻转方向会看着像卡了一下。
+                                            //   ⚠ 符号初值在**按下的那一刻**按「她在屏幕左/右半边」定（见 SpinDirFor）；
+                                            //     拖拽途中**跨过半屏就整体反号**（见 SpinDirForHyst）。
+                                            //   ⚠⚠ 换向时壳侧**只改这一个字段**、绝不碰角速度本身 ⇒ 角速度连续：
+                                            //     先被原加速度刹到 0，再由反向加速度从 0 带起来。这就是「不突变」的全部机制 ——
+                                            //     谁要是在换向处顺手写一句 `_spinVel = 0`（或 `= -_spinVel`），
+                                            //     那一帧 Δω 会达到 A·dt 的几十倍，`--spintest` 的 I 组当场变红。
         public bool Near;                   // 光标靠近 → 呼吸变快
         public bool Turntable;              // 转台模式（调试用）
 
@@ -91,13 +95,28 @@ namespace AzhuPet
         private const double SpinK = 0.006;     // 角速度增速系数：∫SpinDrive·SpinK·dt（**飞行**阶段用）
         private const double SpinDecay = 1.4;   // 角速度衰减率（1/秒），越小旋转越持久
 
-        // ---- 拎起旋转（2026-09-22）：**固定角加速度** ＋ **角速度上限** ----
+        // ---- 拎起旋转（2026-09-22）：**固定角加速度** ＋ **角速度上限** ＋ **跨半屏换向** ----
         // 需求原话：「拎起桌宠时，让桌宠进行角速度迅速增加的旋转（给定一个固定的加速度）。
-        //   左半边屏幕就从右往左转，右边屏幕就从左往右转」＋「也需要限定一个最大角速度」。
-        // ⚠ 这两个是**实例字段**（不是 const）：自检要能构造不同参数去逼红。
-        public double SpinAccelMag = 16.0;      // rad/s² ≈ 917°/s² ⇒ 约 0.5 秒到上限（这就是「迅速」）
-        public double SpinMaxVel = 8.0;         // rad/s ≈ 458°/s ≈ 1.27 圈/秒（角速度上限）
+        //   左半边屏幕就从右往左转，右边屏幕就从左往右转」＋「也需要限定一个最大角速度」
+        //   ＋（同日追加）「拎起桌宠跨越屏幕半边时，角速度不进行突变而是让加速度反向」
+        //   ＋（同日追加）「让角速度上限提高」。
+        // ⚠ 这三个是**实例字段**（不是 const）：自检要能构造不同参数去逼红。
+        //
+        // ⚠⚠ **加速度与上限是耦合的**：到顶时间 = SpinMaxVel / SpinAccelMag。
+        //   只提上限会让「迅速增加」被拉长（8→12 而不动加速度 ⇒ 0.75 秒才到顶，手感反而变钝），
+        //   所以 2026-09-22 提高上限时**两个一起抬**，把配比 0.5 秒原样保住。
+        //   改这里的任一个之前，先重算这个比值 —— `--spintest` 的 J 组就是它的守门人。
+        public double SpinAccelMag = 24.0;      // rad/s² ≈ 1375°/s²（原 16；随上限同步提高，保住 0.5 秒到顶）
+        public double SpinMaxVel = 12.0;        // rad/s ≈ 688°/s ≈ 1.91 圈/秒（原 8，2026-09-22 按要求提高）
+        public double SpinHystPx = 40.0;        // 跨半屏换向的**迟滞带半宽**（物理像素，与 WorkArea 同单位）
+                                                //   ⇒ 中心要越过中线 40px 才换向，退回来 40px 才换回。
+                                                //   ⚠ 没有它，中心贴中线时的抖动会让加速度以帧率在 ±A 之间翻 ——
+                                                //     角速度仍连续（`_spinVel` 没被碰），但每帧增量正负相消，
+                                                //     表现是「她贴在中线附近僵住不转」。带宽一给，抖动就被吸收。
+                                                //   ⚠ 单位是**物理像素**而非 DIP：跨不同缩放的屏时，「离中线多远算翻」保持同一绝对距离。
         private double _spinVel;                // 当前翻滚角速度（弧度/秒，带符号）
+                                                //   ⚠⚠ 这是**连续状态**：任何换向/交接都不许直接写它（唯一例外是回正分支的归零）。
+                                                //     判据一律用 `p.Yaw` 差分反推 ω，不读这个字段（读它就等于拿实现的输出当输入）。
         private double _retFrom, _retT, _retDur, _retTargetYaw;   // 回正贝塞尔动画
         private bool _retAnim;
         private double _t, _yaw, _drift, _driftTarget, _driftTimer = 4, _jump = -1, _dozeTarget;
@@ -262,6 +281,26 @@ namespace AzhuPet
         {
             double mid = (left + right) / 2.0;
             return centerX < mid ? -1 : +1;
+        }
+
+        /// <summary>
+        /// 拖拽途中的方向判定：**带迟滞** —— 只有明确越过「中线 ± band」才换向，回到带内时沿用 currentDir。
+        ///
+        /// 为什么要迟滞：判据取的是**窗口中心**，它在中线附近会随手抖来回越界。无迟滞时方向以帧率翻转，
+        /// 加速度在 ±A 之间高频跳 —— 角速度虽然仍连续（`_spinVel` 没被碰），但每帧的净增量正负相消，
+        /// 表现是「她贴在中线附近僵住不转」。带宽一给，抖动就被吸收。
+        ///
+        /// ⚠ `band = 0` 时与 <see cref="SpinDirFor"/> **逐点一致**（`--spintest` 有一条专门钉这个退化等价）。
+        /// ⚠ `currentDir` 不是 ±1（首次调用传 0）时，带内按中线判 —— 边界口径与 SpinDirFor 相同（正好在中线判 +1）。
+        /// </summary>
+        public static int SpinDirForHyst(double centerX, double left, double right, int currentDir, double band)
+        {
+            double mid = (left + right) / 2.0;
+            double b = band > 0 ? band : 0;
+            if (centerX < mid - b) return -1;                       // 明确在左 ⇒ 从右往左
+            if (centerX > mid + b) return +1;                       // 明确在右 ⇒ 从左往右
+            if (currentDir == -1 || currentDir == 1) return currentDir;   // 迟滞带内 ⇒ 不翻
+            return centerX < mid ? -1 : +1;                         // 方向未定 ⇒ 按中点判
         }
 
         /// <summary>三次贝塞尔缓动（easeInOutCubic）：慢→快→慢，用于回正动画调速。</summary>
