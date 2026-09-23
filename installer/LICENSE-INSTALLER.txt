@@ -1,0 +1,63 @@
+﻿阿助桌宠（AzhuPet）许可说明
+================================
+
+本软件包含两部分，分别适用不同的许可协议 ——
+这不是笔误，是刻意的：**代码随便用，但她的「人格」不作商业用途**。
+
+【一】程序代码 —— MIT License
+    你可以自由使用、修改、分发（含商业用途），只需保留版权声明。
+    全文见下。
+
+【二】人格文本（persona.md）—— CC BY-NC-SA 4.0
+    这是「阿助是谁」的那份文本，程序启动时读的就是它。
+    你可以署名、非商业地使用与改编；改编作品必须以相同协议分发。
+    全文与摘要链接见下。
+
+安装本软件即表示你已阅读并同意上述两份协议。
+
+
+---------------- 以下为 MIT License 全文 ----------------
+
+MIT License
+
+Copyright (c) 2026 mauyumaster
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+---------------- 人格文本：CC BY-NC-SA 4.0 ----------------
+
+阿助的人格文本（persona.md）以 Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International 授权。
+
+协议全文：
+  https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode.zh-hans
+协议摘要：
+  https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh
+
+你可以自由地共享（复制、发行）与改编，条件是：
+
+  署名（BY）
+      保留作者署名，并注明是否作了修改。
+
+  非商业（NC）
+      不得用于商业目的。想商业使用请联系作者。
+
+  相同方式共享（SA）
+      改编作品必须以相同协议分发，不得加更严格的限制。

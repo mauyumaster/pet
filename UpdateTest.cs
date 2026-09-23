@@ -525,15 +525,20 @@ namespace AzhuPet
             //   这里把「仓库里那份 version.json」真的读出来比对 —— 它是会被提交、会被 raw URL 服务的那个文件。
             try
             {
-                // 从 exe 目录往上找仓库根的 version.json（发布目录里没有它）
-                string dir = AppDomain.CurrentDomain.BaseDirectory;
+                // 从**仓库根**取 version.json —— 复用 FindRepoRoot()，不再自己数层数。
+                // ⚠ 原来这里写的是「从 exe 目录往上找 6 层」，而 FindRepoRoot 找 .git 用的是
+                //   7 层。同一个东西两处各有一套答案，深度还不一致。实测后果（2026-09-23）：
+                //   在 bin\Release\...\win-x64\publish\ 下跑 —— 这是**仓库树内**的深层目录 ——
+                //   .git 找得到、version.json 找不到 ⇒ 这一组 6 条判据**静默不执行**，
+                //   只留一条 [skip]，总数从 111 掉到 105，而输出里 FAIL 依旧是 0。
+                //   ⇒ 判据在深层目录下悄悄少跑几条，比判据变红难发现得多。
+                //   修法不是把 6 改成 7（那只是让两个数字暂时相等），而是收敛成一个来源。
+                string repoRootForFeed = FindRepoRoot();
                 string feedPath = null;
-                for (int up = 0; up < 6 && dir != null; up++)
+                if (repoRootForFeed != null)
                 {
-                    string cand = Path.Combine(dir, "version.json");
-                    if (File.Exists(cand)) { feedPath = cand; break; }
-                    var parent = Directory.GetParent(dir);
-                    dir = parent == null ? null : parent.FullName;
+                    string cand = Path.Combine(repoRootForFeed, "version.json");
+                    if (File.Exists(cand)) feedPath = cand;
                 }
                 if (feedPath == null)
                 {
