@@ -1,3 +1,7 @@
+# ⚠ 本文件自身也必须锁 LF：core.autocrlf=true 下缺这条时，git 每次 checkout 都想把它
+#   转成 CRLF ⇒ 它**永远显示为已修改** —— 正是这个文件一开头要治的那种病，先治自己。
+/.gitattributes text eol=lf
+
 # 行尾纪律 —— 这不是风格问题，是可执行性/一致性问题。
 #
 # 起因（2026-09-21）：pack-release.cmd 用 `>` / `>>` 生成 version.json，
@@ -22,6 +26,12 @@
 #   行尾不统一会让「同一份文件两个落点」的老毛病在判据侧复现。
 *.svg  text eol=lf
 *.py   text eol=lf
+
+# 注入页面的钩子脚本，靠 tools/hook_check.js 用 node 真跑一遍（2026-09-25 加）。
+# ⚠ 这是仓库里**唯一被程序读取并执行**的 js，与 .cmd 属于同一类风险：行尾在仓库与工作区
+#   之间来回转换只会制造假改动（见本文件开头 version.json 那条）。core.autocrlf=true 下
+#   缺这条规则时 git 每次 checkout 都想把它改成 CRLF ⇒ 它**永远显示为已修改**。
+tools/*.js text eol=lf
 
 # 二进制：不许碰。
 *.exe  binary

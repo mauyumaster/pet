@@ -145,6 +145,43 @@ namespace AzhuPet
                 Check(CredentialCapture.FormatSeenForUser(null) == "" && CredentialCapture.FormatSeenForUser(new string[0]) == "",
                     "负对照：没有请求时给空串（界面据此换另一句提示，而不是显示空标题）", ref pass, ref fail);
 
+                // ---- 抄到的那份请求**自己**成不成功：401 分家的判据 ----
+                // ⚠⚠ 2026-09-25 二修之后仍卡在 401 时才想通的那件事：此前从来没问过「网站自己发这个请求
+                //   到底成功了没有」。钩子只抄**第一个**命中且不带响应码 ⇒ 抄到的可能是一次**失败**请求
+                //   （页面刚打开、会话还没就绪），而页面上余额又确实显示着（那次成功的发得更晚，被
+                //   「只记第一个命中」挡住了）。两种原因修法**相反**，而此前长得一模一样。
+                Check(hook.Contains("status:0") && hook.Contains("loadend"),
+                    "钩子给请求留了状态码位，且 fetch 与 XHR 两条路都会回填它", ref pass, ref fail);
+                Check(hook.Contains("__azhuCapObj"),
+                    "钩子记住「谁占着定稿位」—— 这样 2xx 才能抢走它，且已成功的定稿不会被后来的失败请求降级",
+                    ref pass, ref fail);
+
+                string hitJson = "{\"url\":\"https://www.workbuddy.cn/billing/meter/get-user-resource\","
+                    + "\"method\":\"POST\",\"headers\":{\"x-user-id\":\"u\"},\"body\":\"{}\",\"ua\":\"UA\","
+                    + "\"href\":\"https://www.workbuddy.cn/dashboard\",\"org\":\"https://www.workbuddy.cn\","
+                    + "\"lang\":\"zh-CN\",\"status\":200}";
+                var capOk = CredentialCapture.ParseCaptured(hitJson);
+                Check(capOk != null && capOk.Status == 200 && capOk.Method == "POST",
+                    "抄回的请求带着它自己的响应码与真实方法（不再把 method 丢掉）", ref pass, ref fail);
+                Check(capOk != null && capOk.PageHref == "https://www.workbuddy.cn/dashboard" && capOk.PageUserAgent == "UA",
+                    "抄回的请求带着页面上下文（补浏览器自动添加的那套头的依据）", ref pass, ref fail);
+
+                // 负对照：status 缺席（老版钩子写出来的 JSON）必须退回 0 ＝「还不知道」，**不是**「失败」。
+                // 否则会把「响应还没回来」误报成「网站自己也被拒」，把用户往错的方向指。
+                var capNoStatus = CredentialCapture.ParseCaptured(
+                    "{\"url\":\"https://www.workbuddy.cn/x\",\"method\":\"GET\",\"headers\":{}}");
+                Check(capNoStatus != null && capNoStatus.Status == 0,
+                    "负对照：JSON 里没有 status ⇒ 0（还不知道），不当作失败", ref pass, ref fail);
+
+                Check(CredentialCapture.DescribeCapturedStatus(200).Contains("成功"),
+                    "2xx ⇒ 告诉用户「网站自己发这个请求是成功的」（那问题在搬运）", ref pass, ref fail);
+                string notOk = CredentialCapture.DescribeCapturedStatus(401);
+                Check(notOk.Contains("401") && notOk.Contains("会话"),
+                    "4xx ⇒ 告诉用户「网站自己发这个请求也 401」（那问题在会话，换凭据、补头都没用）",
+                    ref pass, ref fail);
+                Check(CredentialCapture.DescribeCapturedStatus(0) == "",
+                    "负对照：status=0 一句结论都不下（宁可不说，也不把人往错方向指）", ref pass, ref fail);
+
                 // ---- 请求头合并：抄到的头**天然缺**浏览器自动添加的那一套 ----
                 // ⚠⚠ 2026-09-25 的现场故障（用户截图：页面左侧明明白白显示着余额，回测却被网关顶回 401）：
                 //   此前是**二选一** —— 抄到了就用抄到的那份**整份替换**旧头。但 user-agent / accept /

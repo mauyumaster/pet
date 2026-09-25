@@ -22,7 +22,7 @@ function check(ok, name) {
     if (ok) { pass++; console.log('[PASS] ' + name); } else { fail++; console.log('[FAIL] ' + name); }
 }
 
-function main() {
+async function main() {
     const script = fs.readFileSync(0, 'utf8').trim();
     if (!script) {
         console.log('[FAIL] stdin 是空的 —— 用法：pet.exe --hookscript | node tools/hook_check.js');
@@ -41,18 +41,32 @@ function main() {
     // 造一个**干净**的最小环境。每个用例一份、互不干扰 ——
     // 脚本靠 window.__azhuHook 做「只装一次」的守卫，共用一个 window 会让后面的用例装不上。
     // ⚠ navigator 必须显式传进去：真浏览器里它是全局的，这里的 new Function 里没有。
-    function makeEnv(href, ua, lang) {
+    // ⚠ fetchStatus 是 2026-09-25 加的：桩必须能**回一个状态码**，否则「2xx 才抢定稿位」这条规则
+    //   根本没法验 —— 而它正是「抄到的那个请求到底成功没有」的唯一来源。
+    // ⚠ XHR 桩加了 addEventListener ＋ finishWith：真实 XHR 靠 loadend 事件交出状态码，
+    //   桩不模拟就等于那条路径测不到（本文件存在的全部理由就是「注入的 JS 没人编译检查，只能真跑」）。
+    function makeEnv(href, ua, lang, fetchStatus) {
         const w = {};
         const loc = { href: href || 'https://www.workbuddy.cn/dashboard' };
         const nav = { userAgent: ua === undefined ? 'Mozilla/5.0 (Test) Edg/153.0' : ua, language: lang === undefined ? 'zh-CN' : lang };
-        w.fetch = function () { return Promise.resolve({ ok: true }); };
-        function XHR() { this._h = {}; }
+        const st = fetchStatus === undefined ? 200 : fetchStatus;
+        w.fetch = function () { return Promise.resolve({ ok: st >= 200 && st < 300, status: st }); };
+        function XHR() { this._h = {}; this._ls = {}; this.status = 0; }
         XHR.prototype.open = function (m, u) { this._m = m; this._u = u; };
         XHR.prototype.setRequestHeader = function (k, v) { this._h[k] = v; };
+        XHR.prototype.addEventListener = function (t, f) { this._ls[t] = f; };
         XHR.prototype.send = function (b) { this._b = b; };
+        XHR.prototype.finishWith = function (code) {      // 测试用：模拟响应到达
+            this.status = code;
+            const f = this._ls['loadend'];
+            if (f) f.call(this);
+        };
         new Function('window', 'XMLHttpRequest', 'location', 'navigator', script)(w, XHR, loc, nav);
         return { window: w, XMLHttpRequest: XHR, location: loc };
     }
+
+    // 让已排队的微任务全部跑完 —— 定稿是在响应的 .then 里完成的，同步断言看不到。
+    const flush = () => new Promise(r => setTimeout(r, 0));
 
     const TARGET = '/billing/meter/get-user-resource';
     const ABS = 'https://www.workbuddy.cn' + TARGET;
@@ -104,13 +118,46 @@ function main() {
             '非目标请求进诊断列表（抄不到时靠它判断卡在哪一步）');
     }
 
-    // 5) 只认第一个命中 —— 页面重复请求时不该覆盖先抄到的那份
+    // 5) 定稿与覆盖规则（2026-09-25 改）：第一个命中先占位；响应回来后**只有 2xx 才抢走定稿位**。
+    //    旧规则是「第一个命中永远不让位」—— 可页面刚打开时的第一个命中很可能是一次失败请求，
+    //    于是抄到的永远是那份失败样本：回测必然 401，而现场看上去「页面上余额明明显示着」。
+    {
+        const env = makeEnv();                       // 桩默认回 200
+        env.window.fetch(TARGET, { method: 'GET' });
+        const first = captureOf(env);
+        check(!!first && first.method === 'GET', '第一发命中后立刻占位（不等响应）');
+        check(!!first && first.status === 0, '占位时 status=0（＝响应还没回来，宿主不得据此下结论）');
+        await flush();
+        const cap = captureOf(env);
+        check(!!cap && cap.method === 'GET' && cap.status === 200, '2xx 回来后在定稿里带上真实状态码');
+    }
+    {
+        const env = makeEnv(undefined, undefined, undefined, 401);   // 桩一律回 401
+        env.window.fetch(TARGET, { method: 'GET' });
+        await flush();
+        env.window.fetch(TARGET, { method: 'PUT' });                 // 后来的失败请求
+        await flush();
+        const cap = captureOf(env);
+        check(!!cap && cap.method === 'GET' && cap.status === 401,
+            '全是 4xx 时：定稿仍留在第一个样本上，**但状态码要回填** —— 宿主就靠它说「网站自己发这个请求也 401」');
+    }
+    {
+        const env = makeEnv(undefined, undefined, undefined, 200);
+        env.window.fetch(TARGET, { method: 'GET' });
+        await flush();
+        env.window.fetch(TARGET, { method: 'DELETE' });              // 后到的成功请求
+        await flush();
+        check(captureOf(env).method === 'DELETE',
+            '后到的 2xx 抢走定稿位（它才是「网站自己成功取到数」的那一条）');
+    }
     {
         const env = makeEnv();
-        env.window.fetch(TARGET, { method: 'GET' });
-        env.window.fetch(TARGET, { method: 'DELETE' });
-        const cap = captureOf(env);
-        check(!!cap && cap.method === 'GET', '只记第一个命中（后续重复请求不覆盖）');
+        const x = new env.XMLHttpRequest();
+        x.open('POST', ABS);
+        x.send('{}');
+        check(captureOf(env).status === 0, 'XHR 未收到响应前 status=0');
+        x.finishWith(500);
+        check(captureOf(env).status === 500, 'XHR 的 loadend 把状态码回填进定稿（不只是 fetch 那条路）');
     }
 
     // 6) XHR 那条路（axios 之类走的就是它）
@@ -171,5 +218,6 @@ function main() {
     return fail === 0 ? 0 : 1;
 }
 
+// ⚠ main 是 async（2026-09-25）：新增用例要等微任务跑完，才看得到「响应回来之后定稿成什么」。
 // 用 exitCode 而不是 process.exit()：stdout 接到管道时是异步写的，直接 exit 有截断风险。
-process.exitCode = main();
+main().then(c => { process.exitCode = c; });

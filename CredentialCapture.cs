@@ -27,6 +27,11 @@ namespace AzhuPet
         public string PageHref = "";        // location 的 origin+path（已切掉 query，免得把 token 带进凭据文件）
         public string PageOrigin = "";      // location.origin（相对地址兜底用）
         public string PageLanguage = "";    // navigator.language
+
+        /// <summary>这次请求最终拿到的 HTTP 状态码（0 = 钩子还没等到响应，或定稿时响应未回）。
+        /// ⚠ 这个字段本身就是判据：抄回来的那份若 status 不是 2xx，说明「网站自己发这个请求」也没成功
+        ///   —— 那时候回测 401 与我们的拼接无关，去换凭据是白换（2026-09-25 卡住的那一轮正是如此）。</summary>
+        public int Status;
     }
 
     internal static class CredentialCapture
@@ -55,12 +60,18 @@ namespace AzhuPet
         ///   **两条腿缺一不可**，只靠本脚本永远拼不出完整凭据（这是最容易想漏的一步）。
         /// ⚠ 模板里用单引号，只留下 __PATTERN__ 一个占位符：模式是按 JSON 字符串注入的，
         ///   于是模式里就算带引号也破坏不了脚本结构（见 BuildHookScript 的判据）。
-        /// ⚠ 只记第一个命中（if(window.__azhuCapture)return）：后续重复请求不该覆盖掉先抄到的那份。
+        /// ⚠ **2xx 的那条优先**（2026-09-25 改）：rec 只把「第一个命中」当作临时定稿，等响应码回来时
+        ///   若那是一次 2xx，就覆盖成它。旧行为是「第一个命中永远不让位」—— 而页面刚打开时往往先发
+        ///   一次失败请求（未登录／会话未就绪），于是我们抄到的可能永远是那个失败样本：回测必然 401，
+        ///   而现场看起来「页面上余额明明显示着」。status 随定稿一起交给宿主，宿主据此才分得清
+        ///   「抄到的是成功请求」还是「网站自己发这个请求也被拒」—— 后者换凭据没用。
+        /// ⚠ 已回填 status 的对象按引用交给调用方（done(o,st)），**不走 __azhuLast 之类的全局暂存** ——
+        ///   否则同一个接口并发两个请求时会把 A 的响应码安到 B 身上。
         /// ⚠ __azhuSeen 是**诊断用**的：把所有经过 fetch/XHR 的路径都记一份（哪怕是别的接口）。
         ///   没有它，「抄不到」只有一句「还没看到余额请求」—— 分不清是钩子没生效、页面压根不发
         ///   XHR、还是接口换了名字。2026-09-25 就是靠这个才看清「请求发去了另一个窗口」。</summary>
         private const string HookTemplate = @"(function(){
-if(window.__azhuHook)return;window.__azhuHook=1;window.__azhuCapture='';
+if(window.__azhuHook)return;window.__azhuHook=1;window.__azhuCapture='';window.__azhuCapObj=null;
 window.__azhuSeen=[];
 var PAT=__PATTERN__;
 function hdrs(h){var o={};try{
@@ -82,21 +93,35 @@ function pg(){try{var s=''+(location.href||'');var i=s.indexOf('?');if(i>=0)s=s.
 function og(){try{if(location.origin)return ''+location.origin;var m=/^([a-z][a-z0-9+.-]*:\/\/[^\/]+)/i.exec(''+(location.href||''));return m?m[1]:'';}catch(e){return '';}}
 function rec(u,m,h,b){try{
 seen(u);
-if(window.__azhuCapture)return;
-if(!u||(''+u).indexOf(PAT)<0)return;
-window.__azhuCapture=JSON.stringify({url:abs(u),method:''+(m||'GET'),headers:hdrs(h),body:(b==null?'':''+b),
-ua:(navigator.userAgent||''),href:pg(),org:og(),lang:(navigator.language||'')});
+if(!u||(''+u).indexOf(PAT)<0)return null;
+var o={url:abs(u),method:''+(m||'GET'),headers:hdrs(h),body:(b==null?'':''+b),
+ua:(navigator.userAgent||''),href:pg(),org:og(),lang:(navigator.language||''),status:0};
+if(!window.__azhuCapObj){window.__azhuCapObj=o;window.__azhuCapture=JSON.stringify(o);}
+return o;
+}catch(e){return null;}}
+function ok2xx(st){var n=0+st;return n>=200&&n<300;}
+function done(o,st){try{
+if(!o)return;
+o.status=(st==null?0:(0+st));
+if(ok2xx(o.status)){window.__azhuCapObj=o;window.__azhuCapture=JSON.stringify(o);return;}
+if(window.__azhuCapObj===o)window.__azhuCapture=JSON.stringify(o);
 }catch(e){}}
 var _f=window.fetch;
-if(_f){window.fetch=function(i,init){try{
+if(_f){window.fetch=function(i,init){var o=null;try{
 var u=(typeof i==='string')?i:((i&&i.url)||'');
 var m=(init&&init.method)||(i&&i.method)||'GET';
-rec(u,m,init&&init.headers,init&&init.body);
-}catch(e){}return _f.apply(this,arguments);};}
+o=rec(u,m,init&&init.headers,init&&init.body);
+}catch(e){}
+var p=_f.apply(this,arguments);
+try{if(o&&p&&p.then)p.then(function(r){done(o,r&&r.status);},function(){});}catch(e){}
+return p;};}
 var _o=XMLHttpRequest.prototype.open,_h=XMLHttpRequest.prototype.setRequestHeader,_s=XMLHttpRequest.prototype.send;
 XMLHttpRequest.prototype.open=function(m,u){try{this.__azhu={m:m,u:u,h:{}};}catch(e){}return _o.apply(this,arguments);};
 XMLHttpRequest.prototype.setRequestHeader=function(k,v){try{if(this.__azhu)this.__azhu.h[k]=v;}catch(e){}return _h.apply(this,arguments);};
-XMLHttpRequest.prototype.send=function(b){try{if(this.__azhu)rec(this.__azhu.u,this.__azhu.m,this.__azhu.h,b);}catch(e){}return _s.apply(this,arguments);};
+XMLHttpRequest.prototype.send=function(b){try{
+if(this.__azhu){var o=rec(this.__azhu.u,this.__azhu.m,this.__azhu.h,b);var x=this;
+if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status);});}
+}catch(e){}return _s.apply(this,arguments);};
 })();";
 
         /// <summary>把抓取目标注入钩子模板。模式走 JSON 编码再嵌入，避免它把脚本本身拼坏。</summary>
@@ -200,6 +225,24 @@ XMLHttpRequest.prototype.send=function(b){try{if(this.__azhu)rec(this.__azhu.u,t
             return DroppedHeaders.Any(d => string.Equals(d, n, StringComparison.OrdinalIgnoreCase));
         }
 
+        /// <summary>把「抄到的那份请求**自己**的状态码」翻译成一句能指导下一步的话（纯函数）。
+        ///
+        /// ⚠ 这一句是本轮修复的全部意义（2026-09-25）：同样是「回测 401」，两种原因修法**相反** ——
+        ///   ① 我们拼接丢了东西（该去补头） ② 网站自己发这个请求也没通过（去换凭据、补头都没用，
+        ///   得先让浏览器里那个会话真的走到能取数的页面上）。此前界面上只有一句「服务器仍然拒绝这份凭据」，
+        ///   两种原因长得一模一样，用户只能反复点。
+        ///
+        /// status == 0 表示钩子还没等到响应（请求可能还在飞，或压根不是 XHR）⇒ **不下结论**，
+        /// 宁可不说，也不要凭空的判断把用户往错方向指。</summary>
+        public static string DescribeCapturedStatus(int status)
+        {
+            if (status == 0) return "";
+            if (status >= 200 && status < 300) return "网站自己发这个请求是 " + status + "（成功）";
+            return "⚠ 网站自己发这个请求也返回 " + status + " —— 说明这个浏览器里的会话本身就没通过，"
+                 + "换凭据、补请求头都不解决问题。先在这个窗口里把余额所在的页面**真正打开一次**"
+                 + "（让地址栏走到那一层、页面自己把数据算出来），再点抓取。";
+        }
+
         /// <summary>把 cookie 罐里的东西拼成一行 cookie 头（纯函数）。
         /// 按名字排序而不是照浏览器给的顺序 —— 这样连点两次「重新获取」产生**逐字节相同**的文件，
         /// 出问题时能 diff 得出来；顺序对 cookie 语义没有影响。</summary>
@@ -239,10 +282,25 @@ XMLHttpRequest.prototype.send=function(b){try{if(this.__azhu)rec(this.__azhu.u,t
                     if (root.TryGetProperty("href", out var hr) && hr.ValueKind == JsonValueKind.String) req.PageHref = hr.GetString() ?? "";
                     if (root.TryGetProperty("org", out var og) && og.ValueKind == JsonValueKind.String) req.PageOrigin = og.GetString() ?? "";
                     if (root.TryGetProperty("lang", out var lg) && lg.ValueKind == JsonValueKind.String) req.PageLanguage = lg.GetString() ?? "";
+                    // status 只在钩子等到响应之后才回填。取不到就是 0 ＝「还不知道」，**不是**「失败了」——
+                    // 两者必须分开，否则会把「响应还没回来」误报成「网站自己也被拒」。
+                    if (root.TryGetProperty("status", out var st) && IntOf(st, out int status)) req.Status = status;
                     return req;
                 }
             }
             catch { return null; }
+        }
+
+        /// <summary>宽容取整数（数字与数字字符串都收），纯函数。
+        /// ⚠ 自己写一个而不是直接用 JsonElement.TryGetInt32：**后者遇到非 Number 元素是抛
+        ///   InvalidOperationException，不是返回 false**（同 StatusProbe.IntEl 上记的那条教训）。
+        ///   钩子写出来的是数字，但这段 JSON 要经浏览器往返一圈，宽容一点不吃亏。</summary>
+        private static bool IntOf(JsonElement el, out int v)
+        {
+            v = 0;
+            if (el.ValueKind == JsonValueKind.Number) return el.TryGetInt32(out v);
+            if (el.ValueKind == JsonValueKind.String) return int.TryParse(el.GetString(), out v);
+            return false;
         }
 
         /// <summary>读一份**已有的**凭据文本，拆出 URL / 头 / body（纯函数）。

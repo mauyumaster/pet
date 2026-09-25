@@ -199,6 +199,22 @@ namespace AzhuPet
             if (string.IsNullOrEmpty(json)) { Nudge(); return; }
             var req = CredentialCapture.ParseCaptured(json);
             if (req == null || !CredentialCapture.IsTarget(req.Url, _capturePattern)) return;
+
+            // ⚠ 「抄到」不等于「该收工」（2026-09-25 改）：__azhuCapture 在**第一个**命中时就非空了，
+            //   而那个请求很可能是一次失败的（页面刚打开、会话还没就绪）。真正值得抄的是 2xx 那一份 ——
+            //   钩子会在 2xx 时把它覆盖过来。所以这里只认 2xx；非 2xx 继续等，等满 20 秒再拿它交差：
+            //   到那时它本身就是答案（**网站自己发这个请求也没通过**，那就是会话/路径的事，不是我们拼错）。
+            if (req.Status >= 200 && req.Status < 300) { _timer.Stop(); await FinishAsync(req, false); return; }
+            // 抄到的是一份「没成功」的样本。**要让用户看得见**（每 5 秒最多刷一次）：否则他会以为
+            // 程序毫无反应，而实际上我们已经在盯着这个接口了 —— 「静默等待」是本项目反复吃亏的形态。
+            if ((DateTime.UtcNow - _lastNudge).TotalSeconds >= 5)
+            {
+                _lastNudge = DateTime.UtcNow;
+                SetState(req.Status == 0
+                    ? "抄到了余额请求，还在等它的响应…"
+                    : "抄到了余额请求，但网站自己发它也返回 " + req.Status + "，再等等看…", Brushes.Orange);
+            }
+            if ((DateTime.UtcNow - _openedAt).TotalSeconds < 20) return;
             _timer.Stop();
             await FinishAsync(req, false);
         }
@@ -257,6 +273,66 @@ namespace AzhuPet
             catch { return ""; }
         }
 
+        /// <summary>在**页面上下文里**重放一次目标接口 —— 本轮诊断的判据本身。
+        ///
+        /// 为什么非要在浏览器里发这一发：只有它同时具备「浏览器自己那套 cookie」与「浏览器自动补齐的
+        /// 那一整套请求头」。于是它能一次把两类故障分开：
+        ///   · 它也 401  ⇒ 这个浏览器里的会话本身没通过（换凭据、补头都没用，得先把取数页面真正打开）
+        ///   · 它 200 而我们的回测 401 ⇒ 是**我们搬运时丢了东西**（去比对两边的头）
+        /// 在此之前没有任何手段能分开这两者，用户只能反复点、反复 401（2026-09-25 卡住的那一轮）。
+        ///
+        /// ⚠ 用「写一个全局状态位再轮询」，不用 await 返回值：ExecuteScriptAsync 对返回 Promise 的
+        ///   表达式行为随运行时版本而变，而轮询与已有的 __azhuCapture 是同一套写法，稳。
+        /// ⚠ 只带回 status 与响应体前 200 字符（余额数字就在里面，正好当证据）；凭据值不在此列。</summary>
+        private async Task<string> ReplayInBrowserAsync(string url, string method, string body)
+        {
+            try
+            {
+                string m = string.IsNullOrEmpty(method) ? "GET" : method.Trim().ToUpperInvariant();
+                string init = "{credentials:'include',method:" + JsonSerializer.Serialize(m);
+                if (!string.IsNullOrEmpty(body) && m != "GET" && m != "HEAD")
+                    init += ",body:" + JsonSerializer.Serialize(body);
+                init += "}";
+                string js = "(function(){try{window.__azhuReplay={s:'run'};"
+                    + "fetch(" + JsonSerializer.Serialize(url) + "," + init + ").then(function(r){"
+                    + "return r.text().then(function(t){window.__azhuReplay={s:'done',code:r.status,"
+                    + "body:(t||'').substring(0,200)};});})"
+                    + ".catch(function(e){window.__azhuReplay={s:'err',msg:''+e};});"
+                    + "}catch(e){window.__azhuReplay={s:'err',msg:''+e};}return 'ok';})()";
+                await _view.CoreWebView2.ExecuteScriptAsync(js);
+
+                for (int i = 0; i < 20; i++)   // 最多等 6 秒
+                {
+                    await Task.Delay(300);
+                    string raw = await _view.CoreWebView2.ExecuteScriptAsync(
+                        "JSON.stringify(window.__azhuReplay||{})");
+                    string txt = DecodeJsString(raw);
+                    if (string.IsNullOrEmpty(txt) || txt == "{}") continue;
+                    using (var doc = JsonDocument.Parse(txt))
+                    {
+                        var root = doc.RootElement;
+                        string s = root.TryGetProperty("s", out var se) ? (se.GetString() ?? "") : "";
+                        if (s == "run") continue;
+                        if (s == "err")
+                            return "浏览器内重放失败：" + (root.TryGetProperty("msg", out var me) ? me.GetString() : "");
+                        int code = root.TryGetProperty("code", out var ce) && ce.ValueKind == JsonValueKind.Number
+                            ? ce.GetInt32() : 0;
+                        string rb = root.TryGetProperty("body", out var be) ? (be.GetString() ?? "") : "";
+                        return "浏览器内重放 " + code + (rb.Length > 0 ? "：" + OneLine(rb) : "");
+                    }
+                }
+                return "浏览器内重放超时（6 秒内页面没回话）";
+            }
+            catch (Exception ex) { return "浏览器内重放失败：" + ex.Message; }
+        }
+
+        /// <summary>压成一行并截断（诊断文案用，纯函数式小工具）。</summary>
+        private static string OneLine(string s)
+        {
+            string t = (s ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+            return t.Length > 120 ? t.Substring(0, 120) + "…" : t;
+        }
+
         /// <summary>ExecuteScriptAsync 的返回值是一段 JSON；字符串结果会带一层引号。
         /// 解不出来就当空 —— 宁可多等一拍，也不要拿半截字符串去拼凭据。</summary>
         private static string DecodeJsString(string raw)
@@ -283,8 +359,15 @@ namespace AzhuPet
                 string cookieUrl = (captured != null && CredentialCapture.IsSameSite(captured.Url, _defaultUrl))
                     ? captured.Url : _defaultUrl;
                 var jar = await _view.CoreWebView2.CookieManager.GetCookiesAsync(cookieUrl);
+                var jarList = jar ?? new List<CoreWebView2Cookie>();
                 string cookieHeader = CredentialCapture.BuildCookieHeader(
-                    (jar ?? new List<CoreWebView2Cookie>()).Select(c => new KeyValuePair<string, string>(c.Name, c.Value)));
+                    jarList.Select(c => new KeyValuePair<string, string>(c.Name, c.Value)));
+                // ⚠ 另外把每条 cookie 的**名字 + Path** 记进日志（**不含值**）。同名 cookie 是按 Path 分成
+                //   多条的，而服务端常常就靠 Path 分辨用途 —— 现场那条 `Set-Cookie: session_2=; Path=/billing`
+                //   正是「要清除 /billing 那一条」的意思。日志里少了 Path 这一列，就永远看不出「要的那条在不在」。
+                string cookieMap = jarList.Count == 0 ? "-" : string.Join(",",
+                    jarList.Select(c => c.Name + "@" + (string.IsNullOrEmpty(c.Path) ? "/" : c.Path)
+                        + "(" + (c.Value ?? "").Length + ")"));
                 if (cookieHeader.Length == 0)
                 {
                     Fail2("浏览器里没有 " + _platform + " 的 cookie —— 看起来还没登录成功。",
@@ -319,10 +402,23 @@ namespace AzhuPet
                 if (composed.Length == 0) { Fail2("组装失败：没有可用的请求地址。", "原凭据未改动。"); return; }
 
                 LogDiag("组装 source=" + source + " url=" + url
+                    + " method=" + (captured == null ? "-" : captured.Method)
+                    + " capStatus=" + (captured == null ? "-" : captured.Status.ToString())
+                    + " page=" + (captured == null || captured.PageHref.Length == 0 ? "-" : captured.PageHref)
                     + " cookie=" + cookieHeader.Split(';').Length + "项"
+                    + " jar=[" + cookieMap + "]"
                     + " old=[" + NamesOf(oldHeaders) + "]"
                     + " cap=[" + NamesOf(captured == null ? null : captured.Headers) + "]"
                     + " final=[" + NamesOf(headers) + "]");
+
+                // ---- 判据：先用浏览器自己的会话试一次（金标准）----
+                // 放在这一步的理由：它不依赖我们拼出来的任何东西 —— 用的是浏览器自己的 cookie，加上
+                // 浏览器自动补的那整套头。所以「它成不成功」能直接回答「问题在会话，还是在我们的搬运」，
+                // 而这正是此前分不开、导致用户反复点的那件事。
+                SetState("正在用浏览器自己的会话试一次接口…", Muted);
+                string replay = await ReplayInBrowserAsync(url,
+                    captured == null ? "GET" : captured.Method, captured == null ? null : captured.Body);
+                LogDiag("浏览器内重放 " + replay);
 
                 // ---- 回测：真的去打一次余额接口 ----
                 // ⚠ 顺序上是「先写文件再回测」：探针读数的唯一入口就是这个文件。所以失败要还原回去，
@@ -349,12 +445,14 @@ namespace AzhuPet
                     if (oldRaw != null) BalanceSources.SaveSecret(_secretFile, oldRaw); else SafeDelete(_secretFile);
                     LogDiag("回测被拒 status=" + rep.WorkbuddyStatus + " cookie=" + cookieHeader.Split(';').Length
                         + "项 final=[" + NamesOf(headers) + "] err=" + rep.WorkbuddyError);
+                    string hint = CredentialCapture.DescribeCapturedStatus(captured == null ? 0 : captured.Status);
                     Fail2("服务器仍然拒绝这份凭据（" + rep.WorkbuddyError + "）",
                         "已把原凭据还原回去，你的文件没被改坏。这次实际发出的是："
                         + cookieHeader.Split(';').Length + " 项 cookie，请求头 "
                         + string.Join("、", headers.Select(h => h.Key)) + "。"
-                        + "常见原因：登录没真正完成，或这个浏览器里还没进过「计费」页面。"
-                        + "详细记录在 " + Path.Combine(StatusProbe.SecretDir(), "capture_log.txt"));
+                        + (hint.Length > 0 ? "\n" + hint : "")
+                        + "\n" + replay
+                        + "\n详细记录在 " + Path.Combine(StatusProbe.SecretDir(), "capture_log.txt"));
                 }
                 else
                 {
