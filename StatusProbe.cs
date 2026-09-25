@@ -440,26 +440,134 @@ namespace AzhuPet
         /// <summary>WorkBuddy 积分：读凭据文件(URL + headers含 cookie/x-user-id)，POST body {}，
         /// 从 data.Response.Data.Accounts[].CapacityRemain 求和作为可用积分。完整请求头需原样带上，
         /// 否则 APISIX 网关会 401。</summary>
-        private async Task<Action<StatusReport>> WorkBuddyBalanceAsync(string file)
+        // ============================ WorkBuddy 回测 ============================
+        //
+        // ⚠ 2026-09-25 的现场：内嵌浏览器里页面自己发的那个请求 **capStatus=200**、浏览器内重放也 **200**
+        //   （拿回真实数据），而同一份 cookie、同一组请求头从 .NET 发出去仍然 401（网关 HTML 页）。
+        //   逐项对齐之后 cookie 与头都不再是变量 —— 剩下的只能是**客户端身份**：出口 IP 与协议版本。
+        //   这两项各有一个开关（系统代理 / HTTP 版本），所以它们必须能被单独试，而不是靠猜。
+        //   ⚠ 另：本机实测（回环实验）确认 .NET 会把手写 cookie 头完整发出去（6600 字符也不截断），
+        //   且 `---body---` 段里那行 JSON 被当成请求头时会被 .NET 静默丢弃（TryAddWithoutValidation
+        //   只校验头名）—— 所以那个 bug 不会造出畸形请求，它只是让 body **从来没被发送**。
+
+        /// <summary>回测走哪种传输。序号即尝试顺序（改动最小的排前面）。</summary>
+        internal enum WbTransport
         {
-            string err = null;
-            int httpStatus = -1;   // -1 = 压根没拿到响应（超时/异常），与 4xx/5xx 是两回事
+            SystemProxyHttp1 = 0,   // today 的默认：系统代理 + HTTP/1.1
+            DirectHttp1 = 1,        // 绕过系统代理（系统代理会把请求换一个出口 IP 出去）
+            SystemProxyHttp2 = 2,   // 走 h2（浏览器默认；h1.1 本身就是脚本请求的指纹之一）
+            DirectHttp2 = 3
+        }
+
+        private const int WbTransportCount = 4;
+        private const int WbMatrixCooldownMinutes = 10;
+        private static int _wbTransport = (int)WbTransport.SystemProxyHttp1;
+        private static string _wbTransportNote = "";
+        private static DateTime _wbMatrixNextAt = DateTime.MinValue;
+        private static readonly HttpClient[] _wbClients = new HttpClient[WbTransportCount];
+
+        /// <summary>最近一次传输矩阵的结论（一句话）。界面与日志都读它 —— 现场唯一的验收人不会来翻代码。</summary>
+        public static string WbTransportNote { get { return _wbTransportNote; } }
+
+        internal static string WbTransportName(int mode)
+        {
+            switch (mode)
+            {
+                case (int)WbTransport.DirectHttp1: return "直连 + HTTP/1.1";
+                case (int)WbTransport.SystemProxyHttp2: return "系统代理 + HTTP/2";
+                case (int)WbTransport.DirectHttp2: return "直连 + HTTP/2";
+                default: return "系统代理 + HTTP/1.1";
+            }
+        }
+
+        /// <summary>挑一个**真能通过**的传输方式（纯函数）。只认 2xx；并列时取序号靠前者，
+        /// 也就是「离现状改动最小」的那个 —— 换传输只是为了能用，不是为了好看。</summary>
+        public static int PickWorkingTransport(int[] statuses)
+        {
+            if (statuses == null) return -1;
+            for (int i = 0; i < statuses.Length; i++)
+                if (statuses[i] >= 200 && statuses[i] < 300) return i;
+            return -1;
+        }
+
+        /// <summary>把矩阵结果翻成一句能指导下一步的话（纯函数）。</summary>
+        // 判据纪律：这句话是**结论**，不是客套。所以每一支都要说清「差异在哪」，
+        // 以及「全不通」时不要把人再往 cookie/请求头上引 —— 那两项已经排除过了。
+        public static string DescribeTransportVerdict(int[] statuses, int picked)
+        {
+            string all = statuses == null ? "-" : string.Join(" / ", statuses);
+            if (picked < 0)
+                return "四种传输方式全部被拒（" + all + "）—— 协议与代理都不是差异所在；"
+                     + "cookie 与请求头此前已逐项对齐，说明服务端是按**别的东西**认这次请求"
+                     + "（出口 IP / 客户端指纹）。";
+            if (picked == 0)
+                return "默认传输方式（系统代理 + HTTP/1.1）在自检里通过了（四次依次 " + all
+                     + "）—— 那次 401 是偶发（会话或网络抖动），不是配置问题。";
+            string why =
+                picked == (int)WbTransport.DirectHttp1
+                    ? "**系统代理就是差异所在**：它把请求换了个出口 IP 发出去，服务端不认这个会话。"
+                    : (picked == (int)WbTransport.SystemProxyHttp2
+                        ? "**HTTP/1.1 就是差异所在**：浏览器走 h2，而 h1.1 是脚本请求的典型指纹。"
+                        : "系统代理与 HTTP/1.1 各占一部分。");
+            return "找到差异了：" + WbTransportName(picked) + " 能通过（四次依次 " + all + "）。" + why;
+        }
+
+        /// <summary>按传输方式取一个长期复用的 client。直连 = `UseProxy=false`；
+        /// `UseCookies=false` 是**刻意**的：cookie 由我们手写成一个头，绝不让容器再往里掺一份。</summary>
+        private static HttpClient WbClient(int mode)
+        {
+            var c = _wbClients[mode];
+            if (c != null) return c;
+            bool direct = mode == (int)WbTransport.DirectHttp1 || mode == (int)WbTransport.DirectHttp2;
+            c = new HttpClient(new HttpClientHandler
+            {
+                // Brotli 一并打开：浏览器发的是 gzip, deflate, br, zstd，只报 gzip/deflate 本身就是个信号
+                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
+                UseCookies = false,
+                UseProxy = !direct
+            })
+            { Timeout = TimeSpan.FromSeconds(8) };
+            _wbClients[mode] = c;
+            return c;
+        }
+
+        /// <summary>一次 WorkBuddy 回测的实际结果（不联网的字段解析在外面做）。</summary>
+        private sealed class WbAttempt
+        {
+            public int Mode;
+            public int Status = -1;     // -1 = 压根没拿到响应（超时/异常）
+            public string Body = "";
+            public string Err = "";
+        }
+
+        /// <summary>按凭据文件发一次回测。
+        /// ⚠ 文件解析一律走 `CredentialCapture.ParseRawSecretText` —— **同一份数据不允许有第二个解析口径**。
+        ///   此前这里有个自己写的循环（「第一行 URL，其余带冒号的是头」），于是：
+        ///   ① `---method---` / `---body---` 两段抄到的事实**从来没送出去**（回测写死 POST + 空 body）；
+        ///   ② body 那行 JSON 被当成一行请求头（.NET 会静默丢掉，所以不报错、只是悄悄少了一半）。</summary>
+        private async Task<WbAttempt> TryWorkbuddyAsync(string file, int mode)
+        {
+            var a = new WbAttempt { Mode = mode };
             try
             {
-                string url = null;
-                var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (string raw in File.ReadAllLines(file))
-                {
-                    string t = raw.Trim();
-                    if (t.StartsWith("---", StringComparison.Ordinal)) continue;
-                    if (url == null && t.Length > 0) { url = t; continue; }
-                    int c = raw.IndexOf(':');
-                    if (c > 0) headers[raw.Substring(0, c).Trim()] = raw.Substring(c + 1).Trim();
-                }
-                if (string.IsNullOrEmpty(url)) return r => r.WorkbuddyError = "workbuddy凭据无URL";
+                string text;
+                try { text = File.ReadAllText(file); }
+                catch (Exception ex) { a.Err = Shrink(ex.Message); return a; }
 
-                using (var req = new HttpRequestMessage(HttpMethod.Post, url))
+                string url, body, method;
+                var headers = CredentialCapture.ParseRawSecretText(text, out url, out body, out method);
+                if (string.IsNullOrEmpty(url)) { a.Err = "workbuddy凭据无URL"; return a; }
+
+                var http = WbClient(mode);
+                bool http2 = mode == (int)WbTransport.SystemProxyHttp2 || mode == (int)WbTransport.DirectHttp2;
+                using (var req = new HttpRequestMessage(
+                    new HttpMethod(string.IsNullOrEmpty(method) ? "POST" : method), url))
                 {
+                    if (http2)
+                    {
+                        req.Version = HttpVersion.Version20;
+                        req.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;   // 服务器不支持 h2 时自动回落
+                    }
                     string contentType = "application/json";
                     foreach (var kv in headers)
                     {
@@ -470,32 +578,90 @@ namespace AzhuPet
                             continue;   // 压缩与长度交 HttpClient 处理
                         else req.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
                     }
-                    req.Content = new StringContent("{}", Encoding.UTF8, contentType);
-                    using (var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead))
+                    if (req.Method != HttpMethod.Get && req.Method != HttpMethod.Head)
                     {
-                        httpStatus = (int)resp.StatusCode;
-                        string respBody = await resp.Content.ReadAsStringAsync();
-                        if (!resp.IsSuccessStatusCode) err = DescribeHttpFailure((int)resp.StatusCode, respBody);
-                        else
-                        {
-                            // 解析与口径判定全在 ParseWorkbuddyJson 里（纯函数）——
-                            // 这样口径才能被 --calibertest 用合成响应离线逼红。
-                            var cal = ParseWorkbuddyJson(respBody);
-                            if (cal.Ok)
-                                return r =>
-                                {
-                                    r.WorkbuddyOk = true;
-                                    r.WorkbuddyStatus = httpStatus;
-                                    r.WorkbuddyRemain = cal.Remain;
-                                    r.WorkbuddyAllBucketsRemain = cal.AllBucketsRemain;
-                                    r.WorkbuddyType1Count = cal.Type1Count;
-                                    r.WorkbuddyAccountCount = cal.AccountCount;
-                                    r.WorkbuddyTotalCount = cal.TotalCount;
-                                    r.WorkbuddyOtherRemain = cal.OtherRemain;
-                                };
-                            string preview = (respBody ?? "").Length > 80 ? respBody.Substring(0, 80) : (respBody ?? "");
-                            err = Shrink(cal.Why ?? ("字段缺失(" + preview.Replace("\r", " ").Replace("\n", " ") + ")"));
-                        }
+                        var content = new StringContent(string.IsNullOrWhiteSpace(body) ? "{}" : body, Encoding.UTF8, contentType);
+                        // ⚠ StringContent 会自作主张加 "; charset=utf-8"，而浏览器发的是纯 application/json。
+                        //   既然是回放，就按原样 —— 多出来的那 15 字节是我们可以避免的差异。
+                        content.Headers.ContentType.CharSet = null;
+                        req.Content = content;
+                    }
+                    using (var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead))
+                    {
+                        a.Status = (int)resp.StatusCode;
+                        a.Body = await resp.Content.ReadAsStringAsync();
+                    }
+                }
+            }
+            catch (Exception ex) { a.Err = Shrink(ex.Message); }
+            return a;
+        }
+
+        /// <summary>四种传输方式**各自独立**各打一次，挑出真能通过的那个。只在 401/403 之后跑，且有冷却 ——
+        /// 拿凭据反复试探会惊动风险控制，反而把路走死。
+        /// ⚠ 不拿「刚才那次的状态」冒充第 0 号变体的结果：那样矩阵**永远不会回头重试默认方式**，
+        ///   而结论文案却写着「四次都试过」—— 证据与结论必须对得上（这正是本项目反复栽的那一类错）。</summary>
+        private async Task RunTransportMatrixAsync(string file)
+        {
+            if (DateTime.UtcNow < _wbMatrixNextAt) return;
+            _wbMatrixNextAt = DateTime.UtcNow.AddMinutes(WbMatrixCooldownMinutes);
+            var statuses = new int[WbTransportCount];
+            for (int m = 0; m < WbTransportCount; m++)
+                statuses[m] = (await TryWorkbuddyAsync(file, m)).Status;
+            int picked = PickWorkingTransport(statuses);
+            if (picked >= 0) _wbTransport = picked;
+            _wbTransportNote = DescribeTransportVerdict(statuses, picked);
+        }
+
+        private async Task<Action<StatusReport>> WorkBuddyBalanceAsync(string file)
+        {
+            string err = null;
+            int httpStatus = -1;   // -1 = 压根没拿到响应（超时/异常），与 4xx/5xx 是两回事
+            string respBody = "";
+            try
+            {
+                int firstMode = _wbTransport;
+                var a = await TryWorkbuddyAsync(file, _wbTransport);
+                httpStatus = a.Status;
+                respBody = a.Body;
+                err = a.Err;
+
+                // 401/403 才值得怀疑「客户端身份」这一层：cookie 与请求头那时已经排除过了
+                if (httpStatus == 401 || httpStatus == 403)
+                {
+                    await RunTransportMatrixAsync(file);
+                    if (_wbTransportNote.Length > 0) err = (err ?? "") + " ｜ " + _wbTransportNote;
+                    // 矩阵若已经找到能用的传输方式，**当场用它重试一次**：否则用户看到的仍是「被拒」，
+                    // 而真正的结论（能用）要等下一次刷新才浮出来 —— 那正是「用户只能反复点」的来源。
+                    if (_wbTransport != firstMode)
+                    {
+                        var retry = await TryWorkbuddyAsync(file, _wbTransport);
+                        if (retry.Status >= 200 && retry.Status < 300)
+                        { httpStatus = retry.Status; respBody = retry.Body; err = retry.Err; }
+                    }
+                }
+                if (httpStatus >= 0 && err == null)
+                {
+                    if (httpStatus < 200 || httpStatus >= 300) err = DescribeHttpFailure(httpStatus, respBody);
+                    else
+                    {
+                        // 解析与口径判定全在 ParseWorkbuddyJson 里（纯函数）——
+                        // 这样口径才能被 --calibertest 用合成响应离线逼红。
+                        var cal = ParseWorkbuddyJson(respBody);
+                        if (cal.Ok)
+                            return r =>
+                            {
+                                r.WorkbuddyOk = true;
+                                r.WorkbuddyStatus = httpStatus;
+                                r.WorkbuddyRemain = cal.Remain;
+                                r.WorkbuddyAllBucketsRemain = cal.AllBucketsRemain;
+                                r.WorkbuddyType1Count = cal.Type1Count;
+                                r.WorkbuddyAccountCount = cal.AccountCount;
+                                r.WorkbuddyTotalCount = cal.TotalCount;
+                                r.WorkbuddyOtherRemain = cal.OtherRemain;
+                            };
+                        string preview = (respBody ?? "").Length > 80 ? respBody.Substring(0, 80) : (respBody ?? "");
+                        err = Shrink(cal.Why ?? ("字段缺失(" + preview.Replace("\r", " ").Replace("\n", " ") + ")"));
                     }
                 }
             }

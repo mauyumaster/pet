@@ -378,8 +378,8 @@ namespace AzhuPet
                 // 旧凭据（可能为空）—— 它是「完整请求头」的唯一来源，抄到的那份天然缺浏览器自动头。
                 string oldPath = BalanceSources.ResolveSecret(_secretFile);
                 if (oldPath != null && File.Exists(oldPath)) oldRaw = File.ReadAllText(oldPath);
-                string oldUrl, oldBody;
-                var oldHeaders = CredentialCapture.ParseRawSecretText(oldRaw, out oldUrl, out oldBody);
+                string oldUrl, oldBody, oldMethod;
+                var oldHeaders = CredentialCapture.ParseRawSecretText(oldRaw, out oldUrl, out oldBody, out oldMethod);
 
                 // ---- 第 2 条腿：请求头。三条路**都走叠加重建**，不是二选一 ----
                 // ⚠ 2026-09-25 修的事故：此前「抄到就用抄到的那份整份替换旧头」，而抄到的天然缺
@@ -396,13 +396,21 @@ namespace AzhuPet
                     captured == null ? null : captured.Headers, url,
                     captured == null ? "" : captured.PageUserAgent,
                     captured == null ? "" : captured.PageHref,
-                    captured == null ? "" : captured.PageLanguage);
+                    captured == null ? "" : captured.PageLanguage,
+                    captured == null ? "" : captured.PageChUa,
+                    captured == null ? "" : captured.PageChUaMobile,
+                    captured == null ? "" : captured.PageChUaPlatform);
 
-                string composed = CredentialCapture.ComposeSecret(url, headers, cookieHeader, captured == null ? null : captured.Body);
+                // ⚠ method 与 body 都是**抄到的事实**，必须一起落盘 —— 不落盘，回测就只能凭默认值说话，
+                //   而实测 GET 同一个地址返回 404：方法一旦不对，连「地址不存在」和「没通过鉴权」都分不开。
+                string composed = CredentialCapture.ComposeSecret(url, headers, cookieHeader,
+                    captured == null ? null : captured.Body, captured == null ? null : captured.Method);
                 if (composed.Length == 0) { Fail2("组装失败：没有可用的请求地址。", "原凭据未改动。"); return; }
 
                 LogDiag("组装 source=" + source + " url=" + url
                     + " method=" + (captured == null ? "-" : captured.Method)
+                    + " body=" + (captured == null || string.IsNullOrEmpty(captured.Body) ? "-" : captured.Body.Length + "字符")
+                    + " chua=" + (captured == null || string.IsNullOrEmpty(captured.PageChUa) ? "-" : "有")
                     + " capStatus=" + (captured == null ? "-" : captured.Status.ToString())
                     + " page=" + (captured == null || captured.PageHref.Length == 0 ? "-" : captured.PageHref)
                     + " cookie=" + cookieHeader.Split(';').Length + "项"
@@ -429,29 +437,42 @@ namespace AzhuPet
                 _detail.Text = "来源：" + source + "；cookie " + cookieHeader.Split(';').Length + " 项，请求头 " + headerLines + " 行。";
 
                 var rep = await new StatusProbe().CheckAsync();
+                string note = StatusProbe.WbTransportNote;
                 if (rep.WorkbuddyOk)
                 {
                     _finished = true; Saved = true;
                     _timer?.Stop();
                     SetState("✓ 已获取并验证通过：" + _platform + " " + Math.Round(rep.WorkbuddyRemain).ToString("0") + " 积分", Good);
                     _detail.Text = "凭据已写入 " + BalanceSources.ResolveSecret(_secretFile) + "\n"
-                        + "来源：" + source + "。以后 cookie 再过期时，回到这里点一下即可，通常不用重新输密码。";
+                        + "来源：" + source + "。以后 cookie 再过期时，回到这里点一下即可，通常不用重新输密码。"
+                        // 传输方式被自检换过就得说出来 —— 悄悄换掉等于把「为什么以前不行」这个事实藏起来
+                        + (note.Length > 0 ? "\n传输自检：" + note : "");
                     _step.Text = "完成。可以关闭本窗口了。";
-                    LogDiag("回测通过 " + _platform + " = " + Math.Round(rep.WorkbuddyRemain).ToString("0"));
+                    LogDiag("回测通过 " + _platform + " = " + Math.Round(rep.WorkbuddyRemain).ToString("0")
+                        + (note.Length > 0 ? " 传输自检=" + note : ""));
                     _afterSave?.Invoke();
                 }
                 else if (StatusProbe.LooksLikeCredentialProblem(rep.WorkbuddyStatus))
                 {
                     if (oldRaw != null) BalanceSources.SaveSecret(_secretFile, oldRaw); else SafeDelete(_secretFile);
                     LogDiag("回测被拒 status=" + rep.WorkbuddyStatus + " cookie=" + cookieHeader.Split(';').Length
-                        + "项 final=[" + NamesOf(headers) + "] err=" + rep.WorkbuddyError);
+                        + "项 method=" + (captured == null ? "-" : captured.Method)
+                        + " body=" + (captured == null || string.IsNullOrEmpty(captured.Body) ? "-" : captured.Body.Length + "字符")
+                        + " final=[" + NamesOf(headers) + "] err=" + rep.WorkbuddyError
+                        + (note.Length > 0 ? " 传输自检=" + note : ""));
                     string hint = CredentialCapture.DescribeCapturedStatus(captured == null ? 0 : captured.Status);
                     Fail2("服务器仍然拒绝这份凭据（" + rep.WorkbuddyError + "）",
                         "已把原凭据还原回去，你的文件没被改坏。这次实际发出的是："
                         + cookieHeader.Split(';').Length + " 项 cookie，请求头 "
-                        + string.Join("、", headers.Select(h => h.Key)) + "。"
+                        + string.Join("、", headers.Select(h => h.Key))
+                        + "，方法 " + (captured == null ? "POST（默认）" : captured.Method)
+                        + (captured != null && !string.IsNullOrEmpty(captured.Body)
+                            ? "，body 按抄到的原样带上（" + captured.Body.Length + " 字符）"
+                            : "，body 为空（发空 JSON）")
+                        + "。"
                         + (hint.Length > 0 ? "\n" + hint : "")
                         + "\n" + replay
+                        + (note.Length > 0 ? "\n传输自检：" + note : "")
                         + "\n详细记录在 " + Path.Combine(StatusProbe.SecretDir(), "capture_log.txt"));
                 }
                 else

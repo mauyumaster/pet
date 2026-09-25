@@ -28,6 +28,15 @@ namespace AzhuPet
         public string PageOrigin = "";      // location.origin（相对地址兜底用）
         public string PageLanguage = "";    // navigator.language
 
+        // 浏览器客户端提示（Chromium 默认对 HTTPS 发这三项）。同样**不是装饰**：
+        // user-agent 说自己是 Edge 140，却不带 sec-ch-ua，这本身就是「脚本伪装的浏览器」的
+        // 典型指纹不一致 —— 站点若在网关层做风险控制，这一条足够让它拒绝（2026-09-25 的现场：
+        // 同一套 cookie，浏览器 200、我们 401，cookie 与请求头已逐项对齐，只剩「客户端身份」这一层）。
+        // ⚠ 值来自 navigator.userAgentData，是页面侧真值；拿不到就留空，一律不猜。
+        public string PageChUa = "";          // sec-ch-ua
+        public string PageChUaMobile = "";    // sec-ch-ua-mobile
+        public string PageChUaPlatform = "";  // sec-ch-ua-platform
+
         /// <summary>这次请求最终拿到的 HTTP 状态码（0 = 钩子还没等到响应，或定稿时响应未回）。
         /// ⚠ 这个字段本身就是判据：抄回来的那份若 status 不是 2xx，说明「网站自己发这个请求」也没成功
         ///   —— 那时候回测 401 与我们的拼接无关，去换凭据是白换（2026-09-25 卡住的那一轮正是如此）。</summary>
@@ -91,11 +100,21 @@ if(a.length<20)a.push(p);
 function abs(u){try{return new URL(''+u,location.href).href;}catch(e){return ''+u;}}
 function pg(){try{var s=''+(location.href||'');var i=s.indexOf('?');if(i>=0)s=s.substring(0,i);var j=s.indexOf('#');if(j>=0)s=s.substring(0,j);return s;}catch(e){return '';}}
 function og(){try{if(location.origin)return ''+location.origin;var m=/^([a-z][a-z0-9+.-]*:\/\/[^\/]+)/i.exec(''+(location.href||''));return m?m[1]:'';}catch(e){return '';}}
+function ch(){var o={chua:'',chuam:'',chuap:''};try{
+var q=String.fromCharCode(34);
+var d=navigator.userAgentData;if(!d)return o;
+if(d.brands&&d.brands.length){var a=[];for(var i=0;i<d.brands.length;i++){var b=d.brands[i];if(b&&b.brand)a.push(q+b.brand+q+';v='+q+b.version+q);}o.chua=a.join(', ');}
+if(typeof d.mobile==='boolean')o.chuam=d.mobile?'?1':'?0';
+if(d.platform)o.chuap=q+d.platform+q;
+}catch(e){}return o;}
+var HH=ch();
 function rec(u,m,h,b){try{
 seen(u);
 if(!u||(''+u).indexOf(PAT)<0)return null;
-var o={url:abs(u),method:''+(m||'GET'),headers:hdrs(h),body:(b==null?'':''+b),
-ua:(navigator.userAgent||''),href:pg(),org:og(),lang:(navigator.language||''),status:0};
+var o={url:abs(u),method:''+(m||'GET'),headers:hdrs(h),
+body:((typeof b==='string')?b:''),
+ua:(navigator.userAgent||''),href:pg(),org:og(),lang:(navigator.language||''),
+chua:HH.chua,chuam:HH.chuam,chuap:HH.chuap,status:0};
 if(!window.__azhuCapObj){window.__azhuCapObj=o;window.__azhuCapture=JSON.stringify(o);}
 return o;
 }catch(e){return null;}}
@@ -282,6 +301,9 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
                     if (root.TryGetProperty("href", out var hr) && hr.ValueKind == JsonValueKind.String) req.PageHref = hr.GetString() ?? "";
                     if (root.TryGetProperty("org", out var og) && og.ValueKind == JsonValueKind.String) req.PageOrigin = og.GetString() ?? "";
                     if (root.TryGetProperty("lang", out var lg) && lg.ValueKind == JsonValueKind.String) req.PageLanguage = lg.GetString() ?? "";
+                    if (root.TryGetProperty("chua", out var cu) && cu.ValueKind == JsonValueKind.String) req.PageChUa = cu.GetString() ?? "";
+                    if (root.TryGetProperty("chuam", out var cm) && cm.ValueKind == JsonValueKind.String) req.PageChUaMobile = cm.GetString() ?? "";
+                    if (root.TryGetProperty("chuap", out var cp) && cp.ValueKind == JsonValueKind.String) req.PageChUaPlatform = cp.GetString() ?? "";
                     // status 只在钩子等到响应之后才回填。取不到就是 0 ＝「还不知道」，**不是**「失败了」——
                     // 两者必须分开，否则会把「响应还没回来」误报成「网站自己也被拒」。
                     if (root.TryGetProperty("status", out var st) && IntOf(st, out int status)) req.Status = status;
@@ -303,23 +325,28 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
             return false;
         }
 
-        /// <summary>读一份**已有的**凭据文本，拆出 URL / 头 / body（纯函数）。
+        /// <summary>读一份**已有的**凭据文本，拆出 URL / 方法 / 头 / body（纯函数）。
         /// 规则与 BalanceSources.ReadSecret 一致（同一份数据没有第二个解析口径），
         /// 差别只在吃字符串而不是吃路径 —— 这样才能离线喂合成文本。</summary>
-        public static List<KeyValuePair<string, string>> ParseRawSecretText(string text, out string url, out string body)
+        public static List<KeyValuePair<string, string>> ParseRawSecretText(string text, out string url, out string body, out string method)
         {
-            url = null; body = null;
+            url = null; body = null; method = null;
             var headers = new List<KeyValuePair<string, string>>();
             if (string.IsNullOrEmpty(text)) return headers;
             var bodyLines = new List<string>();
-            bool inBody = false;
+            bool inBody = false, inMethod = false;
             foreach (string raw in text.Split('\n'))
             {
                 string line = raw.TrimEnd('\r');
                 string t = line.Trim();
-                if (t.StartsWith("---body", StringComparison.Ordinal)) { inBody = true; continue; }
-                if (t.StartsWith("---", StringComparison.Ordinal)) continue;
+                if (t.StartsWith("---body", StringComparison.Ordinal)) { inBody = true; inMethod = false; continue; }
+                if (t.StartsWith("---method", StringComparison.Ordinal)) { inMethod = true; inBody = false; continue; }
+                if (t.StartsWith("---", StringComparison.Ordinal)) { inMethod = false; continue; }
                 if (inBody) { bodyLines.Add(line); continue; }
+                // ⚠ 读到值就要**立刻复位** inMethod。不复位的话，method 之后的每一行都会
+                //   继续走这一支（被吞掉），而且 method 会被最后一个非空行反复覆盖 ——
+                //   实测得到的是 "COOKIE: SESSION=A"，而所有请求头一起消失。
+                if (inMethod) { if (t.Length > 0) { method = t.ToUpperInvariant(); inMethod = false; } continue; }
                 if (t.Length == 0 || t.StartsWith("#", StringComparison.Ordinal)) continue;
                 if (url == null) { url = t; continue; }
                 int c = line.IndexOf(':');
@@ -367,7 +394,10 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
             string targetUrl,
             string pageUserAgent,
             string pageHref,
-            string pageLanguage)
+            string pageLanguage,
+            string pageChUa = "",
+            string pageChUaMobile = "",
+            string pageChUaPlatform = "")
         {
             var result = new List<KeyValuePair<string, string>>();
             var at = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -405,6 +435,13 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
                 put("user-agent", pageUserAgent);
             if (!at.ContainsKey("accept-language"))
                 put("accept-language", AcceptLanguageOf(pageLanguage));
+            // 客户端提示：有真值才补，**绝不用假值凑数**（编一个 sec-ch-ua 只会让指纹更不一致）
+            if (!at.ContainsKey("sec-ch-ua") && !string.IsNullOrWhiteSpace(pageChUa))
+                put("sec-ch-ua", pageChUa);
+            if (!at.ContainsKey("sec-ch-ua-mobile") && !string.IsNullOrWhiteSpace(pageChUaMobile))
+                put("sec-ch-ua-mobile", pageChUaMobile);
+            if (!at.ContainsKey("sec-ch-ua-platform") && !string.IsNullOrWhiteSpace(pageChUaPlatform))
+                put("sec-ch-ua-platform", pageChUaPlatform);
             if (targetOrigin.Length > 0)
             {
                 put("origin", targetOrigin);   // 从目标 URL 算出来的是确定值
@@ -441,15 +478,20 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
             return s + "," + s.Substring(0, dash) + ";q=0.9";
         }
 
-        /// <summary>拼出凭据文件的正文（纯函数）：第一行 URL，随后「名字: 值」，可选 ---body--- 段。
+        /// <summary>拼出凭据文件的正文（纯函数）：第一行 URL，可选 ---method--- 段，随后「名字: 值」，可选 ---body--- 段。
         /// 行尾用 CRLF —— 与现有 workbuddy_secret.txt（CRLF=15）保持一致，用户在编辑器里看着正常。
-        /// URL 为空一律返回空串：宁可不写，也不写一份连请求地址都没有的凭据进去。</summary>
+        /// URL 为空一律返回空串：宁可不写，也不写一份连请求地址都没有的凭据进去。
+        /// ⚠ ---method--- 与 ---body--- 都是「抄到的事实」，缺了它们就等于把请求的另一半扔掉：
+        ///   2026-09-25 之前这两段**从来没被发出去过**（回测写死 POST + 空 body `{}`），而 GET 同一个
+        ///   地址实测返回 404 —— 也就是说方法一旦抄错，回测连「地址不存在」和「没通过鉴权」都分不清。</summary>
         public static string ComposeSecret(string url, IEnumerable<KeyValuePair<string, string>> headers,
-            string cookieHeader, string body)
+            string cookieHeader, string body, string method = null)
         {
             if (string.IsNullOrWhiteSpace(url)) return "";
             var sb = new System.Text.StringBuilder();
             sb.Append(url.Trim()).Append("\r\n");
+            if (!string.IsNullOrWhiteSpace(method))
+                sb.Append("---method---\r\n").Append(method.Trim().ToUpperInvariant()).Append("\r\n");
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var h in headers ?? Enumerable.Empty<KeyValuePair<string, string>>())
             {

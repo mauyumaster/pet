@@ -143,13 +143,17 @@ namespace AzhuPet
             if (abs == null || !File.Exists(abs)) return (string.Empty, string.Empty);
             var headers = new List<string>();
             var body = new List<string>();
-            bool inBody = false;
+            bool inBody = false, inMethod = false;
             foreach (string raw in File.ReadAllLines(abs))
             {
                 string t = raw.Trim();
-                if (t.StartsWith("---body", StringComparison.Ordinal)) { inBody = true; continue; }
-                if (t.StartsWith("---", StringComparison.Ordinal)) { continue; }
+                if (t.StartsWith("---body", StringComparison.Ordinal)) { inBody = true; inMethod = false; continue; }
+                if (t.StartsWith("---method", StringComparison.Ordinal)) { inMethod = true; inBody = false; continue; }
+                if (t.StartsWith("---", StringComparison.Ordinal)) { inMethod = false; continue; }
                 if (inBody) { body.Add(raw); continue; }
+                // ⚠ ---method--- 段的值**不是请求头**，且读到值后必须立刻复位：不复位的话
+                //   它后面所有请求头都会被当成「方法段」整段吞掉（同一份文件格式，两个读取口径必须一致）。
+                if (inMethod) { if (t.Length > 0) inMethod = false; continue; }
                 if (t.Length == 0 || t.StartsWith("#", StringComparison.Ordinal)) continue;
                 headers.Add(raw);
             }

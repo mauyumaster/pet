@@ -299,6 +299,21 @@ namespace AzhuPet
                     && CredentialCapture.ParseCaptured("{}") == null,
                     "负对照：非对象／坏 JSON／无 URL 一律返回 null 而不是抛（TryGetProperty 对非 Object 会抛）", ref pass, ref fail);
 
+                // 客户端提示与状态码是一起从浏览器那圈 JSON 里带回来的。
+                // ⚠ 这里刻意让值里**带双引号**（sec-ch-ua 的真实形态就是 `"Chromium";v="140"`）：
+                //   钩子那头是 JSON.stringify，C# 这头是 JsonDocument —— 转义错一格就会静默变空。
+                string hitHint = "{\"url\":" + JsonSerializer.Serialize(WbApi)
+                    + ",\"chua\":" + JsonSerializer.Serialize("\"Chromium\";v=\"140\"")
+                    + ",\"chuam\":\"?0\",\"chuap\":" + JsonSerializer.Serialize("\"Windows\"")
+                    + ",\"status\":200}";
+                var capHint = CredentialCapture.ParseCaptured(hitHint);
+                Check(capHint != null && capHint.PageChUa == "\"Chromium\";v=\"140\""
+                    && capHint.PageChUaMobile == "?0" && capHint.PageChUaPlatform == "\"Windows\""
+                    && capHint.Status == 200,
+                    "解析抄到的请求时带出三项客户端提示与状态码（值里带引号也能过 JSON 这一圈）", ref pass, ref fail);
+                Check(CredentialCapture.ParseCaptured("{\"url\":\"https://x/y\",\"chua\":123}").PageChUa == "",
+                    "负对照：客户端提示不是字符串时按空处理，不抛", ref pass, ref fail);
+
                 // 拼出来的文件必须能被**正式读取路径**读回去 —— 同一份数据不许有两个解析口径。
                 BalanceSources.SaveSecret("wb-compose-test.secret.txt", CredentialCapture.ComposeSecret(
                     cap.Url, cap.Headers, CredentialCapture.BuildCookieHeader(jar), cap.Body));
@@ -327,8 +342,10 @@ namespace AzhuPet
 
                 // 「直接抓取」那条路：沿用旧凭据的请求头，只把 cookie 换掉。
                 string oldText = "https://www.workbuddy.cn/billing/meter/get-user-resource\r\nuser-agent: UA\r\ncookie: old=1\r\nx-user-id: abc\r\n";
-                string oldUrl, oldBody;
-                var oldHeaders = CredentialCapture.ParseRawSecretText(oldText, out oldUrl, out oldBody);
+                string oldUrl, oldBody, oldMethod;
+                var oldHeaders = CredentialCapture.ParseRawSecretText(oldText, out oldUrl, out oldBody, out oldMethod);
+                Check(oldMethod == null,
+                    "负对照：旧格式（没有 ---method--- 段）读出的方法是 null，不是替它猜一个 POST 出来", ref pass, ref fail);
                 Check(oldUrl == "https://www.workbuddy.cn/billing/meter/get-user-resource" && oldHeaders.Count == 3
                     && oldHeaders.Any(h => h.Key == "x-user-id" && h.Value == "abc"),
                     "能拆出旧凭据的 URL 与请求头（只换 cookie 那条路靠它）", ref pass, ref fail);
@@ -336,6 +353,60 @@ namespace AzhuPet
                 Check(replayed.Contains("user-agent: UA") && replayed.Contains("x-user-id: abc")
                     && replayed.Contains("session=new; session_2=new2") && !replayed.Contains("old=1"),
                     "旧 cookie 被新 cookie 顶掉，其它头原样保留（不出现两个 cookie 行）", ref pass, ref fail);
+
+                // ---- method / body：抄到的事实必须原样落盘、原样发出去 ----
+                // 2026-09-25 现场：这两段**从来没被发出去过**（回测写死 POST + 空 body `{}`），
+                // 而实测 GET 同一个地址返回 404 —— 方法错一格，连「地址不存在」和「没通过鉴权」都分不开。
+                string withMethod = CredentialCapture.ComposeSecret(cap.Url, cap.Headers, "session=a", "{\"PageSize\":20}", "POST");
+                string rUrl2, rBody2, rMethod2;
+                var rHeaders2 = CredentialCapture.ParseRawSecretText(withMethod, out rUrl2, out rBody2, out rMethod2);
+                Check(rMethod2 == "POST" && rUrl2 == cap.Url, "method 段落盘后能读回（URL 仍在第一行）", ref pass, ref fail);
+                Check(rBody2 == "{\"PageSize\":20}", "body 段落盘后能读回", ref pass, ref fail);
+                // ⚠ 必须同时钉死「头还在」：`All()` 在空列表上**恒为真** —— 只写 All 的话，
+                //   「method 段把后面的请求头整段吞掉」这个 bug 照样全绿（本轮就真的这么空过一次）。
+                Check(rHeaders2.Count == 3 && rHeaders2.Any(h => h.Key == "content-type")
+                    && rHeaders2.Any(h => h.Key == "x-user-id" && h.Value == "abc")
+                    && rHeaders2.Any(h => h.Key == "cookie"),
+                    "method 段不吞掉后面的请求头（content-type / x-user-id / cookie 都还在）", ref pass, ref fail);
+                Check(rHeaders2.All(h => !h.Key.Contains("{") && !h.Key.Contains("}")
+                        && h.Key.IndexOf("PageSize", StringComparison.OrdinalIgnoreCase) < 0),
+                    "body 那行 JSON 不会被当成请求头（解析器必须认识 ---body--- 段）", ref pass, ref fail);
+                Check(rHeaders2.All(h => !h.Key.Equals("POST", StringComparison.OrdinalIgnoreCase)),
+                    "---method--- 的值不会被当成一行请求头", ref pass, ref fail);
+                BalanceSources.SaveSecret("wb-method-test.secret.txt", withMethod);
+                var rtMethod = BalanceSources.ReadSecret("wb-method-test.secret.txt");
+                Check(!rtMethod.headers.Contains("POST") && rtMethod.body == "{\"PageSize\":20}"
+                    && rtMethod.headers.Contains("x-user-id: abc") && rtMethod.headers.Contains("cookie: session=a"),
+                    "另一条读取路径（自定义余额源）同样不吞头、也不把 method 当请求头", ref pass, ref fail);
+                Check(CredentialCapture.ComposeSecret(cap.Url, cap.Headers, "session=a", null, null)
+                        .IndexOf("---method---", StringComparison.Ordinal) < 0,
+                    "负对照：没抄到方法时不写 method 段（不编一个默认值冒充事实）", ref pass, ref fail);
+
+                // ---- 客户端提示：只有页面给了真值才补 ----
+                var hNoHint = CredentialCapture.BuildFinalHeaders(null, null, WbApi, "UA", WbApi, "zh-CN");
+                Check(!hNoHint.Any(h => h.Key == "sec-ch-ua"),
+                    "负对照：没有真客户端提示时不补 sec-ch-ua（编一个只会让指纹更不一致）", ref pass, ref fail);
+                var hHint = CredentialCapture.BuildFinalHeaders(null, null, WbApi, "UA", WbApi, "zh-CN",
+                    "\"Chromium\";v=\"140\"", "?0", "\"Windows\"");
+                Check(hHint.Any(h => h.Key == "sec-ch-ua" && h.Value == "\"Chromium\";v=\"140\"")
+                    && hHint.Any(h => h.Key == "sec-ch-ua-mobile") && hHint.Any(h => h.Key == "sec-ch-ua-platform"),
+                    "页面给了真值就补上三项客户端提示", ref pass, ref fail);
+
+                // ---- 传输矩阵：唯一能把「协议／代理」与「客户端指纹」分开的判据 ----
+                // 现场事实：同一套 cookie、同一组请求头，浏览器 200、.NET 401。
+                // 那两层都排除后，只剩出口 IP 与协议版本 —— 这两个各有一个开关，必须先能单独试。
+                Check(StatusProbe.PickWorkingTransport(new[] { 401, 200, 401, 401 }) == 1,
+                    "矩阵：只有直连是 2xx 时选直连", ref pass, ref fail);
+                Check(StatusProbe.PickWorkingTransport(new[] { 401, 401, 200, 200 }) == 2,
+                    "矩阵：并列 2xx 时取序号靠前（离现状改动最小的那个）", ref pass, ref fail);
+                Check(StatusProbe.PickWorkingTransport(new[] { 0, 404, 500, -1 }) == -1,
+                    "负对照：无响应(0/-1)、404、500 一律不算通过（不许把「没试成」当「能过」）", ref pass, ref fail);
+                Check(StatusProbe.DescribeTransportVerdict(new[] { 401, 401, 401, 401 }, -1).Contains("全部被拒"),
+                    "矩阵全失败时结论必须点明「不是协议、也不是代理」", ref pass, ref fail);
+                Check(StatusProbe.DescribeTransportVerdict(new[] { 401, 200, 401, 401 }, 1).Contains("系统代理"),
+                    "矩阵选出直连时结论必须点明差异在系统代理（否则用户不知道下一步做什么）", ref pass, ref fail);
+                Check(StatusProbe.DescribeTransportVerdict(new[] { 401, 401, 401, 401 }, -1).Contains("401 / 401"),
+                    "矩阵结论里带上四次的状态码（证据要与结论一起出现）", ref pass, ref fail);
 
                 Check(new StatusReport().WorkbuddyStatus == -1
                     && !StatusProbe.LooksLikeCredentialProblem(new StatusReport().WorkbuddyStatus),

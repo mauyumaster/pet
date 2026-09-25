@@ -45,10 +45,13 @@ async function main() {
     //   根本没法验 —— 而它正是「抄到的那个请求到底成功没有」的唯一来源。
     // ⚠ XHR 桩加了 addEventListener ＋ finishWith：真实 XHR 靠 loadend 事件交出状态码，
     //   桩不模拟就等于那条路径测不到（本文件存在的全部理由就是「注入的 JS 没人编译检查，只能真跑」）。
-    function makeEnv(href, ua, lang, fetchStatus) {
+    function makeEnv(href, ua, lang, fetchStatus, uaData) {
         const w = {};
         const loc = { href: href || 'https://www.workbuddy.cn/dashboard' };
         const nav = { userAgent: ua === undefined ? 'Mozilla/5.0 (Test) Edg/153.0' : ua, language: lang === undefined ? 'zh-CN' : lang };
+        nav.userAgentData = uaData === undefined
+            ? { brands: [{ brand: 'Chromium', version: '140' }, { brand: 'Microsoft Edge', version: '140' }], mobile: false, platform: 'Windows' }
+            : uaData;
         const st = fetchStatus === undefined ? 200 : fetchStatus;
         w.fetch = function () { return Promise.resolve({ ok: st >= 200 && st < 300, status: st }); };
         function XHR() { this._h = {}; this._ls = {}; this.status = 0; }
@@ -212,6 +215,44 @@ async function main() {
             '负对照：query 里的 token 不出现在诊断列表里');
         check(String(captureOf(env).url).includes('token=SUPERSECRET'),
             '但抓取目标的 URL 保留 query（接口靠它传参，丢了请求就是错的）');
+    }
+
+    // 11) 客户端提示（2026-09-25 加）：现场是「同一套 cookie、同一组请求头，浏览器 200、我们 401」。
+    //     cookie 与头都排除了之后，剩下的变量里有「UA 说自己是 Edge、却不带 sec-ch-ua」这种
+    //     指纹不一致 —— 而 userAgentData 是页面侧真值，抄下来才是「抄」，不能自己编。
+    {
+        const env = makeEnv();
+        env.window.fetch(TARGET, { method: 'POST' });
+        const cap = captureOf(env);
+        check(!!cap && cap.chua === '"Chromium";v="140", "Microsoft Edge";v="140"',
+            '客户端提示 sec-ch-ua 按 brand;v= 的真实格式抄下来');
+        check(!!cap && cap.chuam === '?0' && cap.chuap === '"Windows"',
+            '客户端提示的 mobile / platform 也一起抄（缺一项就是一份自相矛盾的指纹）');
+    }
+    // 负对照：没有 userAgentData 的浏览器（老内核）→ 三项为空串，且钩子照样装得上。
+    // ⚠ 这条是必须的：ch() 在**注入时**就跑，它若抛异常，整个钩子都不会装 —— 而那种失败
+    //   在现象上与「页面压根不发请求」一模一样，正是本项目记录过的「静默失效」。
+    {
+        const env = makeEnv(undefined, undefined, undefined, undefined, null);
+        env.window.fetch(TARGET, { method: 'POST' });
+        const cap = captureOf(env);
+        check(cap !== null && cap.chua === '' && cap.chuam === '' && cap.chuap === '',
+            '负对照：没有 userAgentData 时三项为空串（不编值，也不因此装不上钩子）');
+    }
+
+    // 12) body 只抄**字符串**（2026-09-25 加）。
+    //     ⚠ 此前是 `''+b`：Session/FormData/对象一律被拼成 "[object FormData]" 这种字符串。
+    //     以前它无害（body 没人发），但从「body 原样上路」那一笔起，它会被**真的发出去** ——
+    //     「抄不到就留空」比「抄到一个假的事实」安全得多。
+    {
+        const env = makeEnv();
+        env.window.fetch(TARGET, { method: 'POST', body: { a: 1 } });
+        check(captureOf(env).body === '', '负对照：非字符串 body 抄成空串，而不是 "[object Object]"');
+    }
+    {
+        const env = makeEnv();
+        env.window.fetch(TARGET, { method: 'POST', body: '' });
+        check(captureOf(env).body === '', '空字符串 body 也是空串（回测那边据此退回空 JSON）');
     }
 
     console.log('hook_check：PASS ' + pass + ' / FAIL ' + fail);
