@@ -428,7 +428,7 @@ namespace AzhuPet
                         string preview = (respBody ?? "").Length > 80 ? respBody.Substring(0, 80) : (respBody ?? "");
                         err = resp.IsSuccessStatusCode
                             ? "trae字段缺失(body=" + preview.Replace("\r", " ").Replace("\n", " ") + ")"
-                            : ((int)resp.StatusCode).ToString();
+                            : DescribeHttpFailure((int)resp.StatusCode, respBody);
                     }
                 }
             }
@@ -473,7 +473,7 @@ namespace AzhuPet
                     using (var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead))
                     {
                         string respBody = await resp.Content.ReadAsStringAsync();
-                        if (!resp.IsSuccessStatusCode) err = ((int)resp.StatusCode).ToString();
+                        if (!resp.IsSuccessStatusCode) err = DescribeHttpFailure((int)resp.StatusCode, respBody);
                         else
                         {
                             // 解析与口径判定全在 ParseWorkbuddyJson 里（纯函数）——
@@ -616,7 +616,7 @@ namespace AzhuPet
                         using (var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead))
                         {
                             string respBody = await resp.Content.ReadAsStringAsync();
-                            if (!resp.IsSuccessStatusCode) { ApplyError(((int)resp.StatusCode).ToString()); }
+                            if (!resp.IsSuccessStatusCode) { ApplyError(DescribeHttpFailure((int)resp.StatusCode, respBody)); }
                             else
                             {
                                 try { using (var doc = JsonDocument.Parse(respBody)) { cell.Value = PathJsonExtract.Eval(src.PathExpr, doc); } }
@@ -663,7 +663,7 @@ namespace AzhuPet
                             return r => { r.BalanceOk = true; r.CustomValue = v; r.BalanceUnit = BalanceUnit; };
                         string err = resp.IsSuccessStatusCode
                             ? "字段[" + BalanceKey + "]缺失"
-                            : ((int)resp.StatusCode).ToString();
+                            : DescribeHttpFailure((int)resp.StatusCode, body);
                         string e2 = err;
                         return r => r.Error = e2;
                     }
@@ -694,13 +694,27 @@ namespace AzhuPet
                         if (resp.IsSuccessStatusCode && !double.IsNaN(bal)
                             && (string.IsNullOrEmpty(body) || body.IndexOf("balance_infos", StringComparison.Ordinal) >= 0))
                             return r => { r.BalanceOk = true; r.BalanceCny = bal; r.RemainingTokens = (long)(bal * TokensPerYuan); };
-                        error = resp.IsSuccessStatusCode ? "余额字段缺失" : ((int)resp.StatusCode).ToString();
+                        error = resp.IsSuccessStatusCode ? "余额字段缺失" : DescribeHttpFailure((int)resp.StatusCode, body);
                     }
                 }
             }
             catch (Exception ex) { error = Shrink(ex.Message); }
             var e2 = error;
             return r => r.Error = e2;
+        }
+
+        /// <summary>HTTP 失败时的错误文本（**纯函数**，可离线钉住）：状态码 ＋ 响应体摘要。
+        /// ⚠ 2026-09-25 修的：此前所有失败分支只输出状态码（气泡上就是光秃秃的「401」），
+        ///   于是「凭据过期」「缺请求头」「网关/WAF 拦截」三种完全不同的故障长得一模一样 ——
+        ///   而区分它们的唯一线索（响应体里的 message）当场被丢掉了。
+        ///   这与「成功但字段缺失时反而带 body preview」也不一致（同一个响应里两种待遇）。
+        /// 阈值取绝对 120 字符（判据纪律 3）：截断要带绝对阈值，也避免把整页 HTML 灌进气泡。</summary>
+        public static string DescribeHttpFailure(int status, string body)
+        {
+            string b = (body ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+            if (b.Length == 0) return status.ToString(CultureInfo.InvariantCulture);
+            if (b.Length > 120) b = b.Substring(0, 120) + "…";
+            return status.ToString(CultureInfo.InvariantCulture) + "（" + b + "）";
         }
 
         private static string Shrink(string s)

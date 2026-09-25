@@ -69,8 +69,8 @@ namespace AzhuPet
                     + " ⇒ type 分桶或字段语义已变，须重新对照 WorkBuddy 界面" );
                 rc = 1;
             }
-            if (slots[0].exists && !rep.TraeOk) { Console.WriteLine("[FAIL] Trae 凭据在，但积分没读到"); rc = 1; }
-            if (slots[1].exists && !rep.WorkbuddyOk) { Console.WriteLine("[FAIL] WorkBuddy 凭据在，但积分没读到"); rc = 1; }
+            if (slots[0].exists && !rep.TraeOk) { Console.WriteLine("[FAIL] Trae 凭据在，但积分没读到：" + (rep.TraeError ?? "(无原因)")); rc = 1; }
+            if (slots[1].exists && !rep.WorkbuddyOk) { Console.WriteLine("[FAIL] WorkBuddy 凭据在，但积分没读到：" + (rep.WorkbuddyError ?? "(无原因)")); rc = 1; }
             foreach (var cell in rep.DynamicRows)
                 if (!cell.Ok) { Console.WriteLine("[FAIL] " + cell.Name + " 配置已启用，但余额没读到：" + cell.Error); rc = 1; }
 
