@@ -39,7 +39,7 @@
 
   <text x="292" y="262" fill="#2d54b4" font-size="11px">→  新文件挪成 pet.exe</text>
 
-  <text x="40" y="288" fill="#687082" font-size="10px">实测确认：Windows 允许正在运行的进程重命名自己的 exe（是改名、不是删除）—— 所以不需要独立的 updater 进程、不需要批处理。</text>
+  <text x="40" y="288" fill="#687082" font-size="10px">实测确认：Windows 允许正在运行的进程重命名自己的 exe（是改名，不是删除）—— 所以不需要独立进程。</text>
 
   <rect x="572" y="196" width="128" height="98" rx="8" fill="#ffffff" stroke="#e4e7ee" stroke-width="1"/>
   <text x="636" y="220" fill="#1c202a" font-size="11px" text-anchor="middle" font-weight="600">守卫条件</text>

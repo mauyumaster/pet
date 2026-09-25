@@ -9,9 +9,16 @@ WHY 需要它：渲染兼容性判据（check-readme-svgs.py）只保证「GitHu
 
 办法：把 <text> 的字宽按「中文＝1em、西文/数字≈0.55em」估出来，得到包围盒，
 然后查三件事：
-  1. 出界  —— 盒子超出 viewBox
+  1. 出界   —— 盒子超出 viewBox
   2. 自身压 —— 同一行里两个 text 水平距离过近
-  3. 压色块 —— 文字压在与自己颜色太接近的背景上（对比度不足）
+  3. 撑出色块 —— 一段文字的起点落在某个小色块里，盒子却从色块右边伸出去
+
+⚠ 第 3 条是 2026-09-26 补的，而且**是被一次真实的漏网逼出来的**：原来的脚本只查
+「有没有出画布」，于是「文字长出色块」这类排版事故它一律放行 —— 图能画出来、守卫全绿、
+线上看着就是文字压出边框。这和本项目在打包脚本上踩的是同一个坑：**判据太松＝没有判据**。
+补的时候顺手做了负对照（把一行文案人为加长，确认它真的会红）。
+
+⚠ 尚未实现：文档早期声称查「对比度不足」，代码里其实只有上面三条。别拿文档当判据。
 
 这是**估算**，不是精确渲染度量。所以阈值留了余量，报出来的要人工确认。
 用法：python check-svg-layout.py [file.svg ...]
@@ -95,7 +102,8 @@ def bounds_of(svg_w, svg_h, texts, rects):
             x0 = x
         # y 是基线；字高约 0.75em 在上、0.25em 在下
         boxes.append({'x0': x0, 'x1': x0 + w, 'y0': y - fs * 0.78, 'y1': y + fs * 0.25,
-                      'fs': fs, 'text': body, 'fill': t.get('fill')})
+                      'fs': fs, 'text': body, 'fill': t.get('fill'),
+                      'ox': x, 'oy': y})
 
     # 1. 出界
     for b in boxes:
@@ -115,6 +123,53 @@ def bounds_of(svg_w, svg_h, texts, rects):
                 issues.append(('重叠', '「%s」 与 「%s」 水平重叠 %.0fpx'
                                % (a['text'][:16], c['text'][:16], -hgap)))
     return boxes, issues
+
+
+def containment_issues(rects, boxes, max_host_w=600):
+    """3. 撑出色块 —— 文字起点在某个色块里，盒子却从它右边伸出去。
+
+    WHY 要有这一条：只查「出画布」拦不住最常见的排版事故。一段文案被改长之后，
+    画布还是装得下，色块却装不下了 —— 渲染出来就是文字压在边框上。
+    GitHub 的渲染守卫（check-readme-svgs.py）也不管这个：它只管颜色会不会被剥掉。
+
+    只把**小色块**当承载容器（宽度 <= max_host_w）：外层白色底板本来就应该包住一整片，
+    拿它当容器等于什么都没查。
+    """
+    issues = []
+    hosts = []
+    for r in rects:
+        try:
+            rx = float(r.get('x', 0)); ry = float(r.get('y', 0))
+            rw = float(r.get('width', 0)); rh = float(r.get('height', 0))
+        except ValueError:
+            continue
+        if rw <= 0 or rh <= 0 or rw > max_host_w:
+            continue
+        hosts.append((rx, ry, rw, rh))
+
+    for b in boxes:
+        ox, oy = b.get('ox'), b.get('oy')
+        if ox is None or oy is None:
+            continue
+        # 起点**深入**落在哪个小色块里，那个色块才算它的「家」。
+        #
+        # ⚠ 留 2px 边距不是洁癖，是实测逼出来的：privacy-boundary.svg 里有一句
+        # 居中的「分界线」标签，起点 x 恰好等于左边那个面板的右边界（424 == 424）。
+        # 按「<=」判定，这句**刻意压在分隔线上**的标签会被算成「从面板里伸出来 15px」，
+        # 报出一个假阳性。判据放着假阳性不管，下次真出问题时就没人信它了。
+        host = None
+        for (rx, ry, rw, rh) in hosts:
+            if rx + 2 <= ox <= rx + rw - 2 and ry + 2 <= oy <= ry + rh - 2:
+                host = (rx, ry, rw, rh)
+        if host is None:
+            continue        # 不在任何小色块**内部**（标题、压边界的标签、自由文字），不适用
+        rx, ry, rw, rh = host
+        over = max(b['x1'] - (rx + rw), rx - b['x0'])
+        if over > 0.5:
+            side = '右' if b['x1'] > rx + rw else '左'
+            issues.append(('撑出', '「%s」 从色块%s边伸出 %.0fpx（色块 x=[%.0f,%.0f]，文字 x=[%.0f,%.0f]）'
+                           % (b['text'][:16], side, over, rx, rx + rw, b['x0'], b['x1'])))
+    return issues
 
 
 def main():
@@ -138,13 +193,14 @@ def main():
         rects = [e for e in root.iter() if e.tag.endswith('}rect')]
 
         boxes, issues = bounds_of(svg_w, svg_h, texts, rects)
+        issues += containment_issues(rects, boxes)
         print('  %s  —— %d 段文字, 画布 %gx%g' % (name, len(texts), svg_w, svg_h))
         if issues:
             bad += 1
             for kind, msg in issues:
                 print('     [%s] %s' % (kind, msg))
         else:
-            print('     [PASS] 无出界、无重叠')
+            print('     [PASS] 无出界、无重叠、无撑出色块')
     print('---- %d 张图，%d 张有排版问题 ----' % (len(files), bad))
     print('注：字宽为估算（中文 1em／西文 0.55em），报出来的请人工确认。')
     return 1 if bad else 0
