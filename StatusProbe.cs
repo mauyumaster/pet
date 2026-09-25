@@ -703,6 +703,15 @@ namespace AzhuPet
             return r => r.Error = e2;
         }
 
+        /// <summary>这个状态码是否指向「凭据问题」（纯函数，可离线验）。
+        /// 401 = 未认证、403 = 拒绝访问 —— 两者都说明「你的身份凭证没被接受」，
+        /// 与 404 / 500 / 超时那类「接口或网络的事」是两回事。别的码一律 false，避免误导。
+        /// ⚠ 抽成独立函数而不是写在 DescribeHttpFailure 里，是为了让判据能单独钉住这条分界线。</summary>
+        public static bool LooksLikeCredentialProblem(int status)
+        {
+            return status == 401 || status == 403;
+        }
+
         /// <summary>HTTP 失败时的错误文本（**纯函数**，可离线钉住）：状态码 ＋ 响应体摘要。
         /// ⚠ 2026-09-25 修的：此前所有失败分支只输出状态码（气泡上就是光秃秃的「401」），
         ///   于是「凭据过期」「缺请求头」「网关/WAF 拦截」三种完全不同的故障长得一模一样 ——
@@ -712,9 +721,16 @@ namespace AzhuPet
         public static string DescribeHttpFailure(int status, string body)
         {
             string b = (body ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
-            if (b.Length == 0) return status.ToString(CultureInfo.InvariantCulture);
             if (b.Length > 120) b = b.Substring(0, 120) + "…";
-            return status.ToString(CultureInfo.InvariantCulture) + "（" + b + "）";
+            string code = status.ToString(CultureInfo.InvariantCulture);
+
+            // ⚠ 凭据类失败的**结论前置**（2026-09-25 加）：这条消息的唯一目的是让用户去更新凭据，
+            //   把提示藏在 120 字符的响应体后面等于没说 —— 气泡会折行，用户只看到前半截状态码。
+            //   ⇒ 反过来「先给结论、再给线索（响应体）」。非凭据类失败保持「码（body）」原样。
+            if (LooksLikeCredentialProblem(status))
+                return code + " · 凭据可能已过期" + (b.Length == 0 ? "" : "：" + b);
+
+            return b.Length == 0 ? code : code + "（" + b + "）";
         }
 
         private static string Shrink(string s)

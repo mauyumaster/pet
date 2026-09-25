@@ -48,10 +48,19 @@ namespace AzhuPet
                 //   这里不联网就能把这四条钉住（含「无响应体」「超长」「含换行」三种退化形状）。
                 Check(StatusProbe.DescribeHttpFailure(401, @" {""code"":1001,""msg"":""unauthorized""}").Contains("unauthorized"),
                     "401 文案带出响应体线索（可区分过期/拦截）", ref pass, ref fail);
-                Check(StatusProbe.DescribeHttpFailure(401, null) == "401",
-                    "无响应体时退化为纯状态码（不出现空括号）", ref pass, ref fail);
+                Check(StatusProbe.DescribeHttpFailure(401, null) == "401 · 凭据可能已过期",
+                    "401 直接点明「凭据可能已过期」（结论前置；空体不出现空括号）", ref pass, ref fail);
                 Check(StatusProbe.DescribeHttpFailure(403, "a\r\nb").IndexOf('\n') < 0,
                     "响应体换行被压平（气泡只显示一行）", ref pass, ref fail);
+                Check(StatusProbe.DescribeHttpFailure(403, "denied").StartsWith("403 · 凭据可能已过期", StringComparison.Ordinal),
+                    "403 同样算凭据问题", ref pass, ref fail);
+                Check(StatusProbe.DescribeHttpFailure(500, null) == "500",
+                    "非凭据类且无响应体时退化为纯状态码", ref pass, ref fail);
+                Check(StatusProbe.DescribeHttpFailure(404, "not found") == "404（not found）",
+                    "负对照：404 不误报凭据问题（否则提示会变噪声）", ref pass, ref fail);
+                Check(StatusProbe.LooksLikeCredentialProblem(401) && StatusProbe.LooksLikeCredentialProblem(403)
+                    && !StatusProbe.LooksLikeCredentialProblem(500) && !StatusProbe.LooksLikeCredentialProblem(404),
+                    "凭据问题的判据只认 401/403", ref pass, ref fail);
                 Check(StatusProbe.DescribeHttpFailure(500, new string('x', 5000)).Length < 200,
                     "超长响应体被截断，不灌爆气泡", ref pass, ref fail);
                 // 负对照（判据纪律 7：先证明它能失败）：旧行为只回状态码 ⇒ 带响应体时**必须**不再退化为纯「401」。
