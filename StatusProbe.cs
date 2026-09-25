@@ -732,9 +732,30 @@ namespace AzhuPet
             //   把提示藏在 120 字符的响应体后面等于没说 —— 气泡会折行，用户只看到前半截状态码。
             //   ⇒ 反过来「先给结论、再给线索（响应体）」。非凭据类失败保持「码（body）」原样。
             if (LooksLikeCredentialProblem(status))
+            {
+                // ⚠⚠ 再拆一层（2026-09-25，用户现场截图）：同样是「401」，**修法完全相反**。
+                //   APISIX 网关的拒绝页是 HTML（请求根本没到应用）—— 那种情形多半是**请求头不完整**，
+                //   去换凭据没用；应用层的拒绝是 JSON（凭据本身失效）—— 那才要去更新凭据。
+                //   项目里本来就写着这条口径（见 WorkBuddyBalanceAsync 的注释：「完整请求头需原样带上，
+                //   否则 APISIX 网关会 401」），只是从来没让用户看到过。而用户能看到的只有三个数字。
+                if (LooksLikeGatewayPage(body))
+                    return code + " · 被网关挡下（请求没到应用，多半是请求头不完整）";
                 return code + " · 凭据可能已过期" + (b.Length == 0 ? "" : "：" + b);
+            }
 
             return b.Length == 0 ? code : code + "（" + b + "）";
+        }
+
+        /// <summary>响应体看起来是网关/WAF 的 HTML 错误页（纯函数）。
+        /// 用途：把「401」拆成**两种修法相反**的故障 —— 见 DescribeHttpFailure 里的说明。
+        /// ⚠ 只认「整段以 &lt; 开头」这一条：JSON 响应体里 message 字段带 HTML 片段（比如 "&lt;b&gt;"）
+        ///   不该被误判成整页网关页 —— 那会把「凭据过期」误报成「网关拦截」。</summary>
+        public static bool LooksLikeGatewayPage(string body)
+        {
+            string b = (body ?? "").TrimStart();
+            if (b.Length == 0 || b[0] != '<') return false;
+            string low = b.ToLowerInvariant();
+            return low.Contains("<html") || low.Contains("<head") || low.Contains("<center") || low.Contains("<!doctype");
         }
 
         private static string Shrink(string s)

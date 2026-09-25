@@ -68,6 +68,24 @@ namespace AzhuPet
                 Check(StatusProbe.DescribeHttpFailure(401, @" {""msg"":""unauthorized""}") != "401",
                     "负对照：带响应体时不再退化为纯「401」（旧行为在此判红）", ref pass, ref fail);
 
+                // ---- 同样是 401，网关层与应用层要分家（修法相反）----
+                // ⚠ 2026-09-25 用户现场：页面左侧明明白白显示着余额，回测却回 401 —— 而且响应体是
+                //   nginx/APISIX 的 HTML 页。这说明请求**根本没到应用**，不是凭据失效。
+                //   项目本来就写着这条口径（WorkBuddyBalanceAsync 的注释：「完整请求头需原样带上，
+                //   否则 APISIX 网关会 401」），只是从来没让用户看到过。
+                const string gwBody = "<html><head><title>401 Authorization Required</title></head><body><center><h1>401 Authorization Required</h1></center></body></html>";
+                Check(StatusProbe.LooksLikeGatewayPage(gwBody), "认得网关拒绝页（HTML）", ref pass, ref fail);
+                Check(StatusProbe.DescribeHttpFailure(401, gwBody).Contains("被网关挡下"),
+                    "网关 401 直接说「请求没到应用，多半是请求头不完整」", ref pass, ref fail);
+                Check(!StatusProbe.DescribeHttpFailure(401, gwBody).Contains("凭据可能已过期"),
+                    "负对照：网关 401 不再误报成「凭据过期」（那会让用户白换一次凭据）", ref pass, ref fail);
+                Check(StatusProbe.DescribeHttpFailure(401, @" {""code"":""TOKEN_EXPIRED""}").Contains("凭据可能已过期"),
+                    "应用层的 JSON 401 仍然说「凭据可能已过期」", ref pass, ref fail);
+                Check(!StatusProbe.LooksLikeGatewayPage(@" {""msg"":""<b>denied</b>""}"),
+                    "负对照：JSON 响应体里带 HTML 片段不算整页网关页（否则会把过期误报成拦截）", ref pass, ref fail);
+                Check(!StatusProbe.LooksLikeGatewayPage(null) && !StatusProbe.LooksLikeGatewayPage(""),
+                    "负对照：空响应体不算网关页", ref pass, ref fail);
+
                 // ---- 浏览器取凭据：采集规则（CredentialCapture）----
                 // ⚠ 2026-09-25：把「面板里登录一次就拿到凭据」的**规则**从浏览器宿主里拆出来，
                 //   唯一目的就是让它有资格被验 —— 真浏览器不会为了让我们验证而变形，
@@ -126,6 +144,95 @@ namespace AzhuPet
                     "诊断列表有上限（不灌满窗口）", ref pass, ref fail);
                 Check(CredentialCapture.FormatSeenForUser(null) == "" && CredentialCapture.FormatSeenForUser(new string[0]) == "",
                     "负对照：没有请求时给空串（界面据此换另一句提示，而不是显示空标题）", ref pass, ref fail);
+
+                // ---- 请求头合并：抄到的头**天然缺**浏览器自动添加的那一套 ----
+                // ⚠⚠ 2026-09-25 的现场故障（用户截图：页面左侧明明白白显示着余额，回测却被网关顶回 401）：
+                //   此前是**二选一** —— 抄到了就用抄到的那份**整份替换**旧头。但 user-agent / accept /
+                //   accept-language / origin / referer / sec-fetch-* 是浏览器**自动添加**的头，按规范
+                //   脚本既设不了也读不到（forbidden header names）⇒「抄到的那份」必然缺它们 ⇒ 请求
+                //   连应用都没到，被 nginx 直接拒（响应体是 HTML 错误页而不是 API 的 JSON）。
+                //   实测旧凭据那 11 个头里这些**全都有**（09-18 从真浏览器抓的）—— 那才是稀缺的东西。
+                //   修法：旧头打底 + 抄到的覆盖 + 页面上下文补缺，三层叠加。
+                const string WbApi = "https://www.workbuddy.cn/billing/meter/get-user-resource";
+                var oldH = new List<KeyValuePair<string, string>>
+                {
+                    new KeyValuePair<string, string>("user-agent", "Mozilla/5.0 (Real) Edg/153"),
+                    new KeyValuePair<string, string>("accept", "application/json"),
+                    new KeyValuePair<string, string>("accept-language", "zh"),
+                    new KeyValuePair<string, string>("origin", "https://www.workbuddy.cn"),
+                    new KeyValuePair<string, string>("referer", "https://www.workbuddy.cn/app"),
+                    new KeyValuePair<string, string>("x-user-id", "OLD-ID"),
+                    new KeyValuePair<string, string>("sec-fetch-dest", "empty"),
+                    new KeyValuePair<string, string>("sec-fetch-mode", "cors"),
+                    new KeyValuePair<string, string>("sec-fetch-site", "same-origin"),
+                    new KeyValuePair<string, string>("content-type", "application/json"),
+                    new KeyValuePair<string, string>("cookie", "session=STALE"),
+                };
+                var capH = new List<KeyValuePair<string, string>>
+                {
+                    new KeyValuePair<string, string>("content-type", "application/json;charset=utf-8"),
+                    new KeyValuePair<string, string>("x-user-id", "NEW-ID"),
+                };
+                Func<List<KeyValuePair<string, string>>, string, string> hv = (list, n) =>
+                {
+                    var one = list.FirstOrDefault(h => string.Equals(h.Key, n, StringComparison.OrdinalIgnoreCase));
+                    return one.Key == null ? null : one.Value;
+                };
+                Func<List<KeyValuePair<string, string>>, string, int> hc = (list, n) =>
+                    list.Count(h => string.Equals(h.Key, n, StringComparison.OrdinalIgnoreCase));
+
+                var mergedH = CredentialCapture.BuildFinalHeaders(oldH, capH, WbApi,
+                    "Mozilla/5.0 (Page) Edg/154", "https://www.workbuddy.cn/console", "zh-CN");
+                Check(hv(mergedH, "user-agent") == "Mozilla/5.0 (Real) Edg/153",
+                    "旧凭据的 user-agent 被保住 —— 抄到的头里根本没有它（这条就是那次 401 的根因）", ref pass, ref fail);
+                Check(hv(mergedH, "sec-fetch-site") == "same-origin" && hv(mergedH, "referer") != null && hv(mergedH, "accept") != null,
+                    "旧凭据的 sec-fetch-* / referer / accept 被保住（脚本读不到这些）", ref pass, ref fail);
+                Check(hv(mergedH, "x-user-id") == "NEW-ID",
+                    "抄到的头覆盖同名旧头（拿到最新账号标识）", ref pass, ref fail);
+                Check(hv(mergedH, "content-type") == "application/json;charset=utf-8",
+                    "抄到的 content-type 覆盖旧值（以页面实际发出的为准）", ref pass, ref fail);
+                Check(hc(mergedH, "x-user-id") == 1 && hc(mergedH, "content-type") == 1,
+                    "同名头只留一份（两份会让服务器无所适从）", ref pass, ref fail);
+                Check(hc(mergedH, "cookie") == 0,
+                    "cookie 不进合并结果（由 cookieHeader 单独重建，旧的过期 cookie 混不进来）", ref pass, ref fail);
+                Check(hc(mergedH, "host") == 0 && hc(mergedH, "content-length") == 0,
+                    "传输层头不参与合并（host / content-length 交 HttpClient）", ref pass, ref fail);
+
+                // 负对照（判据纪律 7）：合并**不是**「无脑补一个 user-agent」——
+                // 既没旧凭据、页面也没给 UA 时，结果里就该没有它（编一个假的比缺更糟）。
+                var bareH = CredentialCapture.BuildFinalHeaders(null, capH, WbApi, "", "", "");
+                Check(hc(bareH, "user-agent") == 0,
+                    "负对照：没有任何 UA 来源时不编造 user-agent", ref pass, ref fail);
+                // 另一半：有页面上下文时必须补上 —— 这才是「没有旧凭据」时的真值来源
+                var pageH = CredentialCapture.BuildFinalHeaders(null, capH, WbApi,
+                    "Mozilla/5.0 (Page) Edg/154", "https://www.workbuddy.cn/console", "zh-CN");
+                Check(hv(pageH, "user-agent") == "Mozilla/5.0 (Page) Edg/154",
+                    "没有旧凭据时用 navigator.userAgent 补上（页面读到的真值，不是猜的）", ref pass, ref fail);
+                Check(hv(pageH, "origin") == "https://www.workbuddy.cn" && hv(pageH, "referer") == "https://www.workbuddy.cn/console",
+                    "origin 由目标地址算出、referer 用当前页（同源）", ref pass, ref fail);
+                Check(hv(pageH, "accept-language") == "zh-CN,zh;q=0.9",
+                    "accept-language 由 navigator.language 推出", ref pass, ref fail);
+
+                // 跨源：旧凭据里的 origin / referer 不能被照搬到别的站点上
+                var crossH = CredentialCapture.BuildFinalHeaders(new List<KeyValuePair<string, string>>
+                {
+                    new KeyValuePair<string, string>("origin", "https://evil.example"),
+                    new KeyValuePair<string, string>("referer", "https://evil.example/x"),
+                    new KeyValuePair<string, string>("user-agent", "UA"),
+                }, null, WbApi, "", "", "");
+                Check(hv(crossH, "origin") == "https://www.workbuddy.cn" && hv(crossH, "referer") == "https://www.workbuddy.cn/",
+                    "负对照：旧凭据里别的站点的 origin/referer 不被沿用（回落目标站点）", ref pass, ref fail);
+                Check(hv(crossH, "user-agent") == "UA",
+                    "但 user-agent 与站点无关，照旧保留", ref pass, ref fail);
+
+                // 三层都空：回落骨架模板（而不是给一份空头）
+                var noneH = CredentialCapture.BuildFinalHeaders(null, null, WbApi, "", "", "");
+                Check(hv(noneH, "accept") != null && hv(noneH, "origin") == "https://www.workbuddy.cn",
+                    "三层都空时回落骨架模板（至少 origin 算得准）", ref pass, ref fail);
+                // 负对照：目标地址不是绝对地址时不编造 origin —— 宁可缺，也不要一个假的来源
+                var relH = CredentialCapture.BuildFinalHeaders(null, capH, "/billing/meter/get-user-resource", "UA", "", "");
+                Check(hc(relH, "origin") == 0,
+                    "负对照：目标地址非绝对时不编造 origin（宁可缺，也不要假的来源）", ref pass, ref fail);
 
                 Check(CredentialCapture.IsDroppedHeader("Content-Length") && CredentialCapture.IsDroppedHeader("acCEPT-encoding")
                     && CredentialCapture.IsDroppedHeader("cookie") && CredentialCapture.IsDroppedHeader("Host"),

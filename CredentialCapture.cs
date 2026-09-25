@@ -20,6 +20,13 @@ namespace AzhuPet
         public string Method = "POST";
         public List<KeyValuePair<string, string>> Headers = new List<KeyValuePair<string, string>>();
         public string Body = "";
+
+        // 页面上下文。**不是装饰**：抄到的请求头天然缺一整套「浏览器自动添加」的头
+        // （见 CredentialCapture.BuildFinalHeaders 的说明），这几项正好能补上其中一部分。
+        public string PageUserAgent = "";   // navigator.userAgent —— 这是真值，不是猜的
+        public string PageHref = "";        // location 的 origin+path（已切掉 query，免得把 token 带进凭据文件）
+        public string PageOrigin = "";      // location.origin（相对地址兜底用）
+        public string PageLanguage = "";    // navigator.language
     }
 
     internal static class CredentialCapture
@@ -70,11 +77,15 @@ var a=window.__azhuSeen;
 for(var i=0;i<a.length;i++){if(a[i]===p)return;}
 if(a.length<20)a.push(p);
 }catch(e){}}
+function abs(u){try{return new URL(''+u,location.href).href;}catch(e){return ''+u;}}
+function pg(){try{var s=''+(location.href||'');var i=s.indexOf('?');if(i>=0)s=s.substring(0,i);var j=s.indexOf('#');if(j>=0)s=s.substring(0,j);return s;}catch(e){return '';}}
+function og(){try{if(location.origin)return ''+location.origin;var m=/^([a-z][a-z0-9+.-]*:\/\/[^\/]+)/i.exec(''+(location.href||''));return m?m[1]:'';}catch(e){return '';}}
 function rec(u,m,h,b){try{
 seen(u);
 if(window.__azhuCapture)return;
 if(!u||(''+u).indexOf(PAT)<0)return;
-window.__azhuCapture=JSON.stringify({url:''+u,method:''+(m||'GET'),headers:hdrs(h),body:(b==null?'':''+b)});
+window.__azhuCapture=JSON.stringify({url:abs(u),method:''+(m||'GET'),headers:hdrs(h),body:(b==null?'':''+b),
+ua:(navigator.userAgent||''),href:pg(),org:og(),lang:(navigator.language||'')});
 }catch(e){}}
 var _f=window.fetch;
 if(_f){window.fetch=function(i,init){try{
@@ -224,6 +235,10 @@ XMLHttpRequest.prototype.send=function(b){try{if(this.__azhu)rec(this.__azhu.u,t
                             req.Headers.Add(new KeyValuePair<string, string>(p.Name,
                                 p.Value.ValueKind == JsonValueKind.String ? (p.Value.GetString() ?? "") : p.Value.ToString()));
                     if (root.TryGetProperty("body", out var b) && b.ValueKind == JsonValueKind.String) req.Body = b.GetString() ?? "";
+                    if (root.TryGetProperty("ua", out var ua) && ua.ValueKind == JsonValueKind.String) req.PageUserAgent = ua.GetString() ?? "";
+                    if (root.TryGetProperty("href", out var hr) && hr.ValueKind == JsonValueKind.String) req.PageHref = hr.GetString() ?? "";
+                    if (root.TryGetProperty("org", out var og) && og.ValueKind == JsonValueKind.String) req.PageOrigin = og.GetString() ?? "";
+                    if (root.TryGetProperty("lang", out var lg) && lg.ValueKind == JsonValueKind.String) req.PageLanguage = lg.GetString() ?? "";
                     return req;
                 }
             }
@@ -272,6 +287,100 @@ XMLHttpRequest.prototype.send=function(b){try{if(this.__azhu)rec(this.__azhu.u,t
             list.Add(new KeyValuePair<string, string>("origin", origin));
             list.Add(new KeyValuePair<string, string>("referer", origin + "/"));
             return list;
+        }
+
+        /// <summary>把「旧凭据的头 + 抄到的头 + 页面上下文」合成最终要发的请求头（纯函数）。
+        ///
+        /// ⚠⚠ 2026-09-25 的事故就出在这一步：此前是**二选一** —— 抄到了就用抄到的那份整份替换旧头。
+        ///   但页面 JS 能看见的只有它自己显式写的那几个头；**user-agent / accept / accept-language /
+        ///   origin / referer / sec-fetch-\* 这一整套是浏览器自动加上去的，按规范脚本既设不了也读不到**
+        ///   （forbidden header names）。于是「抄到」的那份**天然缺它们** —— 回测请求发出去连应用都没到，
+        ///   被 nginx 直接顶回 401（响应体是 HTML 错误页而不是 API 的 JSON），而页面上余额明明显示得好好的。
+        ///   修法不是二选一，是**叠加**：
+        ///     ① 旧凭据的头打底（它有一份从真浏览器抓来的完整头 —— 这是最稀缺的东西）
+        ///     ② 抄到的头覆盖上去（拿最新的 x-user-id / content-type 等）
+        ///     ③ 仍然缺的用页面上下文补（navigator.userAgent / location 都是页面侧可读的真值，不是猜的）
+        ///   第四层才是 DerivedTemplate（真·什么都没有时的骨架）。
+        /// ⚠ 旧头的 origin / referer 只在**与目标同源**时沿用，否则等于把 A 站的来源发给 B 站。
+        /// ⚠ 同名头（不区分大小写）只留一份、后写者胜：两份 content-type 会让服务器无所适从。</summary>
+        public static List<KeyValuePair<string, string>> BuildFinalHeaders(
+            IEnumerable<KeyValuePair<string, string>> oldHeaders,
+            IEnumerable<KeyValuePair<string, string>> capturedHeaders,
+            string targetUrl,
+            string pageUserAgent,
+            string pageHref,
+            string pageLanguage)
+        {
+            var result = new List<KeyValuePair<string, string>>();
+            var at = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            string targetOrigin = OriginOf(targetUrl);
+
+            Action<string, string> put = (name, value) =>
+            {
+                string n = (name ?? "").Trim();
+                string v = (value ?? "").Trim();
+                if (n.Length == 0 || v.Length == 0) return;
+                if (IsDroppedHeader(n)) return;   // cookie 由 cookieHeader 重建；content-length / host 交 HttpClient
+                int i;
+                if (at.TryGetValue(n, out i)) { result[i] = new KeyValuePair<string, string>(result[i].Key, v); return; }
+                at[n] = result.Count;
+                result.Add(new KeyValuePair<string, string>(n, v));
+            };
+
+            // ① 旧凭据打底
+            foreach (var h in oldHeaders ?? Enumerable.Empty<KeyValuePair<string, string>>())
+            {
+                string n = (h.Key ?? "").Trim();
+                if ((n.Equals("origin", StringComparison.OrdinalIgnoreCase) || n.Equals("referer", StringComparison.OrdinalIgnoreCase))
+                    && targetOrigin.Length > 0
+                    && !string.Equals(OriginOf(h.Value), targetOrigin, StringComparison.OrdinalIgnoreCase))
+                    continue;   // 别把别的站点的来源发给目标站
+                put(n, h.Value);
+            }
+
+            // ② 抄到的覆盖
+            foreach (var h in capturedHeaders ?? Enumerable.Empty<KeyValuePair<string, string>>())
+                put(h.Key, h.Value);
+
+            // ③ 浏览器自动头：只在仍然缺的时候补（旧头里那份是真实浏览器抓的，优先）
+            if (!at.ContainsKey("user-agent") && !string.IsNullOrWhiteSpace(pageUserAgent))
+                put("user-agent", pageUserAgent);
+            if (!at.ContainsKey("accept-language"))
+                put("accept-language", AcceptLanguageOf(pageLanguage));
+            if (targetOrigin.Length > 0)
+            {
+                put("origin", targetOrigin);   // 从目标 URL 算出来的是确定值
+                put("referer", SameOrigin(pageHref, targetOrigin) ? pageHref : targetOrigin + "/");
+            }
+
+            // ④ 最后仍缺的骨架头（只在既没抄到、也没有旧凭据时才会走到这里）
+            foreach (var d in DerivedTemplate(targetUrl))
+                if (!at.ContainsKey(d.Key)) put(d.Key, d.Value);
+
+            return result;
+        }
+
+        private static string OriginOf(string url)
+        {
+            Uri u;
+            if (!Uri.TryCreate(url ?? "", UriKind.Absolute, out u)) return "";
+            return u.Scheme + "://" + u.Authority;
+        }
+
+        private static bool SameOrigin(string url, string origin)
+        {
+            string o = OriginOf(url);
+            return o.Length > 0 && string.Equals(o, origin, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>把 navigator.language（如 zh-CN）写成 accept-language 常见的样式。</summary>
+        private static string AcceptLanguageOf(string lang)
+        {
+            string s = (lang ?? "").Trim();
+            if (s.Length == 0) return "";
+            int dash = s.IndexOf('-');
+            if (dash <= 0) return s;
+            return s + "," + s.Substring(0, dash) + ";q=0.9";
         }
 
         /// <summary>拼出凭据文件的正文（纯函数）：第一行 URL，随后「名字: 值」，可选 ---body--- 段。

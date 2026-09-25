@@ -278,7 +278,11 @@ namespace AzhuPet
                 SetState(manual ? "正在读取浏览器里的登录态…" : "抄到了网站自己的请求，正在组装凭据…", Muted);
 
                 // ---- 第 1 条腿：cookie（必须从宿主侧取，JS 看不到）----
-                var jar = await _view.CoreWebView2.CookieManager.GetCookiesAsync(_defaultUrl);
+                // ⚠ 取的 URI 用**抄到的那个请求**（若同站）：cookie 是按 URI 的 host+path 匹配的，
+                //   站点若把接口放在 app. 子域而登录页在 www.，拿 _defaultUrl 去问就会漏掉一部分。
+                string cookieUrl = (captured != null && CredentialCapture.IsSameSite(captured.Url, _defaultUrl))
+                    ? captured.Url : _defaultUrl;
+                var jar = await _view.CoreWebView2.CookieManager.GetCookiesAsync(cookieUrl);
                 string cookieHeader = CredentialCapture.BuildCookieHeader(
                     (jar ?? new List<CoreWebView2Cookie>()).Select(c => new KeyValuePair<string, string>(c.Name, c.Value)));
                 if (cookieHeader.Length == 0)
@@ -288,34 +292,37 @@ namespace AzhuPet
                     return;
                 }
 
-                // ---- 第 2 条腿：请求头。优先抄到的，其次沿用旧凭据，最后才是兜底模板 ----
+                // 旧凭据（可能为空）—— 它是「完整请求头」的唯一来源，抄到的那份天然缺浏览器自动头。
                 string oldPath = BalanceSources.ResolveSecret(_secretFile);
                 if (oldPath != null && File.Exists(oldPath)) oldRaw = File.ReadAllText(oldPath);
                 string oldUrl, oldBody;
                 var oldHeaders = CredentialCapture.ParseRawSecretText(oldRaw, out oldUrl, out oldBody);
 
-                List<KeyValuePair<string, string>> headers;
-                string url, source, originNote = "";
-                if (captured != null)
-                {
-                    headers = captured.Headers; url = captured.Url;
-                    source = "抄到网站自己的请求（" + headers.Count + " 个头）";
-                }
-                else if (oldHeaders.Count > 0)
-                {
-                    headers = oldHeaders; url = string.IsNullOrWhiteSpace(oldUrl) ? _defaultUrl : oldUrl;
-                    source = "沿用旧凭据的请求头，只换了 cookie";
-                }
-                else
-                {
-                    url = _defaultUrl;
-                    headers = CredentialCapture.DerivedTemplate(url);
-                    source = "兜底请求头";
-                    originNote = " 这份是兜底模板（没有旧凭据可沿用）：origin 能算准，referer 只能猜，user-agent 给不了 —— 可能仍被网关拒绝。";
-                }
+                // ---- 第 2 条腿：请求头。三条路**都走叠加重建**，不是二选一 ----
+                // ⚠ 2026-09-25 修的事故：此前「抄到就用抄到的那份整份替换旧头」，而抄到的天然缺
+                //   浏览器自动添加的那一套（user-agent / origin / referer / sec-fetch-* —— 按规范
+                //   脚本既设不了也读不到）⇒ 回测请求连应用都没到，被 nginx 顶回 401，而页面上
+                //   余额显示得好好的。现在统一 BuildFinalHeaders：旧头打底 + 抄到的覆盖 + 页面上下文补缺。
+                string url = (captured != null && captured.Url.Length > 0)
+                    ? captured.Url
+                    : (!string.IsNullOrWhiteSpace(oldUrl) ? oldUrl : _defaultUrl);
+                string source = captured != null
+                    ? "抄到网站自己的请求（" + captured.Headers.Count + " 个头）＋ 旧凭据补齐浏览器自动头"
+                    : (oldHeaders.Count > 0 ? "沿用旧凭据的请求头，只换了 cookie" : "兜底请求头（没有旧凭据可沿用）");
+                var headers = CredentialCapture.BuildFinalHeaders(oldHeaders,
+                    captured == null ? null : captured.Headers, url,
+                    captured == null ? "" : captured.PageUserAgent,
+                    captured == null ? "" : captured.PageHref,
+                    captured == null ? "" : captured.PageLanguage);
 
                 string composed = CredentialCapture.ComposeSecret(url, headers, cookieHeader, captured == null ? null : captured.Body);
                 if (composed.Length == 0) { Fail2("组装失败：没有可用的请求地址。", "原凭据未改动。"); return; }
+
+                LogDiag("组装 source=" + source + " url=" + url
+                    + " cookie=" + cookieHeader.Split(';').Length + "项"
+                    + " old=[" + NamesOf(oldHeaders) + "]"
+                    + " cap=[" + NamesOf(captured == null ? null : captured.Headers) + "]"
+                    + " final=[" + NamesOf(headers) + "]");
 
                 // ---- 回测：真的去打一次余额接口 ----
                 // ⚠ 顺序上是「先写文件再回测」：探针读数的唯一入口就是这个文件。所以失败要还原回去，
@@ -323,8 +330,7 @@ namespace AzhuPet
                 BalanceSources.SaveSecret(_secretFile, composed);
                 int headerLines = composed.Split('\n').Count(l => l.Contains(": "));
                 SetState("凭据已组装，正在回测真实接口…", Muted);
-                _detail.Text = "来源：" + source + "；cookie " + cookieHeader.Split(';').Length + " 项，请求头 " + headerLines + " 行。"
-                    + originNote;
+                _detail.Text = "来源：" + source + "；cookie " + cookieHeader.Split(';').Length + " 项，请求头 " + headerLines + " 行。";
 
                 var rep = await new StatusProbe().CheckAsync();
                 if (rep.WorkbuddyOk)
@@ -335,13 +341,20 @@ namespace AzhuPet
                     _detail.Text = "凭据已写入 " + BalanceSources.ResolveSecret(_secretFile) + "\n"
                         + "来源：" + source + "。以后 cookie 再过期时，回到这里点一下即可，通常不用重新输密码。";
                     _step.Text = "完成。可以关闭本窗口了。";
+                    LogDiag("回测通过 " + _platform + " = " + Math.Round(rep.WorkbuddyRemain).ToString("0"));
                     _afterSave?.Invoke();
                 }
                 else if (StatusProbe.LooksLikeCredentialProblem(rep.WorkbuddyStatus))
                 {
                     if (oldRaw != null) BalanceSources.SaveSecret(_secretFile, oldRaw); else SafeDelete(_secretFile);
+                    LogDiag("回测被拒 status=" + rep.WorkbuddyStatus + " cookie=" + cookieHeader.Split(';').Length
+                        + "项 final=[" + NamesOf(headers) + "] err=" + rep.WorkbuddyError);
                     Fail2("服务器仍然拒绝这份凭据（" + rep.WorkbuddyError + "）",
-                        "已把原凭据还原回去，你的文件没被改坏。常见原因：登录还没真正完成，或这个账号在这个浏览器里还没进过「计费」页面。");
+                        "已把原凭据还原回去，你的文件没被改坏。这次实际发出的是："
+                        + cookieHeader.Split(';').Length + " 项 cookie，请求头 "
+                        + string.Join("、", headers.Select(h => h.Key)) + "。"
+                        + "常见原因：登录没真正完成，或这个浏览器里还没进过「计费」页面。"
+                        + "详细记录在 " + Path.Combine(StatusProbe.SecretDir(), "capture_log.txt"));
                 }
                 else
                 {
@@ -365,6 +378,27 @@ namespace AzhuPet
 
         private void Fail2(string status, string detail) { SetState(status, Bad); _detail.Text = detail; }
         private void SetState(string text, Brush color) { _status.Text = text; _status.Foreground = color; }
+
+        /// <summary>把一次采集的关键事实追加进日志。**只记头的名字与长度，绝不记值**（值里有 cookie）。
+        /// ⚠ 为什么非要有它：2026-09-25 卡住时，界面上只有一句「服务器仍然拒绝」，而「钩子有没有命中、
+        ///   抄到几个头、cookie 取到几项、最终发了哪些头」只有程序自己知道 —— 没有日志就只能靠推理。
+        ///   这是本项目反复吃亏的那类事（判据被目录深度静默吃掉、401 只剩三个数字）。</summary>
+        private static void LogDiag(string text)
+        {
+            try
+            {
+                File.AppendAllText(Path.Combine(StatusProbe.SecretDir(), "capture_log.txt"),
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + text + Environment.NewLine);
+            }
+            catch { }
+        }
+
+        /// <summary>头清单，形如 name(len),name(len) —— 只报名字与长度。</summary>
+        private static string NamesOf(IEnumerable<KeyValuePair<string, string>> headers)
+        {
+            if (headers == null) return "-";
+            return string.Join(",", headers.Select(h => (h.Key ?? "?") + "(" + ((h.Value ?? "").Length) + ")"));
+        }
 
         private static void SafeDelete(string fileName)
         {
