@@ -143,9 +143,10 @@ namespace AzhuPet
             {
                 // 浏览器数据放在我们自己的个人数据目录里（而不是 exe 同级的默认位置）：
                 // ① 卸载器知道它在哪 ② 不往别人的目录里乱写 ③ 登录态能留住，cookie 下次过期时不必重新输密码。
-                string dataDir = Path.Combine(StatusProbe.SecretDir(), "browser");
-                Directory.CreateDirectory(dataDir);
-                var env = await CoreWebView2Environment.CreateAsync(null, dataDir);
+                // ⚠ 环境走 BrowserBalance.EnvAsync()：**离屏取数器用的是同一个 user-data-dir**，
+                //   同一个目录起两个环境会互相踢（跨进程也一样，配置中心是独立进程打开时就会撞上）。
+                //   共用一个环境顺带保证「这里登录过」＝「取数时已登录」。
+                var env = await BrowserBalance.EnvAsync();
                 await _view.EnsureCoreWebView2Async(env);
 
                 var core = _view.CoreWebView2;
@@ -195,7 +196,7 @@ namespace AzhuPet
             string raw;
             try { raw = await _view.CoreWebView2.ExecuteScriptAsync("window.__azhuCapture||''"); }
             catch { return; }   // 导航过程中脚本宿主可能短暂不可用，下一拍再试，不当作错误
-            string json = DecodeJsString(raw);
+            string json = CredentialCapture.DecodeJsString(raw);
             if (string.IsNullOrEmpty(json)) { Nudge(); return; }
             var req = CredentialCapture.ParseCaptured(json);
             if (req == null || !CredentialCapture.IsTarget(req.Url, _capturePattern)) return;
@@ -273,57 +274,50 @@ namespace AzhuPet
             catch { return ""; }
         }
 
-        /// <summary>在**页面上下文里**重放一次目标接口 —— 本轮诊断的判据本身。
+        /// <summary>在**页面上下文里**发一次目标接口 —— 它已经不只是诊断，而是**正式取数通道**。
         ///
-        /// 为什么非要在浏览器里发这一发：只有它同时具备「浏览器自己那套 cookie」与「浏览器自动补齐的
-        /// 那一整套请求头」。于是它能一次把两类故障分开：
-        ///   · 它也 401  ⇒ 这个浏览器里的会话本身没通过（换凭据、补头都没用，得先把取数页面真正打开）
-        ///   · 它 200 而我们的回测 401 ⇒ 是**我们搬运时丢了东西**（去比对两边的头）
-        /// 在此之前没有任何手段能分开这两者，用户只能反复点、反复 401（2026-09-25 卡住的那一轮）。
+        /// 为什么它成了正路：本机直连四种传输（系统代理/直连 × HTTP/1.1/HTTP/2）全被网关挡成
+        /// 401，而同一会话在这里**三次都是 200 并带回真实数据**（TotalCount:29）。cookie（8 项
+        /// 逐项对齐）、请求头、method、body、出口 IP 全部排除之后，剩下的差异落在 .NET 复制不了的
+        /// 那一层（TLS/h2 指纹、请求头顺序）。与其继续伪造客户端，不如**用那个客户端**。
+        /// 在此之前这段结果只写进日志就被丢掉了 —— 用户看到红色失败，而我们手里其实已经有答案。
         ///
         /// ⚠ 用「写一个全局状态位再轮询」，不用 await 返回值：ExecuteScriptAsync 对返回 Promise 的
         ///   表达式行为随运行时版本而变，而轮询与已有的 __azhuCapture 是同一套写法，稳。
-        /// ⚠ 只带回 status 与响应体前 200 字符（余额数字就在里面，正好当证据）；凭据值不在此列。</summary>
-        private async Task<string> ReplayInBrowserAsync(string url, string method, string body)
+        /// ⚠ 带回**完整**响应体（以前只带前 200 字符当证据）：它现在要拿去解析余额。
+        ///   脚本本体在 CredentialCapture.BuildFetchScript 里，与离屏取数器**共用同一份实现**。
+        /// </summary>
+        private async Task<BrowserFetch> ReplayInBrowserAsync(string url, string method, string body)
         {
+            var r = new BrowserFetch();
             try
             {
-                string m = string.IsNullOrEmpty(method) ? "GET" : method.Trim().ToUpperInvariant();
-                string init = "{credentials:'include',method:" + JsonSerializer.Serialize(m);
-                if (!string.IsNullOrEmpty(body) && m != "GET" && m != "HEAD")
-                    init += ",body:" + JsonSerializer.Serialize(body);
-                init += "}";
-                string js = "(function(){try{window.__azhuReplay={s:'run'};"
-                    + "fetch(" + JsonSerializer.Serialize(url) + "," + init + ").then(function(r){"
-                    + "return r.text().then(function(t){window.__azhuReplay={s:'done',code:r.status,"
-                    + "body:(t||'').substring(0,200)};});})"
-                    + ".catch(function(e){window.__azhuReplay={s:'err',msg:''+e};});"
-                    + "}catch(e){window.__azhuReplay={s:'err',msg:''+e};}return 'ok';})()";
-                await _view.CoreWebView2.ExecuteScriptAsync(js);
-
+                await _view.CoreWebView2.ExecuteScriptAsync(
+                    CredentialCapture.BuildFetchScript(url, method, body, "__azhuReplay"));
                 for (int i = 0; i < 20; i++)   // 最多等 6 秒
                 {
                     await Task.Delay(300);
                     string raw = await _view.CoreWebView2.ExecuteScriptAsync(
                         "JSON.stringify(window.__azhuReplay||{})");
-                    string txt = DecodeJsString(raw);
-                    if (string.IsNullOrEmpty(txt) || txt == "{}") continue;
-                    using (var doc = JsonDocument.Parse(txt))
-                    {
-                        var root = doc.RootElement;
-                        string s = root.TryGetProperty("s", out var se) ? (se.GetString() ?? "") : "";
-                        if (s == "run") continue;
-                        if (s == "err")
-                            return "浏览器内重放失败：" + (root.TryGetProperty("msg", out var me) ? me.GetString() : "");
-                        int code = root.TryGetProperty("code", out var ce) && ce.ValueKind == JsonValueKind.Number
-                            ? ce.GetInt32() : 0;
-                        string rb = root.TryGetProperty("body", out var be) ? (be.GetString() ?? "") : "";
-                        return "浏览器内重放 " + code + (rb.Length > 0 ? "：" + OneLine(rb) : "");
-                    }
+                    bool done; int st; string bd, er;
+                    if (!CredentialCapture.ReadFetchState(CredentialCapture.DecodeJsString(raw),
+                            out done, out st, out bd, out er)) continue;
+                    if (done) { r.Status = st; r.Body = bd ?? ""; r.Ok = st >= 200 && st < 300; return r; }
+                    if (!string.IsNullOrEmpty(er)) { r.Why = "页面里发请求失败：" + OneLine(er); return r; }
                 }
-                return "浏览器内重放超时（6 秒内页面没回话）";
+                r.Why = "超时（6 秒内页面没回话）";
+                return r;
             }
-            catch (Exception ex) { return "浏览器内重放失败：" + ex.Message; }
+            catch (Exception ex) { r.Why = OneLine(ex.Message); return r; }
+        }
+
+        /// <summary>把一次浏览器取数说成一行诊断文案（进日志，不进界面）。</summary>
+        private static string DescribeReplay(BrowserFetch f)
+        {
+            if (f == null) return "浏览器内取数：未执行";
+            if (f.Status >= 0)
+                return "浏览器内取数 " + f.Status + (f.Body.Length > 0 ? "：" + OneLine(f.Body) : "");
+            return "浏览器内取数失败：" + f.Why;
         }
 
         /// <summary>压成一行并截断（诊断文案用，纯函数式小工具）。</summary>
@@ -331,15 +325,6 @@ namespace AzhuPet
         {
             string t = (s ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
             return t.Length > 120 ? t.Substring(0, 120) + "…" : t;
-        }
-
-        /// <summary>ExecuteScriptAsync 的返回值是一段 JSON；字符串结果会带一层引号。
-        /// 解不出来就当空 —— 宁可多等一拍，也不要拿半截字符串去拼凭据。</summary>
-        private static string DecodeJsString(string raw)
-        {
-            if (string.IsNullOrEmpty(raw) || raw == "null") return "";
-            try { return JsonSerializer.Deserialize<string>(raw) ?? ""; }
-            catch { return ""; }
         }
 
         /// <summary>组装并**回测**。captured == null 表示走「直接抓取」那条兜底路（只换 cookie）。</summary>
@@ -419,14 +404,44 @@ namespace AzhuPet
                     + " cap=[" + NamesOf(captured == null ? null : captured.Headers) + "]"
                     + " final=[" + NamesOf(headers) + "]");
 
-                // ---- 判据：先用浏览器自己的会话试一次（金标准）----
-                // 放在这一步的理由：它不依赖我们拼出来的任何东西 —— 用的是浏览器自己的 cookie，加上
-                // 浏览器自动补的那整套头。所以「它成不成功」能直接回答「问题在会话，还是在我们的搬运」，
-                // 而这正是此前分不开、导致用户反复点的那件事。
-                SetState("正在用浏览器自己的会话试一次接口…", Muted);
-                string replay = await ReplayInBrowserAsync(url,
-                    captured == null ? "GET" : captured.Method, captured == null ? null : captured.Body);
-                LogDiag("浏览器内重放 " + replay);
+                // ---- 浏览器自己的会话发一次：这已经不只是判据，而是**正式取数通道** ----
+                // 为什么把它提到回测之前：本机直连四种传输（系统代理/直连 × HTTP/1.1/HTTP/2）全被网关
+                // 挡成 401，而这一发**三次都是 200 并带回真实数据**（TotalCount:29）。它一旦成立，就
+                // 没有理由再去撞那条注定失败的路 —— 而在此之前这段结果只写进日志就被丢掉：
+                // 用户看到红色失败，我们手里其实已经握着答案（2026-09-25 卡住的那一轮）。
+                SetState("正在用浏览器自己的会话取一次数…", Muted);
+                var replay = await ReplayInBrowserAsync(url,
+                    captured == null ? "POST" : captured.Method, captured == null ? null : captured.Body);
+                LogDiag(DescribeReplay(replay));
+
+                StatusProbe.WbCaliber? replayCal = replay.Ok
+                    ? StatusProbe.ParseWorkbuddyJson(replay.Body) : (StatusProbe.WbCaliber?)null;
+                if (replayCal.HasValue && replayCal.Value.Ok)
+                {
+                    // 把「哪条通道真取到过数」连同来源页一起写进凭据，并留下这次读数。
+                    // ⚠ ---via--- 只在**成功过一次之后**才写：它记的是事实，不是偏好。写早了等于
+                    //   把猜测固化成配置，下一次刷新会照着一个没验证过的通道走。
+                    string viaText = CredentialCapture.ComposeSecret(url, headers, cookieHeader,
+                        captured == null ? null : captured.Body, captured == null ? null : captured.Method,
+                        CredentialCapture.ViaBrowser, captured == null ? null : captured.PageHref);
+                    BalanceSources.SaveSecret(_secretFile, viaText.Length > 0 ? viaText : composed);
+                    BrowserReading.TrySave(DateTime.UtcNow, url, replay.Body);
+                    StatusProbe.NoteBrowserSuccess();   // 已知可用 + 顺手开节流：别紧接着再开一个 Chromium
+                    _finished = true; Saved = true;
+                    _timer?.Stop();
+                    SetState("✓ 已取到：" + _platform + " " + Math.Round(replayCal.Value.Remain).ToString("0") + " 积分（浏览器通道）", Good);
+                    _detail.Text = "凭据已写入 " + BalanceSources.ResolveSecret(_secretFile) + "\n"
+                        + "这一发用的是**浏览器自己的会话**：本机直连（系统代理/直连 × HTTP/1.1/HTTP/2 四种都试过）"
+                        + "被网关挡成 401，而同一个会话在浏览器里正常 —— cookie、请求头、method、body 已逐项"
+                        + "对齐，剩下的差异落在脚本复制不了的那一层（TLS / HTTP/2 指纹、请求头顺序），"
+                        + "所以从此改走浏览器通道。\n"
+                        + "以后 cookie 再过期时，回到这里点一下即可，通常不用重新输密码。";
+                    _step.Text = "完成。可以关闭本窗口了。";
+                    LogDiag("浏览器通道取到 " + _platform + " = " + Math.Round(replayCal.Value.Remain).ToString("0")
+                        + " status=" + replay.Status + " cookie=" + cookieHeader.Split(';').Length + "项");
+                    _afterSave?.Invoke();
+                    return;
+                }
 
                 // ---- 回测：真的去打一次余额接口 ----
                 // ⚠ 顺序上是「先写文件再回测」：探针读数的唯一入口就是这个文件。所以失败要还原回去，
@@ -461,6 +476,16 @@ namespace AzhuPet
                         + " final=[" + NamesOf(headers) + "] err=" + rep.WorkbuddyError
                         + (note.Length > 0 ? " 传输自检=" + note : ""));
                     string hint = CredentialCapture.DescribeCapturedStatus(captured == null ? 0 : captured.Status);
+                    // 这一发是**浏览器自己发的**。连它也被拒 ⇒ 结论就不在「我们搬运丢了东西」这一层了：
+                    // 这个浏览器里的登录态本身不成立。这句话必须说出来 —— 否则用户会一直去换凭据、
+                    // 补请求头，而真正该做的是重新登录（2026-09-25 那一轮就卡在这里）。
+                    string viaNote = (replay.Status == 401 || replay.Status == 403)
+                        ? "\n⚠ 浏览器自己发这一发也被拒了（" + replay.Status + "）—— 说明这个浏览器里的登录态"
+                          + "本身已经不成立（cookie 过期或被服务端清掉），而不是我们搬运时丢了东西。"
+                          + "请在下面重新登录一次。"
+                        : (replay.Status > 0
+                            ? "\n浏览器自己发这一发是 " + replay.Status + "。"
+                            : "\n浏览器自己发这一发没成功：" + replay.Why + "。");
                     Fail2("服务器仍然拒绝这份凭据（" + rep.WorkbuddyError + "）",
                         "已把原凭据还原回去，你的文件没被改坏。这次实际发出的是："
                         + cookieHeader.Split(';').Length + " 项 cookie，请求头 "
@@ -471,7 +496,8 @@ namespace AzhuPet
                             : "，body 为空（发空 JSON）")
                         + "。"
                         + (hint.Length > 0 ? "\n" + hint : "")
-                        + "\n" + replay
+                        + viaNote
+                        + "\n" + DescribeReplay(replay)
                         + (note.Length > 0 ? "\n传输自检：" + note : "")
                         + "\n详细记录在 " + Path.Combine(StatusProbe.SecretDir(), "capture_log.txt"));
                 }

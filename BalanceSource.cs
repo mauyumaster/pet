@@ -143,17 +143,22 @@ namespace AzhuPet
             if (abs == null || !File.Exists(abs)) return (string.Empty, string.Empty);
             var headers = new List<string>();
             var body = new List<string>();
-            bool inBody = false, inMethod = false;
+            // ⚠ 段落用**一个** section 变量标记，不用「每段一个 bool」：少一个「忘了复位」的坑。
+            //   2026-09-25 就是栽在 inMethod 上 —— 读到值没复位，method 之后所有请求头被整段吞掉，
+            //   而 method 被最后一行非空内容反复覆盖（实测读出 "COOKIE: SESSION=A"）。
+            // ⚠ 同一份文件格式在项目里有**两个**读取口径（这里与 CredentialCapture.ParseRawSecretText），
+            //   两边必须认出同一批段落：认不出来的段落，它里面的值会被当成一行请求头混进请求里。
+            string section = "";
             foreach (string raw in File.ReadAllLines(abs))
             {
                 string t = raw.Trim();
-                if (t.StartsWith("---body", StringComparison.Ordinal)) { inBody = true; inMethod = false; continue; }
-                if (t.StartsWith("---method", StringComparison.Ordinal)) { inMethod = true; inBody = false; continue; }
-                if (t.StartsWith("---", StringComparison.Ordinal)) { inMethod = false; continue; }
-                if (inBody) { body.Add(raw); continue; }
-                // ⚠ ---method--- 段的值**不是请求头**，且读到值后必须立刻复位：不复位的话
-                //   它后面所有请求头都会被当成「方法段」整段吞掉（同一份文件格式，两个读取口径必须一致）。
-                if (inMethod) { if (t.Length > 0) inMethod = false; continue; }
+                if (t.StartsWith("---body", StringComparison.Ordinal)) { section = "body"; continue; }
+                if (t.StartsWith("---method", StringComparison.Ordinal)) { section = "method"; continue; }
+                if (t.StartsWith("---via", StringComparison.Ordinal)) { section = "via"; continue; }
+                if (t.StartsWith("---page", StringComparison.Ordinal)) { section = "page"; continue; }
+                if (t.StartsWith("---", StringComparison.Ordinal)) { section = ""; continue; }
+                if (section == "body") { body.Add(raw); continue; }
+                if (section.Length > 0) { if (t.Length > 0) section = ""; continue; }   // 单值段落：读一行就够
                 if (t.Length == 0 || t.StartsWith("#", StringComparison.Ordinal)) continue;
                 headers.Add(raw);
             }

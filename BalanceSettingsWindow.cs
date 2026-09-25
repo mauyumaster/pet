@@ -268,7 +268,8 @@ namespace AzhuPet
             try
             {
                 var probe = new StatusProbe { CustomSources = _items.Where(x => x.Enabled).Select(Clone).ToList() };
-                var r = await probe.CheckAsync();
+                // force=true：面板上「测试连接」是用户主动要一次真结果，穿透浏览器通道的节流。
+                var r = await probe.CheckAsync(true);
                 SetState(_traeState, r.TraeOk ? "✓ " + Math.Round(r.TraeAvailable).ToString("0") : (string.IsNullOrEmpty(r.TraeError) ? "○ 未配置" : "✕ " + r.TraeError), r.TraeOk);
                 SetState(_workbuddyState, r.WorkbuddyOk ? "✓ " + Math.Round(r.WorkbuddyRemain).ToString("0") : (string.IsNullOrEmpty(r.WorkbuddyError) ? "○ 未配置" : "✕ " + r.WorkbuddyError), r.WorkbuddyOk);
                 RefreshList(r.DynamicRows.GroupBy(x => x.Name).ToDictionary(x => x.Key, x => x.Last()));

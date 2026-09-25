@@ -104,14 +104,29 @@ namespace AzhuPet
             return RunNormal(o);
         }
 
-        /// <summary>--hookscript：原样输出注入页面的钩子脚本（纯 ASCII）。
-        /// ⚠ 用 Write 不用 WriteLine，且**不多打任何一行** —— 输出会被直接喂给 node 当脚本跑，
-        ///   多一行提示文字就会变成「语法错误」，把真问题淹掉。</summary>
+        /// <summary>--hookscript：原样输出注入页面的脚本（纯 ASCII）——**两段**，中间用
+        /// <see cref="ScriptSectionMark"/> 分隔：①钩子脚本 ②页面内取数脚本（BuildFetchScript 的样品）。
+        /// ⚠ 用 Write 不用 WriteLine，且**不多打任何一行说明文字** —— 输出会被直接喂给 node 当脚本跑，
+        ///   多一行提示文字就会变成「语法错误」，把真问题淹掉。
+        /// ⚠ 取数脚本也要能被真跑一遍，理由与钩子同源：它是**浏览器**执行的东西，C# 编译器看不见它。
+        ///   它在这条路上比钩子更要紧 —— 钩子坏了只是抄不到，取数脚本坏了是「一个字都没发出去」。
+        ///   两段共用一个旗标（而不是各开一个），是为了不动 pack-release.cmd 里那条已经验过的管道。</summary>
         private static int RunHookScriptDump()
         {
             Console.Write(CredentialCapture.BuildHookScript(CredentialCapture.WorkbuddyCapturePattern));
+            Console.Write(ScriptSectionMark);
+            Console.Write(CredentialCapture.BuildFetchScript(
+                "https://example.com/api/meter?x=1", "POST", FetchScriptSampleBody, "__azhuCheck"));
             return 0;
         }
+
+        /// <summary>两段脚本之间的分隔行（JS 注释写法，被人眼看到时也是可读的）。</summary>
+        public const string ScriptSectionMark = "/*__AZHU_SECTION__*/\n";
+
+        /// <summary>给取数脚本用的样品 body：**刻意带上一个内层引号**，这样「C# → JS 注入」
+        /// 这一跳有没有把引号弄坏，能被 node 那边逐字符断言出来（不用中文：默认 JSON 编码器会把
+        /// 非 ASCII 写成 \uXXXX，拿它验转义只会得到一条永远红的判据）。</summary>
+        public const string FetchScriptSampleBody = "{\"q\":\"a\\\"b\",\"n\":1}";
 
         /// <summary>正常启动时的静默兑现：如果上次下好了新版本，在这里换掉。**不弹任何东西。**
         /// 失败就当作没发生 —— 下次启动再试。用户不该因为更新失败而看到错误对话框弹在桌宠上。</summary>

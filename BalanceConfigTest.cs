@@ -220,8 +220,10 @@ namespace AzhuPet
 
                 var mergedH = CredentialCapture.BuildFinalHeaders(oldH, capH, WbApi,
                     "Mozilla/5.0 (Page) Edg/154", "https://www.workbuddy.cn/console", "zh-CN");
-                Check(hv(mergedH, "user-agent") == "Mozilla/5.0 (Real) Edg/153",
-                    "旧凭据的 user-agent 被保住 —— 抄到的头里根本没有它（这条就是那次 401 的根因）", ref pass, ref fail);
+                Check(hv(mergedH, "user-agent") == "Mozilla/5.0 (Page) Edg/154" && hc(mergedH, "user-agent") == 1,
+                    "UA 取**页面真值**、不用旧凭据那份：旧的是上一次手工抓的（这里版本就差一号），"
+                    + "而 UA 恰恰是服务端最容易拿去和 sec-ch-ua / TLS / h2 指纹交叉比对的同一格；"
+                    + "拿旧值填等于把一次会话的指纹拼成两个来源，比缺这一格更糟", ref pass, ref fail);
                 Check(hv(mergedH, "sec-fetch-site") == "same-origin" && hv(mergedH, "referer") != null && hv(mergedH, "accept") != null,
                     "旧凭据的 sec-fetch-* / referer / accept 被保住（脚本读不到这些）", ref pass, ref fail);
                 Check(hv(mergedH, "x-user-id") == "NEW-ID",
@@ -401,16 +403,180 @@ namespace AzhuPet
                     "矩阵：并列 2xx 时取序号靠前（离现状改动最小的那个）", ref pass, ref fail);
                 Check(StatusProbe.PickWorkingTransport(new[] { 0, 404, 500, -1 }) == -1,
                     "负对照：无响应(0/-1)、404、500 一律不算通过（不许把「没试成」当「能过」）", ref pass, ref fail);
-                Check(StatusProbe.DescribeTransportVerdict(new[] { 401, 401, 401, 401 }, -1).Contains("全部被拒"),
-                    "矩阵全失败时结论必须点明「不是协议、也不是代理」", ref pass, ref fail);
-                Check(StatusProbe.DescribeTransportVerdict(new[] { 401, 200, 401, 401 }, 1).Contains("系统代理"),
-                    "矩阵选出直连时结论必须点明差异在系统代理（否则用户不知道下一步做什么）", ref pass, ref fail);
-                Check(StatusProbe.DescribeTransportVerdict(new[] { 401, 401, 401, 401 }, -1).Contains("401 / 401"),
+                // ⚠ 下面这一对是本轮补的**证据漏洞**：以前 h2 变体用 RequestVersionOrLower，回落是静默的，
+                //   于是「协议与代理都不是差异所在」这句话，在 HTTP/2 压根没跑起来时也照打不误 ——
+                //   结论宣称的必要条件（四条各自按协议跑到）从来没人验过。判据必须先能证伪自己。
+                var vDowngraded = new[] { "1.1", "1.1", "1.1", "1.1" };   // 要求 h2 的两条回落了
+                var vRealH2 = new[] { "1.1", "1.1", "2.0", "2.0" };
+                string verdictDowngraded = StatusProbe.DescribeTransportVerdict(new[] { 401, 401, 401, 401 }, vDowngraded, -1);
+                Check(!verdictDowngraded.Contains("都不是差异所在") && verdictDowngraded.Contains("没按自己的协议"),
+                    "负对照：h2 变体实际回落成 h1.1 时，结论**不许**宣称「协议已排除」（这是本轮修的判据漏洞）",
+                    ref pass, ref fail);
+                Check(verdictDowngraded.Contains("1.1 / h1.1"), "回落时结论必须列出实际协议，而不只是四次的数字",
+                    ref pass, ref fail);
+                Check(!StatusProbe.DescribeTransportVerdict(new[] { 401, -1, 401, 401 },
+                        new[] { "1.1", "", "2.0", "2.0" }, -1).Contains("都不是差异所在"),
+                    "负对照：有一条压根没拿到响应时，同样不许宣称协议已排除", ref pass, ref fail);
+                string verdictAllRan = StatusProbe.DescribeTransportVerdict(new[] { 401, 401, 401, 401 }, vRealH2, -1);
+                Check(verdictAllRan.Contains("都不是差异所在") && verdictAllRan.Contains("h2")
+                    && verdictAllRan.Contains("浏览器通道"),
+                    "四条都按各自协议跑到时，才敢说「协议与代理都不是差异所在」，并指出下一步是浏览器通道",
+                    ref pass, ref fail);
+                Check(StatusProbe.JoinVersions(new[] { "1.1", "", "2.0" }) == "h1.1 / 无响应 / h2",
+                    "实际协议列成一行：没响应的写成「无响应」而不是留空白（留空白就分不清它和回落）",
+                    ref pass, ref fail);
+                Check(!StatusProbe.WbTransportWantsH2(0) && !StatusProbe.WbTransportWantsH2(1)
+                    && StatusProbe.WbTransportWantsH2(2) && StatusProbe.WbTransportWantsH2(3),
+                    "变体 0/1 要 h1.1、2/3 要 h2 —— 回落判定必须按这个期望值来（写反了就永远判不出回落）",
+                    ref pass, ref fail);
+                Check(StatusProbe.DescribeTransportVerdict(new[] { 401, 401, 401, 401 }, vRealH2, -1).Contains("401 / 401"),
                     "矩阵结论里带上四次的状态码（证据要与结论一起出现）", ref pass, ref fail);
+                Check(StatusProbe.DescribeTransportVerdict(new[] { 401, 200, 401, 401 }, vRealH2, 1).Contains("系统代理"),
+                    "矩阵选出直连时结论必须点明差异在系统代理（否则用户不知道下一步做什么）", ref pass, ref fail);
 
                 Check(new StatusReport().WorkbuddyStatus == -1
                     && !StatusProbe.LooksLikeCredentialProblem(new StatusReport().WorkbuddyStatus),
                     "负对照：没拿到响应（-1）不被误判成凭据问题（否则网络一断就让你去换凭据）", ref pass, ref fail);
+
+                // ---- UA：用**本会话真值**，不沿用旧凭据里那份 ----
+                // 旧凭据的 UA 是上一次手工 F12 抓的，可能来自另一个浏览器/另一个版本；而 UA 恰恰是
+                // 服务端最容易拿去和 sec-ch-ua、TLS、h2 指纹交叉比对的同一格 —— 拿旧值填，
+                // 等于把一次会话的指纹拼成两个来源，比缺这一格更糟。
+                var oldUa = new List<KeyValuePair<string, string>>
+                    { new KeyValuePair<string, string>("user-agent", "OLD-UA-上一次抓的") };
+                var hUa = CredentialCapture.BuildFinalHeaders(oldUa, null, WbApi, "NEW-UA-这个会话的", WbApi, "zh-CN");
+                var uaRows = hUa.Where(h => h.Key.Equals("user-agent", StringComparison.OrdinalIgnoreCase)).ToList();
+                Check(uaRows.Count == 1 && uaRows[0].Value == "NEW-UA-这个会话的",
+                    "UA 取本会话真值（旧凭据那份可能是别的浏览器/版本），且不重复出现两份", ref pass, ref fail);
+                var hNoPageUa = CredentialCapture.BuildFinalHeaders(oldUa, null, WbApi, "", WbApi, "zh-CN");
+                Check(hNoPageUa.First(h => h.Key.Equals("user-agent", StringComparison.OrdinalIgnoreCase))
+                        .Value == "OLD-UA-上一次抓的",
+                    "页面没给真值时仍沿用旧凭据的 UA（这一格不许空着）", ref pass, ref fail);
+
+                // ---- 凭据文件的 via / page 段：两条读取口径都必须认出来 ----
+                // 现场教训：method 段曾被第二条解析口径当成一行请求头 —— 段落这东西只要有一个口径
+                // 认不出，就会以「多一行头」的形式静默出错（不是报错，是悄悄发出去一份畸形的请求）。
+                var viaHeaders = CredentialCapture.BuildFinalHeaders(null, null, WbApi, "UA", WbApi, "zh-CN");
+                string withVia = CredentialCapture.ComposeSecret(WbApi, viaHeaders, "session=a", "{\"x\":1}",
+                    "post", CredentialCapture.ViaBrowser, "https://www.workbuddy.cn/app");
+                string pUrl, pBody, pMethod, pVia, pPage;
+                var pHeaders = CredentialCapture.ParseRawSecretText(withVia,
+                    out pUrl, out pBody, out pMethod, out pVia, out pPage);
+                Check(pUrl == WbApi && pMethod == "POST" && pBody == "{\"x\":1}"
+                      && pVia == CredentialCapture.ViaBrowser && pPage == "https://www.workbuddy.cn/app",
+                    "via / page 落盘后能读回（method 仍归一成大写、body 原样、page 是来源页）", ref pass, ref fail);
+                Check(pHeaders.Count(h => h.Key.ToLowerInvariant() == "post") == 0
+                      && pHeaders.Count(h => h.Key.ToLowerInvariant().StartsWith("https:")) == 0,
+                    "负对照：method / page 段落的值不被当成请求头（段落的解析同样要能被逼红）", ref pass, ref fail);
+                Check(CredentialCapture.NormalizeVia(" BROWSER ") == CredentialCapture.ViaBrowser
+                      && CredentialCapture.NormalizeVia("有时候能用") == ""
+                      && CredentialCapture.NormalizeVia(null) == "",
+                    "via 规范化：认不出来的值一律当空（不许拿一个拼错的标记去选通道）", ref pass, ref fail);
+                BalanceSources.SaveSecret("wb-via-test.secret.txt", withVia);
+                var rtVia = BalanceSources.ReadSecret("wb-via-test.secret.txt");
+                Check(!rtVia.headers.Contains("POST") && !rtVia.headers.Contains("https://www.workbuddy.cn/app")
+                      && rtVia.body == "{\"x\":1}",
+                    "第二条读取口径（自定义余额源）同样认出 via / page 段，不把它们当请求头", ref pass, ref fail);
+
+                // ---- 浏览器读数缓存：存**原始响应体**，不存解析后的数字 ----
+                // 数字只能有一个口径（ParseWorkbuddyJson）。缓存若存数字，就多出来一个口径。
+                var at0 = new DateTime(2026, 9, 25, 13, 37, 56, DateTimeKind.Utc);
+                string cacheText = BrowserReading.Compose(at0, WbApi, "{\r\n  \"code\": 0\r\n}");
+                DateTime aAt; string aUrl, aBody;
+                Check(BrowserReading.TryParse(cacheText, out aAt, out aUrl, out aBody)
+                      && aAt == at0 && aUrl == WbApi && aBody == "{\r\n  \"code\": 0\r\n}",
+                    "读数缓存往返：时刻 / 接口 / 响应体逐字节保留（CRLF 不许被顺手规整掉，那是要解析的 JSON）",
+                    ref pass, ref fail);
+                Check(!BrowserReading.TryParse("", out aAt, out aUrl, out aBody)
+                      && !BrowserReading.TryParse("at=不是时间\nurl=http://x/\n---body---\n{}", out aAt, out aUrl, out aBody)
+                      && !BrowserReading.TryParse("at=2026-09-25T13:37:56.000Z\nurl=http://x/\n---body---\n", out aAt, out aUrl, out aBody),
+                    "负对照：空文本 / 时刻解析不了 / 没有响应体，一律不算一份缓存", ref pass, ref fail);
+                Check(BrowserReading.IsFresh(at0, at0.AddSeconds(60), 1800)
+                      && !BrowserReading.IsFresh(at0, at0.AddSeconds(1801), 1800),
+                    "新鲜度：60 秒前的算新鲜、超过上限的不算", ref pass, ref fail);
+                Check(!BrowserReading.IsFresh(at0, at0.AddSeconds(-600), 1800),
+                    "负对照：**来自未来**的读数不新鲜（否则时钟一改，过期数据会永远新鲜、被洗成最新的）",
+                    ref pass, ref fail);
+                Check(!BrowserReading.IsFresh(at0, at0, 0),
+                    "负对照：上限为 0 等于「没有缓存」，不许意外变成「无限期有效」", ref pass, ref fail);
+                Check(BrowserReading.DescribeAge(at0, at0.AddSeconds(10)) == "刚刚"
+                      && BrowserReading.DescribeAge(at0, at0.AddMinutes(7)) == "7 分钟前"
+                      && BrowserReading.DescribeAge(DateTime.MinValue, at0) == "时刻不明",
+                    "读数时刻说成人话（气泡里要一眼看出这个数字是什么时候的）", ref pass, ref fail);
+
+                // ---- 通道选择与节流：这两条决定「什么时候去开那个 Chromium」 ----
+                Check(BrowserReading.ShouldUseBrowser(401, false, false)
+                      && BrowserReading.ShouldUseBrowser(403, false, false)
+                      && BrowserReading.ShouldUseBrowser(200, true, false)
+                      && BrowserReading.ShouldUseBrowser(0, false, true),
+                    "换通道：401 / 403 / 网关 HTML 错误页 / 已知可用 —— 四种情况都换", ref pass, ref fail);
+                Check(!BrowserReading.ShouldUseBrowser(-1, false, false)
+                      && !BrowserReading.ShouldUseBrowser(200, false, false)
+                      && !BrowserReading.ShouldUseBrowser(500, false, false),
+                    "负对照：超时(-1) / 正常 200 / 应用层 500 都不换通道（那几种浏览器同样救不了，白开一个 Chromium）",
+                    ref pass, ref fail);
+                Check(BrowserReading.ThrottleAllows(-1, false) && BrowserReading.ThrottleAllows(60, false)
+                      && !BrowserReading.ThrottleAllows(5, false) && BrowserReading.ThrottleAllows(5, true),
+                    "节流：没开过 / 隔得够久就放行，挨太近不放行，但**用户主动测那一次必须放行**", ref pass, ref fail);
+                Check(BrowserReading.ThrottleSeconds < StatusProbe.CacheSeconds,
+                    "节流窗口必须小于报告缓存窗口（不然正常刷新会被自己的节流挡住，读数一直不更新）",
+                    ref pass, ref fail);
+                Check(StatusProbe.LooksLikeSameEndpoint(WbApi, WbApi)
+                      && StatusProbe.LooksLikeSameEndpoint("https://cdn.workbuddy.cn/billing/meter/get-user-resource", WbApi)
+                      && !StatusProbe.LooksLikeSameEndpoint("https://www.workbuddy.cn/other/endpoint", WbApi)
+                      && !StatusProbe.LooksLikeSameEndpoint("", WbApi),
+                    "缓存只认同一处接口：换 host 仍用（CDN），换 path 不用（那是另一个接口），空的不认",
+                    ref pass, ref fail);
+
+                // ---- 页面内取数脚本：登录窗口与离屏取数器共用同一份实现，所以转义就是正确性 ----
+                string fs = CredentialCapture.BuildFetchScript("https://a.example/x?a=1", "post",
+                    "line1\nline2\"q\"", "__azhuT");
+                Check(fs.Contains("window.__azhuT={s:'run'}") && fs.Contains("method:\"POST\"")
+                      && fs.Contains("credentials:'include'") && fs.Contains("method:\"POST\",body:"),
+                    "取数脚本：方法归一成大写、带凭据、带 body", ref pass, ref fail);
+                // ⚠ 断言一律用**纯 ASCII** 的 body，且按**语义**断言而不是按转义写法：
+                //   ① System.Text.Json 默认把非 ASCII 写成 \uXXXX（拿中文验转义必然永远红）；
+                //   ② 默认编码器还把 `"` 写成 `\u0022` 而不是 `\"` —— 这个坑本项目已经栽过两次。
+                //   所以这里只问两件与编码风格无关的事：换行有没有被转义、裸引号有没有漏出来。
+                //   **逐字符**的正确性交给 tools/hook_check.js：它在 node 里把脚本真跑一遍再比对 body。
+                Check(!fs.Contains("\n") && fs.Contains("line1\\nline2") && !fs.Contains("line2\"q\""),
+                    "body 走 JSON 注入：换行被转义、裸引号不漏出来 —— 都不会把脚本拆断", ref pass, ref fail);
+                Check(CredentialCapture.BuildFetchScript(WbApi, "GET", "{\"x\":1}", "__azhuT")
+                        .Contains("method:\"GET\"}"),
+                    "负对照：GET 不带 body（带了浏览器会直接拒绝这一发）", ref pass, ref fail);
+                bool fDone; int fSt; string fBody, fErr;
+                Check(CredentialCapture.ReadFetchState("{\"s\":\"done\",\"code\":200,\"body\":\"hi\"}",
+                        out fDone, out fSt, out fBody, out fErr) && fDone && fSt == 200 && fBody == "hi",
+                    "读状态位：done 才取状态码与响应体", ref pass, ref fail);
+                Check(CredentialCapture.ReadFetchState("{\"s\":\"run\"}", out fDone, out fSt, out fBody, out fErr) && !fDone
+                      && CredentialCapture.ReadFetchState("{\"s\":\"err\",\"msg\":\"boom\"}",
+                            out fDone, out fSt, out fBody, out fErr) && !fDone && fErr == "boom"
+                      && !CredentialCapture.ReadFetchState("", out fDone, out fSt, out fBody, out fErr),
+                    "读状态位：run=还没回来、err=真失败、空=解不出来 —— 三种都不许当成结果", ref pass, ref fail);
+                Check(CredentialCapture.DecodeJsString("\"a\\nb\"") == "a\nb"
+                      && CredentialCapture.DecodeJsString("null") == ""
+                      && CredentialCapture.DecodeJsString("{不是JSON") == "",
+                    "ExecuteScriptAsync 返回值解码：解出一层引号；解不出来当空（宁可不说话）", ref pass, ref fail);
+
+                // ---- 浏览器通道的失败必须分三种说，不能都说成「401」 ----
+                Check(StatusProbe.DescribeBrowserAttempt(new BrowserFetch { Status = 401 }, "x").Contains("重新登录"),
+                    "浏览器自己发也被拒 ⇒ 结论只能是「会话失效，去重新登录」（补头、换凭据都不会有变化）",
+                    ref pass, ref fail);
+                Check(StatusProbe.DescribeBrowserAttempt(new BrowserFetch { Status = -1, Why = "页面打不开" }, null)
+                        .Contains("没用上"),
+                    "浏览器压根没发出去时说「没用上」，不说「被拒」（两者的下一步完全不同）", ref pass, ref fail);
+                Check(StatusProbe.DescribeBrowserAttempt(new BrowserFetch { Status = 200, Ok = true, Body = "{}" }, "字段缺失")
+                        .Contains("不合口径"),
+                    "浏览器通了但解析不出余额时说「不合口径」，不说「被拒」", ref pass, ref fail);
+                Check(StatusProbe.DescribeBrowserAttempt(null, null) == null,
+                    "负对照：没走浏览器通道时不给任何结论（不许把「没试」说成「失败」）", ref pass, ref fail);
+                Check(StatusProbe.ViaLabel(new StatusReport { WorkbuddyVia = "browser" }) == "（浏览器通道）"
+                      && StatusProbe.ViaLabel(new StatusReport { WorkbuddyVia = "" }) == "",
+                    "读数来源标签：直连不标注、浏览器通道标出来", ref pass, ref fail);
+                Check(StatusProbe.ViaLabel(new StatusReport
+                        { WorkbuddyVia = "cache", WorkbuddyReadAtUtc = DateTime.UtcNow.AddMinutes(-7) })
+                        .Contains("7 分钟前"),
+                    "缓存读数必须带上时刻（标着时刻的旧数字是信息，装作当下的旧数字是误导）", ref pass, ref fail);
 
                 var report = new StatusReport();
                 StatusProbe.ApplyCustomResults(report, new Action<StatusReport>[]

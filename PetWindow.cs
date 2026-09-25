@@ -214,7 +214,9 @@ namespace AzhuPet
         public async Task<StatusReport> TestBalancesAsync()
         {
             ReloadBalanceSources();
-            return await _status.CheckAsync();
+            // ⚠ force=true：这是用户**主动点**的要一次结果。浏览器通道有节流（避免连着开 Chromium），
+            //   但「我点了却没重取」比「多开一次浏览器」更糟 —— 主动的那一下必须穿透节流。
+            return await _status.CheckAsync(true);
         }
 
         private void Trace_(string s)

@@ -325,28 +325,62 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
             return false;
         }
 
-        /// <summary>读一份**已有的**凭据文本，拆出 URL / 方法 / 头 / body（纯函数）。
-        /// 规则与 BalanceSources.ReadSecret 一致（同一份数据没有第二个解析口径），
-        /// 差别只在吃字符串而不是吃路径 —— 这样才能离线喂合成文本。</summary>
+        /// <summary>`---via---` 段落里唯一认的值：**这份凭据要用浏览器通道取数**。
+        /// 为什么需要它：本机直连（系统代理/直连 × h1.1/h2 四种都试过）被网关挡下 401，
+        /// 而同一个会话在浏览器里 200 —— 差异落在 .NET 复制不了的那一层（TLS/h2 指纹、头序）。
+        /// 于是「用哪个通道」必须**被记住**，否则每次刷新都要先把四种传输再撞一遍。</summary>
+        public const string ViaBrowser = "browser";
+
+        /// <summary>规范化 `---via---` 的值（纯函数）。认不出来的一律当空 ——
+        /// 宁可回落到「照旧直连」，也不要拿一个拼错的标记去选通道。</summary>
+        public static string NormalizeVia(string via)
+        {
+            string v = (via ?? "").Trim().ToLowerInvariant();
+            return v == ViaBrowser ? ViaBrowser : "";
+        }
+
+        /// <summary>读一份**已有的**凭据文本，拆出 URL / 方法 / body（纯函数）—— 旧签名的兼容入口。</summary>
         public static List<KeyValuePair<string, string>> ParseRawSecretText(string text, out string url, out string body, out string method)
         {
-            url = null; body = null; method = null;
+            string via, page;
+            return ParseRawSecretText(text, out url, out body, out method, out via, out page);
+        }
+
+        /// <summary>读一份**已有的**凭据文本，拆出 URL / 方法 / 头 / body / 通道标记 / 来源页（纯函数）。
+        /// 规则与 BalanceSources.ReadSecret 一致（同一份数据没有第二个解析口径），
+        /// 差别只在吃字符串而不是吃路径 —— 这样才能离线喂合成文本。
+        /// ⚠ 段落用**一个** section 变量标记，不用「每段一个 bool」：2026-09-25 栽在 inMethod 上 ——
+        ///   读到值没复位，method 之后所有请求头被整段吞掉（实测读出 "COOKIE: SESSION=A"）。
+        ///   一个变量不存在「忘了复位」这回事。</summary>
+        public static List<KeyValuePair<string, string>> ParseRawSecretText(
+            string text, out string url, out string body, out string method, out string via, out string page)
+        {
+            url = null; body = null; method = null; via = null; page = null;
             var headers = new List<KeyValuePair<string, string>>();
             if (string.IsNullOrEmpty(text)) return headers;
             var bodyLines = new List<string>();
-            bool inBody = false, inMethod = false;
+            string section = "";
             foreach (string raw in text.Split('\n'))
             {
                 string line = raw.TrimEnd('\r');
                 string t = line.Trim();
-                if (t.StartsWith("---body", StringComparison.Ordinal)) { inBody = true; inMethod = false; continue; }
-                if (t.StartsWith("---method", StringComparison.Ordinal)) { inMethod = true; inBody = false; continue; }
-                if (t.StartsWith("---", StringComparison.Ordinal)) { inMethod = false; continue; }
-                if (inBody) { bodyLines.Add(line); continue; }
-                // ⚠ 读到值就要**立刻复位** inMethod。不复位的话，method 之后的每一行都会
-                //   继续走这一支（被吞掉），而且 method 会被最后一个非空行反复覆盖 ——
-                //   实测得到的是 "COOKIE: SESSION=A"，而所有请求头一起消失。
-                if (inMethod) { if (t.Length > 0) { method = t.ToUpperInvariant(); inMethod = false; } continue; }
+                if (t.StartsWith("---body", StringComparison.Ordinal)) { section = "body"; continue; }
+                if (t.StartsWith("---method", StringComparison.Ordinal)) { section = "method"; continue; }
+                if (t.StartsWith("---via", StringComparison.Ordinal)) { section = "via"; continue; }
+                if (t.StartsWith("---page", StringComparison.Ordinal)) { section = "page"; continue; }
+                if (t.StartsWith("---", StringComparison.Ordinal)) { section = ""; continue; }
+                if (section == "body") { bodyLines.Add(line); continue; }
+                if (section.Length > 0)   // 单值段落：读一行就复位
+                {
+                    if (t.Length > 0)
+                    {
+                        if (section == "method") method = t.ToUpperInvariant();
+                        else if (section == "via") via = NormalizeVia(t);
+                        else if (section == "page") page = t;
+                        section = "";
+                    }
+                    continue;
+                }
                 if (t.Length == 0 || t.StartsWith("#", StringComparison.Ordinal)) continue;
                 if (url == null) { url = t; continue; }
                 int c = line.IndexOf(':');
@@ -430,8 +464,12 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
             foreach (var h in capturedHeaders ?? Enumerable.Empty<KeyValuePair<string, string>>())
                 put(h.Key, h.Value);
 
-            // ③ 浏览器自动头：只在仍然缺的时候补（旧头里那份是真实浏览器抓的，优先）
-            if (!at.ContainsKey("user-agent") && !string.IsNullOrWhiteSpace(pageUserAgent))
+            // ③ 浏览器自动头：仍然缺的用页面上下文补
+            // ⚠ user-agent 例外：**有页面真值就用页面真值**，哪怕旧凭据里已经有一份。
+            //   旧凭据那份是上一次手工 F12 抓的，可能来自另一个浏览器/另一个版本；而 UA 恰恰是
+            //   服务端最容易拿去和别的东西（sec-ch-ua、TLS、h2 指纹）交叉比对的**同一格** ——
+            //   用旧值填，等于把一次会话的指纹拼成两个来源，比缺这一格更糟。
+            if (!string.IsNullOrWhiteSpace(pageUserAgent))
                 put("user-agent", pageUserAgent);
             if (!at.ContainsKey("accept-language"))
                 put("accept-language", AcceptLanguageOf(pageLanguage));
@@ -478,20 +516,28 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
             return s + "," + s.Substring(0, dash) + ";q=0.9";
         }
 
-        /// <summary>拼出凭据文件的正文（纯函数）：第一行 URL，可选 ---method--- 段，随后「名字: 值」，可选 ---body--- 段。
+        /// <summary>拼出凭据文件的正文（纯函数）：第一行 URL，可选 `---page---` / `---method---` / `---via---` 段，
+        /// 随后「名字: 值」，可选 `---body---` 段。
         /// 行尾用 CRLF —— 与现有 workbuddy_secret.txt（CRLF=15）保持一致，用户在编辑器里看着正常。
         /// URL 为空一律返回空串：宁可不写，也不写一份连请求地址都没有的凭据进去。
-        /// ⚠ ---method--- 与 ---body--- 都是「抄到的事实」，缺了它们就等于把请求的另一半扔掉：
-        ///   2026-09-25 之前这两段**从来没被发出去过**（回测写死 POST + 空 body `{}`），而 GET 同一个
-        ///   地址实测返回 404 —— 也就是说方法一旦抄错，回测连「地址不存在」和「没通过鉴权」都分不清。</summary>
+        /// ⚠ `---method---` / `---body---` / `---page---` 都是「抄到的事实」，缺了它们就等于把请求的另一半扔掉：
+        ///   2026-09-25 之前 method 与 body **从来没被发出去过**（回测写死 POST + 空 body `{}`），而 GET 同一个
+        ///   地址实测返回 404 —— 方法一旦抄错，回测连「地址不存在」和「没通过鉴权」都分不清。
+        /// ⚠ `---via---` 不是事实而是**学到的东西**（哪条通道真取到过数），只有成功过一次才写。</summary>
         public static string ComposeSecret(string url, IEnumerable<KeyValuePair<string, string>> headers,
-            string cookieHeader, string body, string method = null)
+            string cookieHeader, string body, string method = null, string via = null, string page = null)
         {
             if (string.IsNullOrWhiteSpace(url)) return "";
             var sb = new System.Text.StringBuilder();
             sb.Append(url.Trim()).Append("\r\n");
+            if (!string.IsNullOrWhiteSpace(page))
+                sb.Append("---page---\r\n").Append(page.Trim()).Append("\r\n");
             if (!string.IsNullOrWhiteSpace(method))
                 sb.Append("---method---\r\n").Append(method.Trim().ToUpperInvariant()).Append("\r\n");
+            // ⚠ `---via---` 记的是**哪条通道真的取到过数**，不是偏好：写进去之前必须有一次成功的取数，
+            //   否则等于把「猜」写成了「事实」，下一次刷新会照着一个没验证过的通道走。
+            if (!string.IsNullOrWhiteSpace(via))
+                sb.Append("---via---\r\n").Append(via.Trim().ToLowerInvariant()).Append("\r\n");
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var h in headers ?? Enumerable.Empty<KeyValuePair<string, string>>())
             {
@@ -507,6 +553,81 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
             if (!string.IsNullOrWhiteSpace(body))
                 sb.Append("---body---\r\n").Append(body.Trim()).Append("\r\n");
             return sb.ToString();
+        }
+
+        /// <summary>把字符串写成 JS 字面量（纯函数）。走 JSON 序列化 —— 不自己拼引号。</summary>
+        public static string JsStr(string s) => JsonSerializer.Serialize(s ?? "");
+
+        /// <summary>ExecuteScriptAsync 的返回值是一段 JSON；字符串结果会带一层引号。
+        /// 解不出来就当空 —— 宁可多等一拍，也不要拿半截字符串去拼凭据或下结论。
+        /// ⚠ 放在这一层而不是某个窗口里：登录窗口与离屏取数器都要用它，**同一件事不许有两份实现**
+        ///   （两份的差别就藏在「解不出来时返回什么」这种行为细节里）。</summary>
+        public static string DecodeJsString(string raw)
+        {
+            if (string.IsNullOrEmpty(raw) || raw == "null") return "";
+            try { return JsonSerializer.Deserialize<string>(raw) ?? ""; }
+            catch { return ""; }
+        }
+
+        /// <summary>拼出「在**页面里**发一次请求、把结果写进全局状态位」的注入脚本（纯函数）。
+        ///
+        /// 为什么非要在页面里发：只有它同时具备「浏览器自己那套 cookie」、「浏览器自动补齐的整套
+        /// 请求头」，以及浏览器自己的 TLS/h2 指纹。本机直连四种传输（系统代理/直连 × h1.1/h2）
+        /// 全被网关挡成 401，同一会话在页面里 200 —— 差异落在 .NET 复制不了的那一层。所以
+        /// 「让浏览器自己取数」不是退而求其次，是**唯一被证据支持的路**。
+        ///
+        /// 两个刻意的选择：
+        ///  ① **不 await 返回值**：`ExecuteScriptAsync` 对返回 Promise 的表达式行为随运行时版本
+        ///     而变；改成写全局状态位再轮询，与钩子的 `__azhuCapture` 是同一套写法，稳。
+        ///  ② 状态位是 `{s:'run'|'done'|'err'}` 对象：宿主靠它区分「还没回来」和「真失败了」——
+        ///     只有字符串是分不出来的（空串既可能是超时也可能是空响应）。
+        ///
+        /// ⚠ `body` 与 `url` 一律经 <see cref="JsStr"/> 注入：带引号/换行/反斜杠都不会破坏脚本。
+        /// ⚠ `body` **不截断**：这是要拿去解析余额的原始响应，不是诊断预览。
+        /// </summary>
+        public static string BuildFetchScript(string url, string method, string body, string stateVar)
+        {
+            string m = string.IsNullOrWhiteSpace(method) ? "GET" : method.Trim().ToUpperInvariant();
+            string init = "{credentials:'include',method:" + JsStr(m);
+            if (!string.IsNullOrWhiteSpace(body) && m != "GET" && m != "HEAD")
+                init += ",body:" + JsStr(body);
+            init += "}";
+            string w = "window." + (string.IsNullOrWhiteSpace(stateVar) ? "__azhuFetch" : stateVar.Trim());
+            return "(function(){try{" + w + "={s:'run'};"
+                 + "fetch(" + JsStr(url) + "," + init + ").then(function(r){"
+                 + "return r.text().then(function(t){" + w + "={s:'done',code:r.status,body:(t||'')};});})"
+                 + ".catch(function(e){" + w + "={s:'err',msg:''+e};});"
+                 + "}catch(e){" + w + "={s:'err',msg:''+e};}return 'ok';})()";
+        }
+
+        /// <summary>读上面那个状态位（纯函数）：从 ExecuteScriptAsync 的返回值里取 URL/状态码/响应体。
+        /// `done` 为 false 表示「还没回来」或「抛异常了」—— 两者都不许当成结果。</summary>
+        public static bool ReadFetchState(string json, out bool done, out int status, out string body, out string err)
+        {
+            done = false; status = 0; body = ""; err = "";
+            if (string.IsNullOrWhiteSpace(json)) return false;
+            try
+            {
+                using (var doc = JsonDocument.Parse(json))
+                {
+                    var root = doc.RootElement;
+                    string s = root.TryGetProperty("s", out var se) && se.ValueKind == JsonValueKind.String
+                        ? se.GetString() : "";
+                    if (s == "done")
+                    {
+                        done = true;
+                        if (root.TryGetProperty("code", out var ce) && ce.ValueKind == JsonValueKind.Number)
+                            ce.TryGetInt32(out status);
+                        body = root.TryGetProperty("body", out var be) && be.ValueKind == JsonValueKind.String
+                            ? (be.GetString() ?? "") : "";
+                    }
+                    else if (s == "err")
+                        err = root.TryGetProperty("msg", out var me) && me.ValueKind == JsonValueKind.String
+                            ? (me.GetString() ?? "") : "";
+                }
+            }
+            catch { return false; }
+            return true;
         }
     }
 }

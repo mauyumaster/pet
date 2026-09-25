@@ -168,7 +168,9 @@ namespace AzhuPet
                 : report.DynamicRows[0];
         }
 
-        public async Task<StatusReport> CheckAsync()
+        /// <param name="force">忽略浏览器通道的节流，当场重取一次。给「面板上手动测一次」用 ——
+        /// 用户主动点的那一下，等来的不该是「刚取过所以没取」。</param>
+        public async Task<StatusReport> CheckAsync(bool force = false)
         {
             var rep = new StatusReport();
             // 网络可用性：deepseek 直连（国内本来就通，用来判本机离线与否）。
@@ -182,7 +184,7 @@ namespace AzhuPet
             string wbPath = WorkBuddySecretPath();
             bool traeFound = File.Exists(traePath);
             bool wbFound = File.Exists(wbPath);
-            Task<Action<StatusReport>> wb = wbFound ? WorkBuddyBalanceAsync(wbPath) : null;
+            Task<Action<StatusReport>> wb = wbFound ? WorkBuddyBalanceAsync(wbPath, force) : null;
 
             var all = new List<Task> { link, google, balance };
             if (wb != null) all.Add(wb);
@@ -466,6 +468,22 @@ namespace AzhuPet
         private static DateTime _wbMatrixNextAt = DateTime.MinValue;
         private static readonly HttpClient[] _wbClients = new HttpClient[WbTransportCount];
 
+        // ---- 浏览器通道的机器级状态（static：这是「这台机器上哪条路走得通」的事实，不属于某个探针实例）----
+        private static bool _wbBrowserWorks;                        // 本会话里浏览器通道成功过
+        private static DateTime _wbLastBrowserTry = DateTime.MinValue;   // 上次真开浏览器（节流用）
+
+        /// <summary>记下「刚刚用浏览器通道成功取到过数」。登录窗口在它自己那一发成功之后调用。
+        /// 两个作用：① 这条通道成为**已知可用**，下一次不必先撞一回注定失败的直连；
+        /// ② 顺手开上节流，避免紧接着的面板刷新又开一个 Chromium（那次会直接吃刚写好的读数缓存）。</summary>
+        public static void NoteBrowserSuccess()
+        {
+            _wbBrowserWorks = true;
+            _wbLastBrowserTry = DateTime.UtcNow;
+        }
+
+        /// <summary>仅供离线判据与诊断：当前是不是已经知道浏览器通道可用。</summary>
+        public static bool BrowserChannelKnown { get { return _wbBrowserWorks; } }
+
         /// <summary>最近一次传输矩阵的结论（一句话）。界面与日志都读它 —— 现场唯一的验收人不会来翻代码。</summary>
         public static string WbTransportNote { get { return _wbTransportNote; } }
 
@@ -490,26 +508,76 @@ namespace AzhuPet
             return -1;
         }
 
-        /// <summary>把矩阵结果翻成一句能指导下一步的话（纯函数）。</summary>
-        // 判据纪律：这句话是**结论**，不是客套。所以每一支都要说清「差异在哪」，
-        // 以及「全不通」时不要把人再往 cookie/请求头上引 —— 那两项已经排除过了。
-        public static string DescribeTransportVerdict(int[] statuses, int picked)
+        /// <summary>把矩阵结果翻成一句能指导下一步的话（纯函数）。
+        /// ⚠ `versions` 是**各自实际协商出来的协议**，不是我们要求的那个。必须先说清为什么要有这个参数：
+        ///   以前 h2 变体用 `RequestVersionOrLower`，回落是**静默**的 —— 于是「协议与代理都不是差异
+        ///   所在」这句话，在 HTTP/2 压根没跑起来的情况下也照打不误。判据必须能证伪它自己说的那句话。</summary>
+        public static string DescribeTransportVerdict(int[] statuses, string[] versions, int picked)
         {
             string all = statuses == null ? "-" : string.Join(" / ", statuses);
+            string got = JoinVersions(versions);
+            string bad = DescribeDowngrade(versions);
             if (picked < 0)
-                return "四种传输方式全部被拒（" + all + "）—— 协议与代理都不是差异所在；"
-                     + "cookie 与请求头此前已逐项对齐，说明服务端是按**别的东西**认这次请求"
-                     + "（出口 IP / 客户端指纹）。";
+            {
+                if (bad.Length > 0)
+                    return "四种传输方式全部被拒（" + all + "；实际协议 " + got + "）。⚠ 但这四条里有的"
+                         + "**没按自己的协议跑起来**：" + bad + " —— 所以「协议不是差异」这句还下不了，"
+                         + "得先把 HTTP/2 真正走通（此前用 OrLower，回落是静默的，正是这一点骗过了上一次的结论）。";
+                return "四种传输方式全部被拒（" + all + "；实际协议 " + got + "，四条都名副其实）—— 协议与代理"
+                     + "都不是差异所在；cookie 与请求头此前已逐项对齐，说明服务端是按**别的东西**认这次请求"
+                     + "（客户端指纹那一层）。下一步不是继续补头，而是**让这个客户端自己发**（浏览器通道）。";
+            }
             if (picked == 0)
-                return "默认传输方式（系统代理 + HTTP/1.1）在自检里通过了（四次依次 " + all
-                     + "）—— 那次 401 是偶发（会话或网络抖动），不是配置问题。";
+                return "默认传输方式（系统代理 + HTTP/1.1）在自检里通过了（四次依次 " + all + "；实际协议 "
+                     + got + "）—— 那次 401 是偶发（会话或网络抖动），不是配置问题。";
             string why =
                 picked == (int)WbTransport.DirectHttp1
                     ? "**系统代理就是差异所在**：它把请求换了个出口 IP 发出去，服务端不认这个会话。"
                     : (picked == (int)WbTransport.SystemProxyHttp2
                         ? "**HTTP/1.1 就是差异所在**：浏览器走 h2，而 h1.1 是脚本请求的典型指纹。"
                         : "系统代理与 HTTP/1.1 各占一部分。");
-            return "找到差异了：" + WbTransportName(picked) + " 能通过（四次依次 " + all + "）。" + why;
+            return "找到差异了：" + WbTransportName(picked) + " 能通过（四次依次 " + all + "；实际协议 "
+                 + got + "）。" + why;
+        }
+
+        /// <summary>这个变体要的是 h2 吗（纯函数）。</summary>
+        public static bool WbTransportWantsH2(int mode)
+        {
+            return mode == (int)WbTransport.SystemProxyHttp2 || mode == (int)WbTransport.DirectHttp2;
+        }
+
+        /// <summary>把实际协议列成一行（纯函数）。空值写成 `无响应` —— 分不清「没响应」和「回落」的话，
+        /// 上面那句结论就永远说不准。写成 h1.1 / h2（不写 h2.0）：HTTP/2 没有次版本号的说法，
+        /// 而这个字符串是要给人看、给人核对的。</summary>
+        public static string JoinVersions(string[] versions)
+        {
+            if (versions == null || versions.Length == 0) return "-";
+            var parts = new List<string>();
+            for (int i = 0; i < versions.Length; i++)
+            {
+                string v = (versions[i] ?? "").Trim();
+                if (v.Length == 0) { parts.Add("无响应"); continue; }
+                int dot = v.IndexOf('.');
+                string label = (dot == 1 && v[0] == '1') ? v : (dot > 0 ? v.Substring(0, dot) : v);
+                parts.Add("h" + label);
+            }
+            return string.Join(" / ", parts);
+        }
+
+        /// <summary>找出「没按预期协议跑到」的变体（纯函数）。空串 = 四个都名副其实。
+        /// 这是上面那句结论文案能不能成立的**前提**，所以它自己必须能被离线判据逼红。</summary>
+        public static string DescribeDowngrade(string[] versions)
+        {
+            if (versions == null) return "";
+            var bad = new List<string>();
+            for (int i = 0; i < versions.Length && i < WbTransportCount; i++)
+            {
+                string got = (versions[i] ?? "").Trim();
+                if (got.Length == 0) { bad.Add(WbTransportName(i) + " 没拿到响应"); continue; }
+                if (WbTransportWantsH2(i) != got.StartsWith("2", StringComparison.Ordinal))
+                    bad.Add(WbTransportName(i) + " 实际是 HTTP/" + got);
+            }
+            return string.Join("；", bad);
         }
 
         /// <summary>按传输方式取一个长期复用的 client。直连 = `UseProxy=false`；
@@ -538,6 +606,10 @@ namespace AzhuPet
             public int Status = -1;     // -1 = 压根没拿到响应（超时/异常）
             public string Body = "";
             public string Err = "";
+            // ⚠ **实际协商出来的**协议版本（"1.1" / "2.0"），空 = 没拿到响应。
+            //   没有它的话，「HTTP/2 也试过了」就只是一句我们自己的声明 —— 而用 RequestVersionOrLower
+            //   时回落是静默的，四条变体很可能全是 h1.1，日志上却看不出任何区别（本轮修的正是这个）。
+            public string Version = "";
         }
 
         /// <summary>按凭据文件发一次回测。
@@ -566,7 +638,10 @@ namespace AzhuPet
                     if (http2)
                     {
                         req.Version = HttpVersion.Version20;
-                        req.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;   // 服务器不支持 h2 时自动回落
+                        // ⚠ 用 **Exact**，不用 RequestVersionOrLower：回落必须是**可见的失败**，不能是
+                        //   静默的降级。以前用 OrLower，h2 若没协商成就悄悄跑成 h1.1，而日志里四条都一样 ——
+                        //   「HTTP/2 已排除」这个结论就建立在一次根本没发生的实验上。
+                        req.VersionPolicy = HttpVersionPolicy.RequestVersionExact;
                     }
                     string contentType = "application/json";
                     foreach (var kv in headers)
@@ -589,6 +664,8 @@ namespace AzhuPet
                     using (var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead))
                     {
                         a.Status = (int)resp.StatusCode;
+                        // 记下**实际**协议：这一格是「协议已排除」这句话的唯一凭据（见 WbAttempt.Version）。
+                        a.Version = resp.Version == null ? "" : (resp.Version.Major + "." + resp.Version.Minor);
                         a.Body = await resp.Content.ReadAsStringAsync();
                     }
                 }
@@ -606,69 +683,223 @@ namespace AzhuPet
             if (DateTime.UtcNow < _wbMatrixNextAt) return;
             _wbMatrixNextAt = DateTime.UtcNow.AddMinutes(WbMatrixCooldownMinutes);
             var statuses = new int[WbTransportCount];
+            var versions = new string[WbTransportCount];
             for (int m = 0; m < WbTransportCount; m++)
-                statuses[m] = (await TryWorkbuddyAsync(file, m)).Status;
+            {
+                var a = await TryWorkbuddyAsync(file, m);
+                statuses[m] = a.Status;
+                versions[m] = a.Version;      // 实际协议，不是要求的那一个
+            }
             int picked = PickWorkingTransport(statuses);
             if (picked >= 0) _wbTransport = picked;
-            _wbTransportNote = DescribeTransportVerdict(statuses, picked);
+            _wbTransportNote = DescribeTransportVerdict(statuses, versions, picked);
         }
 
-        private async Task<Action<StatusReport>> WorkBuddyBalanceAsync(string file)
+        /// <summary>WorkBuddy 积分取数：**一条阶梯**，走到最后一步才叫「取不到」。
+        ///
+        ///  ① 直连（按已知可用的传输方式打一次）
+        ///  ② 浏览器通道（离屏 WebView2，用**页面自己的会话**发这一发）
+        ///  ③ 最近一次浏览器读数（有时刻；界面标明来源与时刻）
+        ///  ④ 传输矩阵（**最后的诊断**，有冷却）—— 只在直连被网关挡下时跑
+        ///  ⑤ 报错 —— 到这一步才叫「取不到」
+        ///
+        /// 顺序上的两个刻意安排：
+        ///   · 矩阵从「① 之后马上跑」挪到了后面。它以前挡在浏览器通道前面，于是一次刷新最多要发
+        ///     六个请求（1 + 4 + 1）才轮到真正管用的那条路 —— 而它宣称的角色本来就是「最后诊断」。
+        ///   · 一次成功的浏览器取数之后，下一次直接走 ②（省掉注定失败的那一发）。
+        ///
+        /// 为什么会有 ②③：本机直连被网关挡成 401（四种传输、cookie 八项、请求头、method、body
+        /// 全都逐项对齐过），而同一个会话在浏览器里 200 —— 差异落在 .NET 复制不了的那一层。
+        /// 所以「让浏览器自己发」不是退路，是**唯一被证据支持的通道**；③ 的存在是为了不必每次
+        /// 都开一个 Chromium，也为了「浏览器一时起不来」时别把「有过读数」说成「取不到」。
+        ///
+        /// ⚠ 阶梯的顺序会**变**（已知浏览器可用就直接走它），但每一格都必须能说出「这一格为什么
+        ///   没给出答案」—— 用户手上只有一句话，那句话得是真的。
+        /// </summary>
+        private async Task<Action<StatusReport>> WorkBuddyBalanceAsync(string file, bool force)
         {
             string err = null;
             int httpStatus = -1;   // -1 = 压根没拿到响应（超时/异常），与 4xx/5xx 是两回事
             string respBody = "";
+            bool rawTried = false;
             try
             {
-                int firstMode = _wbTransport;
-                var a = await TryWorkbuddyAsync(file, _wbTransport);
-                httpStatus = a.Status;
-                respBody = a.Body;
-                err = a.Err;
+                string text;
+                try { text = File.ReadAllText(file); }
+                catch (Exception ex) { return FailWriter(Shrink(ex.Message), -1); }
 
-                // 401/403 才值得怀疑「客户端身份」这一层：cookie 与请求头那时已经排除过了
-                if (httpStatus == 401 || httpStatus == 403)
+                string url, body, method, via, page;
+                CredentialCapture.ParseRawSecretText(text, out url, out body, out method, out via, out page);
+                if (string.IsNullOrEmpty(url)) return FailWriter("workbuddy凭据无URL", -1);
+
+                // 已经知道浏览器这条通道走得通（凭据里写着 via=browser，或本会话成功过）⇒ 直接走它，
+                // 不再先撞一回注定 401 的直连。反过来则先直连 —— 它是唯一不依赖界面线程的路。
+                bool browserFirst = CredentialCapture.NormalizeVia(via) == CredentialCapture.ViaBrowser
+                                    || _wbBrowserWorks;
+
+                // ---- ① 直连 ----
+                if (!browserFirst)
                 {
+                    rawTried = true;
+                    var a = await TryWorkbuddyAsync(file, _wbTransport);
+                    httpStatus = a.Status; respBody = a.Body; err = a.Err;
+                    var ok = AcceptResponse(httpStatus, respBody, "", DateTime.MinValue, ref err);
+                    if (ok != null) return ok;
+                }
+
+                // ---- ② 浏览器通道 ----
+                var bf = await TryBrowserChannelAsync(url, method, body, page, force);
+                if (bf != null)
+                {
+                    string berr = null;
+                    var ok = AcceptResponse(bf.Status, bf.Body, CredentialCapture.ViaBrowser, DateTime.MinValue, ref berr);
+                    if (ok != null) return ok;
+                    // 浏览器**自己发的**也被拒 ⇒ 这是关于会话本身的结论，比「我们拼的东西不对」重要得多。
+                    // 把这句话放在直连那句后面，是因为它才是能指导下一步的那一句。
+                    string note = DescribeBrowserAttempt(bf, berr);
+                    if (note != null) err = (err ?? "") + " ｜ " + note;
+                }
+
+                // ---- ③ 最近一次浏览器读数（有时刻，界面会标明）----
+                DateTime at;
+                string rUrl, rBody;
+                if (BrowserReading.TryLoad(out at, out rUrl, out rBody)
+                    && LooksLikeSameEndpoint(rUrl, url)
+                    && BrowserReading.IsFresh(at, DateTime.UtcNow, BrowserReading.MaxAgeSeconds))
+                {
+                    string cerr = null;
+                    var ok = AcceptResponse(200, rBody, "cache", at, ref cerr);
+                    if (ok != null) return ok;
+                }
+
+                // ---- ④ 只剩解释了。直连若一次都没试过（browserFirst 那条路），补试一次：
+                //         失败信息里总得有一句「直连是什么结果」，否则这句话是半截的。
+                // ⚠ 这一补试**必须也走 AcceptResponse**：直连有可能已经恢复了（服务端改了策略、
+                //   会话又被刷新过）。若只把状态码记下来、不看正文，就会出现「直连明明返回 200，
+                //   界面却在报取不到」—— 那是最难查的一类错（结论与证据相反，还看不出来）。
+                if (!rawTried)
+                {
+                    rawTried = true;
+                    var a = await TryWorkbuddyAsync(file, _wbTransport);
+                    httpStatus = a.Status; respBody = a.Body;
+                    string rerr = null;
+                    var okRaw = AcceptResponse(httpStatus, respBody, "", DateTime.MinValue, ref rerr);
+                    if (okRaw != null) return okRaw;
+                    err = (string.IsNullOrEmpty(err) ? "" : err + " ｜ ")
+                        + "直连 " + (httpStatus < 0 ? "没拿到响应" : httpStatus.ToString())
+                        + "：" + (rerr ?? a.Err ?? "（没给出原因）");
+                }
+
+                // ---- ⑤ 最后的诊断：传输矩阵（有冷却）。**只在直连被网关挡下时跑** ——
+                //   cookie、请求头、method、body 早已逐项对齐，这里唯一还没排除的就是「协议 / 代理」
+                //   那两层。它值得一试的理由很实在：找得到能用的传输 ⇒ 直连本来就能取数，
+                //   那比每次开一个浏览器便宜得多。找不到也没关系，注释里会写明不是因为协议。
+                if (rawTried && ((httpStatus == 401 || httpStatus == 403) || LooksLikeGatewayPage(respBody)))
+                {
+                    int before = _wbTransport;
                     await RunTransportMatrixAsync(file);
                     if (_wbTransportNote.Length > 0) err = (err ?? "") + " ｜ " + _wbTransportNote;
-                    // 矩阵若已经找到能用的传输方式，**当场用它重试一次**：否则用户看到的仍是「被拒」，
-                    // 而真正的结论（能用）要等下一次刷新才浮出来 —— 那正是「用户只能反复点」的来源。
-                    if (_wbTransport != firstMode)
+                    if (_wbTransport != before)
                     {
                         var retry = await TryWorkbuddyAsync(file, _wbTransport);
-                        if (retry.Status >= 200 && retry.Status < 300)
-                        { httpStatus = retry.Status; respBody = retry.Body; err = retry.Err; }
-                    }
-                }
-                if (httpStatus >= 0 && err == null)
-                {
-                    if (httpStatus < 200 || httpStatus >= 300) err = DescribeHttpFailure(httpStatus, respBody);
-                    else
-                    {
-                        // 解析与口径判定全在 ParseWorkbuddyJson 里（纯函数）——
-                        // 这样口径才能被 --calibertest 用合成响应离线逼红。
-                        var cal = ParseWorkbuddyJson(respBody);
-                        if (cal.Ok)
-                            return r =>
-                            {
-                                r.WorkbuddyOk = true;
-                                r.WorkbuddyStatus = httpStatus;
-                                r.WorkbuddyRemain = cal.Remain;
-                                r.WorkbuddyAllBucketsRemain = cal.AllBucketsRemain;
-                                r.WorkbuddyType1Count = cal.Type1Count;
-                                r.WorkbuddyAccountCount = cal.AccountCount;
-                                r.WorkbuddyTotalCount = cal.TotalCount;
-                                r.WorkbuddyOtherRemain = cal.OtherRemain;
-                            };
-                        string preview = (respBody ?? "").Length > 80 ? respBody.Substring(0, 80) : (respBody ?? "");
-                        err = Shrink(cal.Why ?? ("字段缺失(" + preview.Replace("\r", " ").Replace("\n", " ") + ")"));
+                        string rerr2 = null;
+                        var okRetry = AcceptResponse(retry.Status, retry.Body, "", DateTime.MinValue, ref rerr2);
+                        if (okRetry != null) return okRetry;
                     }
                 }
             }
             catch (Exception ex) { err = Shrink(ex.Message); }
-            var e2 = err;
-            int e3 = httpStatus;
-            return r => { r.WorkbuddyError = e2; r.WorkbuddyStatus = e3; };
+            return FailWriter(err, httpStatus);
+        }
+
+        /// <summary>走浏览器通道取一次；返回 null = 这次**没走**（不可用 / 被节流）。调用方据此
+        /// 区分「没走」与「走了但失败」—— 这两件事的错误文案完全不同。</summary>
+        private static async Task<BrowserFetch> TryBrowserChannelAsync(string url, string method, string body,
+            string pageUrl, bool force)
+        {
+            if (!BrowserBalance.Available) return null;
+            double since = _wbLastBrowserTry == DateTime.MinValue
+                ? -1 : (DateTime.UtcNow - _wbLastBrowserTry).TotalSeconds;
+            if (!BrowserReading.ThrottleAllows(since, force)) return null;
+            _wbLastBrowserTry = DateTime.UtcNow;
+            var f = await BrowserBalance.FetchSafeAsync(pageUrl, url, method, body, 15000);
+            if (f == null) return null;
+            if (f.Ok)
+            {
+                _wbBrowserWorks = true;
+                BrowserReading.TrySave(DateTime.UtcNow, url, f.Body);   // 存原始响应体，不存解析后的数字
+            }
+            return f;
+        }
+
+        /// <summary>把浏览器通道这一发的结果说成一句人话（纯函数）。三种情形**必须分开**：
+        /// ①它也被拒（会话真的失效了）②它压根没发出去（浏览器起不来/超时）③它通了但内容不合口径。
+        /// 三种都写成「401」是最误导的做法 —— 而现场的人只看得到这一句话。</summary>
+        public static string DescribeBrowserAttempt(BrowserFetch f, string parseErr)
+        {
+            if (f == null) return null;
+            if (f.Status == 401 || f.Status == 403)
+                return "浏览器自己发这一发也被拒（" + f.Status + "）—— 这个浏览器里的登录态本身已不成立，"
+                     + "请重新登录一次（继续补请求头、换凭据都不会有变化）。";
+            if (f.Status >= 400)
+                return "浏览器自己发这一发是 " + f.Status + "：" + Shrink(f.Body);
+            if (f.Ok && !string.IsNullOrEmpty(parseErr))
+                return "浏览器通道通了但内容不合口径：" + parseErr;
+            if (f.Status < 0)
+                return "浏览器通道没用上：" + f.Why;
+            return null;
+        }
+
+        /// <summary>缓存里的接口与我们当前要打的接口是不是同一处（纯函数）。
+        /// 只比 path：host 换 CDN 不该让缓存失效，但也绝不该拿「另一个接口」的数字当这个接口的读数。</summary>
+        public static bool LooksLikeSameEndpoint(string cachedUrl, string url)
+        {
+            Uri a, b;
+            if (!Uri.TryCreate(cachedUrl ?? "", UriKind.Absolute, out a)) return false;
+            if (!Uri.TryCreate(url ?? "", UriKind.Absolute, out b)) return false;
+            return string.Equals(a.AbsolutePath.TrimEnd('/'), b.AbsolutePath.TrimEnd('/'),
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>把一次响应转成报告写入器；返回 null = **不是一次可用的读数**（原因已写进 err）。
+        /// 口径判定只走 ParseWorkbuddyJson —— 无论这一发是直连发的还是浏览器发的，口径只有一处。</summary>
+        private static Action<StatusReport> AcceptResponse(int status, string body, string viaTag,
+            DateTime readAt, ref string err)
+        {
+            if (status < 0) return null;                       // 没拿到响应：err 里已经是原因
+            if (status < 200 || status >= 300) { err = DescribeHttpFailure(status, body); return null; }
+            var cal = ParseWorkbuddyJson(body);
+            if (cal.Ok) return OkWriter(cal, status, viaTag, readAt);
+            string preview = (body ?? "").Length > 80 ? body.Substring(0, 80) : (body ?? "");
+            err = Shrink(cal.Why ?? ("字段缺失(" + preview.Replace("\r", " ").Replace("\n", " ") + ")"));
+            return null;
+        }
+
+        private static Action<StatusReport> OkWriter(WbCaliber cal, int status, string viaTag, DateTime readAt)
+        {
+            return r =>
+            {
+                r.WorkbuddyOk = true;
+                r.WorkbuddyStatus = status;
+                r.WorkbuddyVia = viaTag ?? "";
+                r.WorkbuddyReadAtUtc = readAt;
+                r.WorkbuddyRemain = cal.Remain;
+                r.WorkbuddyAllBucketsRemain = cal.AllBucketsRemain;
+                r.WorkbuddyType1Count = cal.Type1Count;
+                r.WorkbuddyAccountCount = cal.AccountCount;
+                r.WorkbuddyTotalCount = cal.TotalCount;
+                r.WorkbuddyOtherRemain = cal.OtherRemain;
+            };
+        }
+
+        private static Action<StatusReport> FailWriter(string err, int status)
+        {
+            // ⚠ 兜底一句非空的话：`WorkbuddyError` 为空时气泡里那一行会**整行消失**
+            //   （FormatRows 只在错误非空时才加行）。这个项目已经栽过一次「文件没了 ⇒ 那一行不见了」，
+            //   规则是：取不到就必须有行、有话说，不许静默少一行。
+            string e = string.IsNullOrEmpty(err) ? "取不到（没有具体原因：既没拿到响应，也没抛异常）" : err;
+            int s = status;
+            return r => { r.WorkbuddyError = e; r.WorkbuddyStatus = s; };
         }
         /// <summary>WorkBuddy 积分的口径判定，**纯函数**：只吃响应体字符串，不联网、不读凭据。</summary>
         // 抽出来的唯一理由（2026-09-18）：口径这种东西若只能靠真接口验，就永远没有资格失败 ——
@@ -953,6 +1184,18 @@ namespace AzhuPet
         // 以下三件**气泡与 --statustest 共用同一个实现**。放这里而不是各写一份，
         // 免得「气泡显示什么」和「测试断言什么」两套口径慢慢跑偏（本项目的老毛病）。
 
+        /// <summary>读数来源的短标签（纯函数）。取自浏览器就说取自浏览器 —— 通道是我们自己的事，
+        /// 但「这个数字是不是浏览器刚刚发的」是用户该知道的；缓存那份必须带上时刻，否则
+        /// 一个半小时前的数字会被读成当下的。</summary>
+        public static string ViaLabel(StatusReport r)
+        {
+            if (r == null || string.IsNullOrEmpty(r.WorkbuddyVia)) return "";
+            if (r.WorkbuddyVia == "browser") return "（浏览器通道）";
+            if (r.WorkbuddyVia == "cache")
+                return "（浏览器读数 " + BrowserReading.DescribeAge(r.WorkbuddyReadAtUtc, DateTime.UtcNow) + "）";
+            return "（" + r.WorkbuddyVia + "）";
+        }
+
         /// <summary>状态读数拆成**逐条气泡行**（网络一行 / 每路积分各自一行 / 每条动态源一行）。
         /// 给气泡流用：每条作为一条独立的气泡依次浮现。与 <see cref="Format"/> 同源（聚合口径，避免两套真值）。
         /// 原有精简纪律保留：连通性一行装下、积分一行一路只留数字、取证字段（Trae 已用/共、接口合计）不进气泡。</summary>
@@ -977,7 +1220,7 @@ namespace AzhuPet
             {
                 // 主口径 = MainCreditType(1) 之和，已与 WorkBuddy 界面**同刻对照**
                 // （2026-09-18：界面 1056 / 接口 1055，差 1 为活读数漂移）。
-                rows.Add("WorkBuddy 积分 " + NumInt(r.WorkbuddyRemain));
+                rows.Add("WorkBuddy 积分 " + NumInt(r.WorkbuddyRemain) + ViaLabel(r));
                 any = true;
             }
             else if (!string.IsNullOrEmpty(r.WorkbuddyError))
@@ -1035,6 +1278,10 @@ namespace AzhuPet
               .Append(", \"account_count\": ").Append(r.WorkbuddyAccountCount)
               .Append(", \"total_count\": ").Append(r.WorkbuddyTotalCount)
               .Append(", \"other_remain\": ").Append(JNum(r.WorkbuddyOtherRemain))
+              // 通道也要进 JSON：数字一样而通道不同，含义完全不同（一个是刚取的，一个是缓存的旧读数）。
+              .Append(", \"via\": ").Append(JStr(r.WorkbuddyVia))
+              .Append(", \"read_at_utc\": ").Append(r.WorkbuddyReadAtUtc == DateTime.MinValue
+                    ? "null" : JStr(r.WorkbuddyReadAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)))
               .Append(", \"error\": ").Append(JStr(r.WorkbuddyError)).Append("},\n");
             sb.Append("  \"fallback_balance\": {\"ok\": ").Append(r.BalanceOk ? "true" : "false")
               .Append(", \"no_key\": ").Append(r.NoKey ? "true" : "false")
@@ -1134,6 +1381,12 @@ namespace AzhuPet
         //   「浏览器取凭据」窗口正是靠它决定回测失败后要不要把用户原来的凭据还原回去。
         //   从错误文案里嗅探「401」是能work但更脆的写法（文案一改就静默失效，本项目的老坑型）。
         public int WorkbuddyStatus = -1;
+        // 这一格读数是**从哪条通道**来的："" = 直连 / "browser" = 浏览器自己发的 / "cache" = 读数缓存。
+        // ⚠ 通道是我们自己的事，但「这个数字是不是站在浏览器刚刚发的那一发之上」是用户该知道的 ——
+        //   同一个数字，来自「刚取的」和「半小时前浏览器取的」是两回事。
+        public string WorkbuddyVia = "";
+        // 读数的时刻（UTC；MinValue = 本次刚取到，不需要标时刻）。
+        public DateTime WorkbuddyReadAtUtc = DateTime.MinValue;
         public string Error;                     // 余额侧的简短错误文本（自定义接口 / DeepSeek 那两条路）
         public List<BalanceCell> DynamicRows = new List<BalanceCell>();   // 模板化自定义源(balances.json)的一行一个
     }

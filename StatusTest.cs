@@ -29,7 +29,10 @@ namespace AzhuPet
 
             StatusReport rep = null;
             Exception err = null;
-            try { rep = probe.CheckAsync().GetAwaiter().GetResult(); }
+            // force=true：命令行诊断是「我要看现在真的能不能取到」，不该被通道节流挡住。
+            // ⚠ 控制台模式没有界面线程 ⇒ 浏览器通道自动不可用（BrowserBalance.Available 为 false），
+            //   这里量到的始终是「直连」那一路的真实结果 —— 想验浏览器通道得在桌宠里点。
+            try { rep = probe.CheckAsync(true).GetAwaiter().GetResult(); }
             catch (Exception ex) { err = ex; }
             if (rep == null) rep = new StatusReport();
 

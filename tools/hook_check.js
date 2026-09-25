@@ -1,13 +1,20 @@
-// tools/hook_check.js —— 把「注入页面的那段钩子 JS」真跑一遍（Node，不联网、不开浏览器）。
+// tools/hook_check.js —— 把「注入页面的脚本」真跑一遍（Node，不联网、不开浏览器）。
 //
 // 用法（脚本从 stdin 来，来源就是程序自己那一份，不是这里手抄的副本）：
 //     pet.exe --hookscript | node tools/hook_check.js
 //
-// ⚠ 为什么非要有它：钩子脚本有语法错时，AddScriptToExecuteOnDocumentCreatedAsync
-//   **不会报错** —— 那一步只是「把脚本注册到这个 WebView2 上」，真正执行是在每个新文档
-//   创建时。于是脚本坏了的表现是「钩子压根没装」，与「页面没发那个请求」长得一模一样：
-//   用户看到同一句提示，我们也无从分辨。这条路径偏偏只能靠「登一次看看」来发现。
+// ⚠ stdin 是**两段**，中间用 `/*__AZHU_SECTION__*/` 分隔：
+//   ① 钩子脚本（包裹 fetch/XHR，抄页面自己发的那个请求）
+//   ② 页面内取数脚本（BuildFetchScript —— 登录窗口与离屏取数器**共用**的那一份）
+//   两段共用一条管道，是为了不动 pack-release.cmd 里那条已经验过的闸。
+//
+// ⚠ 为什么非要有它：这些脚本有语法错时，AddScriptToExecuteOnDocumentCreatedAsync 与
+//   ExecuteScriptAsync **都不会报错** —— 前者只是「把脚本注册到这个 WebView2 上」，真正执行是在
+//   每个新文档创建时；后者更是把结果吞成字符串。于是脚本坏了的表现是「钩子压根没装」或
+//   「请求压根没发出去」，与「页面没发那个请求」长得一模一样：用户看到同一句提示，我们也无从分辨。
 //   （对照：balanceconfigtest 只能断言「脚本里含某个字符串」—— 那不叫执行过。）
+// ⚠ 取数脚本这一段的断言里有一条是**逐字符**比对 body：C# 把 body 拼进 JS 字面量这一跳，
+//   引号/换行有没有被弄坏，只有把脚本真跑一遍、再把传给 fetch 的 init.body 拿回来比才说得清。
 //
 // ⚠⚠ 证据边界：这是个**最小**浏览器环境，不是真 Chromium。它能验的是「脚本自身的逻辑」
 //   （包裹 fetch/XHR、挑出目标请求、相对地址绝对化、记录诊断列表），验不了浏览器强制的
@@ -15,6 +22,8 @@
 //   那条限制，所以「cookie 拿不到」在本文件里**测不出来**，那是宿主侧 CookieManager 的职责。
 //   同理 user-agent / origin / referer 由浏览器自动添加，这里的桩只是「假装页面读得到
 //   navigator.FOO」—— 它验的是「我们确实把页面读到的值抄进了 JSON」，不是「浏览器会发它」。
+// ⚠ 另一个坑：Node 18+ 自带全局 fetch，所以取数脚本的桩必须把 fetch 当**参数**注入 ——
+//   否则这里会打出真的网络请求（不联网是本文件的立身之本）。
 const fs = require('node:fs');
 
 let pass = 0, fail = 0;
@@ -23,7 +32,13 @@ function check(ok, name) {
 }
 
 async function main() {
-    const script = fs.readFileSync(0, 'utf8').trim();
+    // stdin 是**两段**（--hookscript 输出，见 Program.RunHookScriptDump）：①钩子脚本 ②页面内取数脚本。
+    // 两段共用一条管道，是为了不动 pack-release.cmd 里那条已经验过的闸。
+    const raw = fs.readFileSync(0, 'utf8');
+    const MARK = '/*__AZHU_SECTION__*/';
+    const cut = raw.indexOf(MARK);
+    const script = (cut >= 0 ? raw.slice(0, cut) : raw).trim();
+    const fetchScript = cut >= 0 ? raw.slice(cut + MARK.length).trim() : '';
     if (!script) {
         console.log('[FAIL] stdin 是空的 —— 用法：pet.exe --hookscript | node tools/hook_check.js');
         return 1;
@@ -253,6 +268,57 @@ async function main() {
         const env = makeEnv();
         env.window.fetch(TARGET, { method: 'POST', body: '' });
         check(captureOf(env).body === '', '空字符串 body 也是空串（回测那边据此退回空 JSON）');
+    }
+
+    // ---- 13) 页面内取数脚本（BuildFetchScript）也被真跑一遍 ----
+    // 它和钩子一样是**浏览器**执行的东西：C# 编译得过、语法错了也看不出来。而它比钩子更要紧 ——
+    // 钩子坏了只是抄不到请求，这一发坏了是「一个字都没发出去」，界面上只会显示「取不到」。
+    // 现场教训：Node 18+ 有全局 fetch，所以必须把 fetch 当**参数**注入，否则这里会打出真网络请求。
+    function fetchEnv(reply) {
+        const w = { __calls: [] };
+        w.fetch = function (u, init) {
+            w.__calls.push({ url: u, init: init });
+            if (reply === 'throw') return Promise.reject(new Error('network down'));
+            const st = (reply && reply.status) || 200;
+            const body = (reply && reply.body) || '';
+            return Promise.resolve({ status: st, text: () => Promise.resolve(body) });
+        };
+        new Function('window', 'fetch', fetchScript)(w, w.fetch);
+        return w;
+    }
+    async function tick() { for (let i = 0; i < 8; i++) await Promise.resolve(); }
+
+    if (!fetchScript) check(false, '取数脚本段缺失（--hookscript 应当输出两段，中间用 ' + MARK + ' 分隔）');
+    else {
+        try { new Function(fetchScript); check(true, '取数脚本语法可解析（new Function 不抛）'); }
+        catch (e) { check(false, '取数脚本语法可解析 —— ' + e.message); }
+
+        const okEnv = fetchEnv({ status: 200, body: '{"code":0,"data":1}' });
+        await tick();
+        check(okEnv.__azhuCheck && okEnv.__azhuCheck.s === 'done' && okEnv.__azhuCheck.code === 200
+            && okEnv.__azhuCheck.body === '{"code":0,"data":1}',
+            '取数脚本：2xx 时把状态码与**完整**响应体写进状态位');
+        check(okEnv.__calls.length === 1 && okEnv.__calls[0].url === 'https://example.com/api/meter?x=1',
+            '取数脚本：打的是给定地址，且只发一次');
+        check(okEnv.__calls[0].init.method === 'POST'
+            && okEnv.__calls[0].init.credentials === 'include'
+            && okEnv.__calls[0].init.body === '{"q":"a\\"b","n":1}',
+            '取数脚本：method 大写、带凭据、body **逐字符**穿过 C#→JS 注入（内层引号没被弄坏）');
+
+        const badEnv = fetchEnv({ status: 401, body: '<html>401</html>' });
+        await tick();
+        check(badEnv.__azhuCheck.s === 'done' && badEnv.__azhuCheck.code === 401
+            && badEnv.__azhuCheck.body === '<html>401</html>',
+            '取数脚本：被拒时也照样回填状态码与响应体（宿主靠它才说得出「浏览器自己发也被拒」）');
+
+        const errEnv = fetchEnv('throw');
+        await tick();
+        check(errEnv.__azhuCheck.s === 'err' && /network down/.test(errEnv.__azhuCheck.msg),
+            '取数脚本：fetch 抛异常时进 err 分支，而不是永远停在 run（停在 run 会被读成「超时」）');
+
+        const pendingEnv = fetchEnv({ status: 200, body: '' });
+        check(pendingEnv.__azhuCheck.s === 'run',
+            '负对照：还没回来时状态位是 run（「还没回来」与「空响应」必须分得开）');
     }
 
     console.log('hook_check：PASS ' + pass + ' / FAIL ' + fail);

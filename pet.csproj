@@ -42,7 +42,7 @@
          程序运行时用 Updater.CurrentVersion 读它（走 AssemblyInformationalVersion），
          pack-release.cmd 打出 version.json 时也从这里取 —— 两边同源，不可能对不上。
          Version 决定 InformationalVersion；三段式 x.y.z 就够（比较逻辑只看三段）。 -->
-    <Version>0.1.1</Version>
+    <Version>0.1.2</Version>
   </PropertyGroup>
 
   <!-- ⚠ 本项目唯一的第三方 NuGet 依赖，理由与实测代价见文件头。 -->
