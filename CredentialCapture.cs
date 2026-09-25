@@ -48,9 +48,13 @@ namespace AzhuPet
         ///   **两条腿缺一不可**，只靠本脚本永远拼不出完整凭据（这是最容易想漏的一步）。
         /// ⚠ 模板里用单引号，只留下 __PATTERN__ 一个占位符：模式是按 JSON 字符串注入的，
         ///   于是模式里就算带引号也破坏不了脚本结构（见 BuildHookScript 的判据）。
-        /// ⚠ 只记第一个命中（if(window.__azhuCapture)return）：后续重复请求不该覆盖掉先抄到的那份。</summary>
+        /// ⚠ 只记第一个命中（if(window.__azhuCapture)return）：后续重复请求不该覆盖掉先抄到的那份。
+        /// ⚠ __azhuSeen 是**诊断用**的：把所有经过 fetch/XHR 的路径都记一份（哪怕是别的接口）。
+        ///   没有它，「抄不到」只有一句「还没看到余额请求」—— 分不清是钩子没生效、页面压根不发
+        ///   XHR、还是接口换了名字。2026-09-25 就是靠这个才看清「请求发去了另一个窗口」。</summary>
         private const string HookTemplate = @"(function(){
 if(window.__azhuHook)return;window.__azhuHook=1;window.__azhuCapture='';
+window.__azhuSeen=[];
 var PAT=__PATTERN__;
 function hdrs(h){var o={};try{
 if(!h)return o;
@@ -58,7 +62,16 @@ if(typeof h.forEach==='function'&&!(h instanceof Array)){h.forEach(function(v,k)
 if(h instanceof Array){for(var i=0;i<h.length;i++){var p=h[i];if(p&&p.length===2)o[p[0]]=p[1];}return o;}
 if(typeof h==='object'){for(var k in h){if(Object.prototype.hasOwnProperty.call(h,k))o[k]=''+h[k];}}
 }catch(e){}return o;}
+function seen(u){try{
+var s=''+(u||'');if(!s)return;
+var p;try{p=new URL(s,location.href).pathname;}catch(e){p=s;}
+if(!p||p.length>120)return;
+var a=window.__azhuSeen;
+for(var i=0;i<a.length;i++){if(a[i]===p)return;}
+if(a.length<20)a.push(p);
+}catch(e){}}
 function rec(u,m,h,b){try{
+seen(u);
 if(window.__azhuCapture)return;
 if(!u||(''+u).indexOf(PAT)<0)return;
 window.__azhuCapture=JSON.stringify({url:''+u,method:''+(m||'GET'),headers:hdrs(h),body:(b==null?'':''+b)});
@@ -87,6 +100,86 @@ XMLHttpRequest.prototype.send=function(b){try{if(this.__azhu)rec(this.__azhu.u,t
         {
             if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(capturePattern)) return false;
             return url.IndexOf(capturePattern, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>两个 URL 是否属于同一个站点（纯函数）。
+        /// 用途：内嵌浏览器里被点开的新窗口，**同站**的拉回本窗口（钩子只挂在原来那个 WebView2 上，
+        ///   站内新窗口若由 WebView2 自己开成 popup，那里的请求一个都抄不到）；
+        ///   **跨站**的（第三方登录弹窗）保持弹窗语义 —— 那些流程依赖 window.opener 通信，
+        ///   拉回本窗口会把「登录」本身弄坏。
+        /// ⚠ 比较的是**注册域**，不是「一个 host 是不是另一个的后缀」：站点把工作台放在
+        ///   app.workbuddy.cn 而登录在 www.workbuddy.cn 太常见了，后者那种算法会把兄弟子域
+        ///   判成跨站 ⇒ 又开一个 popup ⇒ 钩子白装。而 evilworkbuddy.cn 必须**不**算同站
+        ///   （裸 EndsWith 会误判 —— 与「'0.1.1.' 会误匹配 '0.1.10.0'」同类）。</summary>
+        public static bool IsSameSite(string url, string siteUrl)
+        {
+            string a = RegistrableOf(HostOf(url)), b = RegistrableOf(HostOf(siteUrl));
+            if (a.Length == 0 || b.Length == 0) return false;
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string HostOf(string url)
+        {
+            Uri u;
+            if (!Uri.TryCreate(url ?? "", UriKind.Absolute, out u)) return "";
+            return (u.Host ?? "").TrimEnd('.').ToLowerInvariant();
+        }
+
+        /// <summary>常见二级后缀。取注册域时要多看一段，否则 a.com.cn 与 b.com.cn 会被当成同一家。</summary>
+        private static readonly string[] SecondLevelTlds =
+        {
+            "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn",
+            "co.uk", "org.uk", "ac.uk", "gov.uk",
+            "com.hk", "org.hk", "com.tw", "org.tw", "com.au", "co.jp", "co.kr", "com.sg",
+        };
+
+        /// <summary>取 host 的注册域（近似 eTLD+1，纯函数）。
+        /// ⚠ 这不是完整的 Public Suffix List，只覆盖上面那张表中的常见二级后缀。
+        ///   够用的理由：这条判定两端分别是「我们自己的站点」与「第三方登录域」，差异大得离谱；
+        ///   真做全 PSL 得拖进一张几十 KB 的表 —— 对一个桌宠不值（项目价值观：轻量）。
+        /// ⚠ IP 地址整段返回：按标签切会得到 "0.1" 这种荒唐结果。</summary>
+        private static string RegistrableOf(string host)
+        {
+            string h = (host ?? "").Trim().TrimEnd('.').ToLowerInvariant();
+            if (h.Length == 0) return "";
+            if (System.Net.IPAddress.TryParse(h, out _)) return h;
+            var parts = h.Split('.');
+            if (parts.Length <= 2) return h;
+            string last2 = parts[parts.Length - 2] + "." + parts[parts.Length - 1];
+            if (SecondLevelTlds.Contains(last2))
+                return string.Join(".", parts.Skip(Math.Max(0, parts.Length - 3)));
+            return last2;
+        }
+
+        /// <summary>把钩子记下来的请求路径整理成给人看的一小段（纯函数）。
+        /// 用途：抄不到目标请求时，把「这个窗口到底发过哪些请求」显示出来 ——
+        ///   否则用户只看到一句「还没看到余额请求」，我们也无从判断是钩子没生效、还是接口换了名字。
+        /// ⚠ 丢掉静态资源后缀：它们极少走 XHR，但一旦混进来就会把真正像接口的那两条挤出列表。
+        /// ⚠ 只显示 path（钩子根本没记 query）：query 里可能带 token，没必要显示在屏幕上。</summary>
+        public static string FormatSeenForUser(IEnumerable<string> paths)
+        {
+            if (paths == null) return "";
+            var kept = new List<string>();
+            foreach (var raw in paths)
+            {
+                string p = (raw ?? "").Trim();
+                if (p.Length == 0 || LooksLikeStaticAsset(p)) continue;
+                if (kept.Contains(p)) continue;
+                kept.Add(p);
+                if (kept.Count >= 8) break;
+            }
+            return string.Join("\n", kept.Select(p => "  " + p));
+        }
+
+        /// <summary>看起来是静态资源路径（纯函数）。</summary>
+        public static bool LooksLikeStaticAsset(string path)
+        {
+            string p = (path ?? "").Trim().ToLowerInvariant();
+            int cut = p.IndexOfAny(new[] { '?', '#' });
+            if (cut >= 0) p = p.Substring(0, cut);
+            string[] ext = { ".js", ".mjs", ".css", ".png", ".jpg", ".jpeg", ".gif", ".webp",
+                             ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map", ".html" };
+            return ext.Any(e => p.EndsWith(e, StringComparison.Ordinal));
         }
 
         /// <summary>这个头在拼文件时该不该丢掉（纯函数）。</summary>

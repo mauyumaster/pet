@@ -75,6 +75,8 @@ namespace AzhuPet
                 string hook = CredentialCapture.BuildHookScript(CredentialCapture.WorkbuddyCapturePattern);
                 Check(hook.Contains("\"/billing/meter/get-user-resource\""), "钩子里嵌入抓取目标（走 JSON 编码）", ref pass, ref fail);
                 Check(!hook.Contains("__PATTERN__"), "占位符已被替换（没有残留）", ref pass, ref fail);
+                Check(hook.Contains("__azhuSeen"),
+                    "钩子会记录所有请求路径（诊断用；缺了就只能干说「还没看到余额请求」）", ref pass, ref fail);
                 // ⚠ 这里**不断言转义成了哪种写法**：JsonSerializer 会把 " 编成 \u0022 而不是 \"，
                 //   第一版判据就是写死了 \" 才红的 —— 那是在断言实现细节。真正要保证的性质是
                 //   「PAT 那段字面量解回来必须等于原模式」，所以把那段摘出来当 JSON 解一遍。
@@ -91,6 +93,39 @@ namespace AzhuPet
                 Check(!CredentialCapture.IsTarget("https://www.workbuddy.cn/billing/other", CredentialCapture.WorkbuddyCapturePattern)
                     && !CredentialCapture.IsTarget(null, CredentialCapture.WorkbuddyCapturePattern),
                     "负对照：别的接口不算命中（否则会抄错请求）", ref pass, ref fail);
+
+                // ---- 同站判定：决定「站内新窗口要不要拉回本窗口」----
+                // ⚠⚠ 2026-09-25 的现场故障：不接管 WebView2 的 NewWindowRequested 时，页面上点开
+                //   的站内链接会**另开一个 popup 窗口**（官方文档：Handled / NewWindow 都没设就会
+                //   开 popup）。而钩子只挂在原来那个 WebView2 上 ⇒ popup 里的请求一个都抄不到，
+                //   现象是「用户在新窗口里看得到余额、程序一直说还没看到余额请求」。
+                //   修法：同站的新窗口拉回本窗口；跨站的放行（第三方登录弹窗靠 window.opener 通信）。
+                Check(CredentialCapture.IsSameSite("https://www.workbuddy.cn/billing/x", "https://www.workbuddy.cn/"),
+                    "同域 → 同站（站内新窗口改在本窗口打开）", ref pass, ref fail);
+                Check(CredentialCapture.IsSameSite("https://workbuddy.cn/x", "https://www.workbuddy.cn/"),
+                    "裸域与 www 算同站", ref pass, ref fail);
+                Check(CredentialCapture.IsSameSite("https://app.workbuddy.cn/x", "https://www.workbuddy.cn/"),
+                    "兄弟子域算同站（工作台在 app. 子域上很常见；判成跨站就又开一个 popup，钩子白装）", ref pass, ref fail);
+                Check(!CredentialCapture.IsSameSite("https://open.weixin.qq.com/x", "https://www.workbuddy.cn/"),
+                    "负对照：第三方登录域不算同站（拉回来会把登录弹窗弄坏）", ref pass, ref fail);
+                Check(!CredentialCapture.IsSameSite("https://evilworkbuddy.cn/x", "https://www.workbuddy.cn/"),
+                    "负对照：evilworkbuddy.cn 不是同站（裸 EndsWith 会误判）", ref pass, ref fail);
+                Check(!CredentialCapture.IsSameSite("https://a.com.cn/x", "https://b.com.cn/"),
+                    "负对照：com.cn 这类二级后缀下，不同注册域不算同站（只取最后两段会误判）", ref pass, ref fail);
+                Check(!CredentialCapture.IsSameSite("", "https://www.workbuddy.cn/")
+                    && !CredentialCapture.IsSameSite("not-a-url", "https://www.workbuddy.cn/"),
+                    "负对照：空/非法 URL 不算同站（否则会对空地址调 Navigate）", ref pass, ref fail);
+
+                // ---- 诊断列表：抄不到时把「这个窗口发过哪些请求」说清楚 ----
+                string seen = CredentialCapture.FormatSeenForUser(new[] { "/api/a", "/static/app.js", "/api/b", "/api/a" });
+                Check(seen.Contains("/api/a") && seen.Contains("/api/b") && !seen.Contains(".js"),
+                    "诊断列表：留接口路径、丢静态资源（否则真接口被挤出去）", ref pass, ref fail);
+                Check(seen.Split('\n').Count(l => l.Contains("/api/a")) == 1,
+                    "诊断列表去重", ref pass, ref fail);
+                Check(CredentialCapture.FormatSeenForUser(Enumerable.Range(0, 30).Select(i => "/p" + i)).Split('\n').Length <= 8,
+                    "诊断列表有上限（不灌满窗口）", ref pass, ref fail);
+                Check(CredentialCapture.FormatSeenForUser(null) == "" && CredentialCapture.FormatSeenForUser(new string[0]) == "",
+                    "负对照：没有请求时给空串（界面据此换另一句提示，而不是显示空标题）", ref pass, ref fail);
 
                 Check(CredentialCapture.IsDroppedHeader("Content-Length") && CredentialCapture.IsDroppedHeader("acCEPT-encoding")
                     && CredentialCapture.IsDroppedHeader("cookie") && CredentialCapture.IsDroppedHeader("Host"),

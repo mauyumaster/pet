@@ -67,6 +67,36 @@ echo [2b/8] webtest: verifying the embedded-browser dependency chain...
 "%PUBDIR%\pet.exe" --webtest
 if errorlevel 1 goto :webfail
 
+rem ---- [2c/8] hookscript check: the injected JS is executed by the BROWSER, not by the
+rem C# compiler, so a syntax error inside it is invisible at build time. The app would
+rem compile, --webtest above would pass, and the hook would simply never install -- the
+rem user then sees exactly the same "no request captured yet" as when the page made no
+rem call at all. tools/hook_check.js takes the REAL injected script (via --hookscript)
+rem and runs it in a minimal browser env, asserting the capture logic.
+rem Needs node. If node is missing we say so OUT LOUD -- a gate that disappears quietly
+rem is worse than no gate (that is exactly how this project has been bitten before).
+set "NODE="
+if exist "%ProgramFiles%\nodejs\node.exe" set "NODE=%ProgramFiles%\nodejs\node.exe"
+if not defined NODE if exist "%ProgramFiles(x86)%\nodejs\node.exe" set "NODE=%ProgramFiles(x86)%\nodejs\node.exe"
+if defined NODE goto :runhook
+rem Fall back to PATH, but only after the explicit locations above: the WindowsApps
+rem stub for node is a 0-byte app-execution alias that pops the Store instead of running.
+where node >nul 2>nul
+if not errorlevel 1 set "NODE=node"
+if defined NODE goto :runhook
+echo [!] NOTE: node not found -- the injected JS was NOT executed in this build.
+echo     The release is still produced, but the hook's behaviour is UNVERIFIED.
+echo     If you touched CredentialCapture.cs, install Node.js and re-run. By hand:
+echo         pet.exe --hookscript ^| node tools\hook_check.js
+goto :afterhook
+:runhook
+echo [2c/8] hookscript: running the injected JS through node...
+"%PUBDIR%\pet.exe" --hookscript > "%TEMP%\azhu_hook_check.js"
+"%NODE%" "%~dp0tools\hook_check.js" < "%TEMP%\azhu_hook_check.js"
+if errorlevel 1 goto :hookfail
+del /q "%TEMP%\azhu_hook_check.js" >nul 2>nul
+:afterhook
+
 rem Read the version from the BUILT EXE, never from a hardcoded string.
 rem WHY: the version lives in exactly one place (pet.csproj <Version>). If this
 rem script kept its own copy, a release could ship an exe that says 0.2.0 while
@@ -248,6 +278,15 @@ echo       * loader not found -- the native file is shipped but cannot be resolv
 echo         in this layout (a packaging bug, not a machine problem).
 echo     Note: this only disables the NEW browser-login route. Manual pasting of
 echo     credentials still works, so the balance feature itself is not broken.
+pause
+exit /b 1
+
+:hookfail
+echo.
+echo [x] The injected JS hook FAILED its check (see the FAIL lines above).
+echo     The browser window would still open -- it just would not capture anything,
+echo     so the user would see the same "no request captured yet" as if the site had
+echo     never made the call. Fix the hook (CredentialCapture.cs) before shipping.
 pause
 exit /b 1
 

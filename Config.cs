@@ -397,6 +397,7 @@ namespace AzhuPet
         public bool Version;                    // --version：只打印版本号（pack-release.cmd 靠它取名）
         public bool UpdateDiag;                 // --updatediag：联网诊断更新链路（代理／可达性／版本），自助排查用
         public bool WebTest;                    // --webtest：验内嵌浏览器依赖链（运行时在＋原生加载器解得开），不开窗/不联网
+        public bool HookScript;                 // --hookscript：原样打出注入页面的钩子脚本（给 tools/hook_check.js 做语法+行为检查，排障时也能看）
         public string FeedUrl;                  // --feed <url>：覆盖更新源（诊断／自测用；不写就用 DefaultFeedUrl）
         public string InstallBalanceTemplate;   // --install-balance-template sui-xiang：只装结构，不装凭据
         public bool ForceBubbleOnPet;           // --force-bubble-on-pet：负对照（故意压在模型上，该判据必须变红）
@@ -539,6 +540,7 @@ namespace AzhuPet
                     case "--version": c.Version = true; break;
                     case "--updatediag": c.UpdateDiag = true; break;
                     case "--webtest": c.WebTest = true; break;
+                    case "--hookscript": c.HookScript = true; break;
                     case "--feed": c.FeedUrl = Nxt(a, ref i); break;
                     case "--install-balance-template": c.InstallBalanceTemplate = Nxt(a, ref i); break;
                     case "--force-bubble-on-pet": c.ForceBubbleOnPet = true; break;

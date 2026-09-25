@@ -38,7 +38,7 @@ namespace AzhuPet
         private readonly Button _manual, _reload;
         private WebView2 _view;
         private DispatcherTimer _timer;
-        private DateTime _openedAt;
+        private DateTime _openedAt, _lastNudge = DateTime.MinValue;
         private bool _working, _finished;
 
         /// <summary>是否真的把凭据写进去了（宿主窗口据此刷新卡片状态）。</summary>
@@ -96,8 +96,9 @@ namespace AzhuPet
             var btns = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             _reload = SmallButton("重新加载", (s, e) => { try { _view.Source = new Uri(_loginUrl); } catch { } });
             _manual = SmallButton("我已登录，直接抓取", async (s, e) => await FinishAsync(null, true), true);
+            var copy = SmallButton("复制状态", (s, e) => CopyState());
             var close = SmallButton("关闭", (s, e) => Close());
-            btns.Children.Add(_reload); btns.Children.Add(_manual); btns.Children.Add(close);
+            btns.Children.Add(_reload); btns.Children.Add(_manual); btns.Children.Add(copy); btns.Children.Add(close);
             Grid.SetColumn(btns, 1); fg.Children.Add(btns);
             foot.Child = fg;
             Grid.SetRow(foot, 2); root.Children.Add(foot);
@@ -152,6 +153,13 @@ namespace AzhuPet
                 core.Settings.IsStatusBarEnabled = false;
                 await core.AddScriptToExecuteOnDocumentCreatedAsync(CredentialCapture.BuildHookScript(_capturePattern));
 
+                // ⚠⚠ 不接管这个事件时的默认行为是**开一个独立的 popup 窗口**（官方文档原话：
+                //   "If either Handled or NewWindow properties are not set, the target content
+                //    will be opened on a popup window."）。而钩子是挂在**本 WebView2** 上的 ——
+                //   那个 popup 里的请求我们一个都抄不到。2026-09-25 用户报的现象正是这样：
+                //   他在新窗口里看得到余额，这边却一直显示「还没看到余额请求」。
+                core.NewWindowRequested += (s, e) => OnNewWindow(e);
+
                 core.NavigationCompleted += (s, e) =>
                 {
                     if (_finished) return;
@@ -195,14 +203,58 @@ namespace AzhuPet
             await FinishAsync(req, false);
         }
 
-        /// <summary>等久了给点方向 —— 光转圈不解释，用户会以为卡死。</summary>
-        private void Nudge()
+        /// <summary>等久了给点方向 —— 光转圈不解释，用户会以为卡死。
+        /// ⚠ 2026-09-25 起还会把「这个窗口发过哪些请求」列出来：只回一句「还没看到余额请求」
+        ///   分不清是钩子没生效、页面不发 XHR、还是接口换了名字 —— 而那正是这一轮卡住的地方。</summary>
+        private async void Nudge()
         {
-            double sec = (DateTime.UtcNow - _openedAt).TotalSeconds;
-            if (sec < 20) return;
-            SetState("还没看到余额请求，等你打开「计费 / 用量」页面…", Muted);
+            if ((DateTime.UtcNow - _openedAt).TotalSeconds < 20) return;
+            if ((DateTime.UtcNow - _lastNudge).TotalSeconds < 5) return;   // 别每拍都去问页面一遍
+            _lastNudge = DateTime.UtcNow;
+            string seen = await ReadSeenAsync();
+            if (_finished || _working) return;                             // 期间已经有结论了，别盖掉
+            SetState("还没抄到余额请求", Muted);
             _step.Text = "③ 如果登录后一直没反应：在页面里找到并打开「计费 / 用量 / 余额」页面；"
                 + "或点右下角「我已登录，直接抓取」（那条路只换 cookie，请求头沿用旧凭据）。";
+            _detail.Text = seen.Length > 0
+                ? "这个窗口里最近发出的请求（只到路径，不含网址参数）：\n" + seen
+                  + "\n如果你已经在页面里看到余额了，点「复制状态」把这些行发给我，我就能对上接口。"
+                : "这个窗口里还没记录到任何 fetch/XHR 请求。点「复制状态」可以把当前情况复制出来。";
+        }
+
+        /// <summary>站内新窗口拉回本窗口打开（原因见 InitAsync 里那段注释）。
+        /// ⚠ 跨站的不动：第三方登录弹窗依赖 window.opener 通信，拉回来会把登录本身弄坏。
+        /// ⚠ e.Uri 为空（window.open() 无地址、内容由脚本自己写的那种弹窗）也只能放行 —— 接管不了。</summary>
+        private void OnNewWindow(CoreWebView2NewWindowRequestedEventArgs e)
+        {
+            try
+            {
+                if (_finished || string.IsNullOrWhiteSpace(e.Uri)) return;
+                if (!CredentialCapture.IsSameSite(e.Uri, _loginUrl)) return;
+                e.Handled = true;
+                SetState("这个链接原本会另开一个窗口（那里抄不到请求），已拉回本窗口打开…", Muted);
+                _view.CoreWebView2.Navigate(e.Uri);
+            }
+            catch { }
+        }
+
+        /// <summary>把状态区当前内容复制出来 —— 出问题时用户能一键把实况发给我，不用手抄。</summary>
+        private void CopyState()
+        {
+            try { Clipboard.SetText(_status.Text + "\n" + (_detail.Text ?? "")); }
+            catch { }
+        }
+
+        /// <summary>读钩子记下的请求路径（诊断用）。解不出来就当空 —— 宁可少说，也不显示半截东西。</summary>
+        private async Task<string> ReadSeenAsync()
+        {
+            try
+            {
+                string raw = await _view.CoreWebView2.ExecuteScriptAsync("window.__azhuSeen||[]");
+                if (string.IsNullOrEmpty(raw) || raw == "null") return "";
+                return CredentialCapture.FormatSeenForUser(JsonSerializer.Deserialize<List<string>>(raw));
+            }
+            catch { return ""; }
         }
 
         /// <summary>ExecuteScriptAsync 的返回值是一段 JSON；字符串结果会带一层引号。

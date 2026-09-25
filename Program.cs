@@ -85,6 +85,12 @@ namespace AzhuPet
             if (o.BubbleTest) return BubbleTest.Run(o);
             if (o.BalanceConfigTest) return BalanceConfigTest.Run();
             if (o.WebTest) return WebTest.Run();
+            // --hookscript：把真正注入页面的那段 JS 原样打出来。
+            // ⚠ 它存在的理由：钩子脚本有语法错时，AddScriptToExecuteOnDocumentCreatedAsync **不报错**
+            //   （那一步只是「注册脚本」），于是钩子静默失效 —— 现象与「没抄到请求」一模一样，
+            //   而这条路径偏偏只能靠「登一次看看」来发现。所以脚本得能被单独拿去做语法+行为检查：
+            //   tools/hook_check.js（node，造一个最小浏览器环境真跑一遍）。排障时也能直接看它。
+            if (o.HookScript) return RunHookScriptDump();
             if (o.ConfigTest) return ConfigTest.Run(o);
             if (o.FixConfig) return ConfigFix.Run(o);
             if (o.UpdateTest) return UpdateTest.Run(o);
@@ -96,6 +102,15 @@ namespace AzhuPet
             if (o.SettingsTest) return SettingsTest.Run(o);
             if (o.Settings) return RunSettings(o);
             return RunNormal(o);
+        }
+
+        /// <summary>--hookscript：原样输出注入页面的钩子脚本（纯 ASCII）。
+        /// ⚠ 用 Write 不用 WriteLine，且**不多打任何一行** —— 输出会被直接喂给 node 当脚本跑，
+        ///   多一行提示文字就会变成「语法错误」，把真问题淹掉。</summary>
+        private static int RunHookScriptDump()
+        {
+            Console.Write(CredentialCapture.BuildHookScript(CredentialCapture.WorkbuddyCapturePattern));
+            return 0;
         }
 
         /// <summary>正常启动时的静默兑现：如果上次下好了新版本，在这里换掉。**不弹任何东西。**
