@@ -129,7 +129,16 @@ if not exist "%PUBDIR%\model\chibi_maid_pet.glb" goto :nomodel
 if not exist "%PUBDIR%\WebView2Loader.dll" goto :noloader
 
 echo [6/8] zip...
-rem tar is present on Windows 10 1803+ and does zip without extra tooling.
+rem Tar is present on Windows 10 1803+ and zips without extra tooling -- but we
+rem call it by ABSOLUTE PATH on purpose. `tar` resolves per-shell, and Git Bash
+rem puts GNU tar first on PATH. GNU tar's -a has no compressor registered for
+rem the .zip suffix, so it writes an UNCOMPRESSED tar while still naming it
+rem .zip: exit code 0, no warning, 40MB instead of 18MB. It only fails later,
+rem inside ZipFile.ExtractToDirectory, on the USER's machine. Cost a release on
+rem 2026-09-26 (the v0.1.2 zip was a plain tar); System32\tar.exe is bsdtar
+rem (libarchive) and really does write a zip.
+set "TAR=%SystemRoot%\System32\tar.exe"
+if not exist "%TAR%" goto :notar
 rem WHY WebView2Loader.dll is in this list (added 2026-09-25): it is NOT inside
 rem the single-file exe. Ship the zip without it and the embedded-browser
 rem feature dies with DllNotFoundException on any clean machine. It looked
@@ -137,8 +146,19 @@ rem fine here only because Windows Performance Toolkit puts a stray copy on
 rem PATH -- found by re-running --webtest with PATH narrowed to System32.
 rem The zip is also the self-update payload, so it needs this file too.
 if exist "%ZIP%" del /q "%ZIP%"
-tar -a -c -f "%ZIP%" -C "%PUBDIR%" pet.exe persona.md model/chibi_maid_pet.glb WebView2Loader.dll
+"%TAR%" -a -c -f "%ZIP%" -C "%PUBDIR%" pet.exe persona.md model/chibi_maid_pet.glb WebView2Loader.dll
 if errorlevel 1 goto :failed
+
+rem Format gate: what we just wrote has to be a REAL zip, and the tell is size --
+rem a zip compresses, a plain tar does not, so a tar ends up BIGGER than the exe
+rem it contains. Measured 2026-09-26: real zip 18,208,643 B vs pet.exe
+rem 27,059,646 B -> passes; the silently-produced tar was 40,437,760 B -> caught.
+rem Stated weakness: this compares sizes, not magic bytes, so it holds only while
+rem the archive is compressed -- which `-a` guarantees.
+for %%F in ("%ZIP%") do set "ZIPBYTES=%%~zF"
+for %%F in ("%PUBDIR%\pet.exe") do set "EXEBYTES=%%~zF"
+if not defined ZIPBYTES goto :failed
+if %ZIPBYTES% GEQ %EXEBYTES% goto :notazip
 
 echo [7/8] installer (Inno Setup)...
 rem WHY pushd: azhupet.iss uses paths relative to its own folder
@@ -186,7 +206,7 @@ for %%F in ("release\%SETUP%") do echo       %%~zF bytes   (installer)
 echo   [+] %FEED%
 echo.
 echo   Zip contents:
-tar -t -f "%ZIP%"
+"%TAR%" -t -f "%ZIP%"
 echo.
 echo   Next: this is a LOCAL artifact only. Nothing was uploaded.
 echo         To publish, attach BOTH files above to a GitHub Release
@@ -309,5 +329,23 @@ echo.
 echo [x] The 3D model did not make it into the release folder.
 echo     Looked for: ..\model\chibi_maid_pet.glb  (13MB, lives beside the pet folder)
 echo     Without it the app dies at startup with "cannot find model/chibi_maid_pet.glb".
+pause
+exit /b 1
+
+:notar
+echo.
+echo [x] Windows' own tar (bsdtar) was not found at:
+echo     %TAR%
+echo     It ships with Windows 10 1803+. On anything older, build the zip on a
+echo     newer machine. Do NOT fall back to a bare `tar` -- see [6/8] above for
+echo     what that silently produces.
+pause
+exit /b 1
+
+:notazip
+echo.
+echo [x] The archive just built is NOT a compressed zip (see [6/8] above).
+echo     Publishing it would break self-update for every user: the updater calls
+echo     ZipFile.ExtractToDirectory, which throws on a plain tar. Check %TAR%.
 pause
 exit /b 1
