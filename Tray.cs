@@ -204,7 +204,12 @@ namespace AzhuPet
                 + "渲染：" + m.Stats + "\r\n"
                 + "窗口：" + _w.ActualWidth.ToString("0") + "×" + _w.ActualHeight.ToString("0") + " DIP，DPI "
                 + (_w.DipScale * 100).ToString("0") + "%\r\n"
-                + "已渲染帧：" + _w.RenderedFrames + "，平均每帧 " + AvgMs().ToString("0.##") + " ms\r\n\r\n"
+                + "已渲染帧：" + _w.RenderedFrames + "，平均每帧 " + AvgMs().ToString("0.##") + " ms\r\n"
+                // ⚠ 置顶那一格状态的**现场记录**：正常情况下它必须一直是 0。
+                //   真值（扩展样式位）被外部抹掉时，自愈会补回并把次数 +1 —— 有数字就说明出过事。
+                //   判「她有没有被压下去过」看这里，不要凭感觉（详见 TopmostGuard.cs）。
+                + "置顶：" + (_w.Cfg.Topmost ? "开" : "关")
+                + "，被抹掉后补回 " + _w.TopmostHeals + " 次\r\n\r\n"
                 + "左键拖动可甩出，松手会自己落地；右键出这个菜单。",
                 "关于阿助桌宠");
         }
