@@ -56,6 +56,17 @@ if errorlevel 1 goto :failed
 
 if not exist "%PUBDIR%\pet.exe" goto :nobinary
 
+rem Gate: the browser credential window needs the NATIVE loader shipped next to the exe.
+rem WHY this has to be a gate and not an afterthought: WebView2Loader.dll is a native
+rem library. If publish drops it, the project still COMPILES, every offline test still
+rem passes, and it only breaks at the exact moment a user clicks "browser login".
+rem So: (1) check the file is there, (2) actually RUN --webtest, which P/Invokes the
+rem loader -- that is the only way to prove it resolves in this layout.
+if not exist "%PUBDIR%\WebView2Loader.dll" goto :noloader
+echo [2b/8] webtest: verifying the embedded-browser dependency chain...
+"%PUBDIR%\pet.exe" --webtest
+if errorlevel 1 goto :webfail
+
 rem Read the version from the BUILT EXE, never from a hardcoded string.
 rem WHY: the version lives in exactly one place (pet.csproj <Version>). If this
 rem script kept its own copy, a release could ship an exe that says 0.2.0 while
@@ -213,6 +224,30 @@ exit /b 1
 :nobinary
 echo.
 echo [x] "%PUBDIR%\pet.exe" is missing after publish.
+pause
+exit /b 1
+
+:noloader
+echo.
+echo [x] WebView2Loader.dll is missing from the publish folder.
+echo     It is a NATIVE file that comes with the WebView2 package; publish normally
+echo     drops it next to pet.exe. Without it the app still runs, but the moment
+echo     someone clicks "browser login" on the WorkBuddy card the window dies with
+echo     a DllNotFoundException. Fix: make sure the PackageReference to
+echo     Microsoft.Web.WebView2 is still in pet.csproj, then publish again.
+pause
+exit /b 1
+
+:webfail
+echo.
+echo [x] pet.exe --webtest FAILED on the published binary.
+echo     Read the three PASS/FAIL lines above to see which one:
+echo       * runtime missing  -- this machine has no WebView2 Evergreen runtime.
+echo         Install it and re-run. End users on Win11 already have it.
+echo       * loader not found -- the native file is shipped but cannot be resolved
+echo         in this layout (a packaging bug, not a machine problem).
+echo     Note: this only disables the NEW browser-login route. Manual pasting of
+echo     credentials still works, so the balance feature itself is not broken.
 pause
 exit /b 1
 

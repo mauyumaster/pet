@@ -84,6 +84,7 @@ namespace AzhuPet
             if (o.CaliberTest) return CaliberTest.Run(o);
             if (o.BubbleTest) return BubbleTest.Run(o);
             if (o.BalanceConfigTest) return BalanceConfigTest.Run();
+            if (o.WebTest) return WebTest.Run();
             if (o.ConfigTest) return ConfigTest.Run(o);
             if (o.FixConfig) return ConfigFix.Run(o);
             if (o.UpdateTest) return UpdateTest.Run(o);

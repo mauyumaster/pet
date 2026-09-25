@@ -1,9 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!-- 阿助桌宠 · 最小可行壳
-       目标：轻量（框架依赖模式，产物 < 1 MB，零新下载）、透明、置顶、
+       目标：轻量（框架依赖模式，零新下载）、透明、置顶、
              逐像素命中，且**每一步都能自查**（见 SelfTest.cs）。
-       渲染层是可替换的（IPetRenderer）：v1 = WPF 原生 3D（无外部依赖、可截图核验）。 -->
+       渲染层是可替换的（IPetRenderer）：v1 = WPF 原生 3D（无外部依赖、可截图核验）。
+
+       ⚠ 「零新下载」的唯一例外 = Microsoft.Web.WebView2（见文件末尾的 PackageReference）。
+         2026-09-25 由用户拍板引入，换的是「拿余额凭据」这件事：
+           改前：用户自己开 DevTools → 找请求 → 抄下 11 个请求头 → 手工粘进凭据文件；
+           改后：面板里点一下 → 登录 → 程序抄下网站自己发的那个请求（见 CredentialCapture.cs）。
+         实测代价：Core 774 KB ＋ WPF 包装 83 KB ＋ 原生 Loader 166 KB ≈ 0.98 MB
+         （安装包 16.1 → 约 16.5 MB）。**这是权衡过的决定，不是忘了上面那条原则。**
+         ⚠ 附带一个新的终端前置条件：WebView2 运行时（Win11 自带、Win10 多随 Edge 自带）。
+           缺失时 CredentialBrowserWindow 会明确报错并给出下载地址，不静默失败。 -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <!-- ⚠⚠ TFM 带 Windows SDK 版本号，是为了拿到 WinRT 投影（Windows.Media.Ocr）——
@@ -22,6 +31,10 @@
     <StartupObject>AzhuPet.Program</StartupObject>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <DebugType>none</DebugType>
+    <!-- ⚠ 别把引用自带的 .xml 文档拷进产物：WebView2 包的那三份合计 815 KB
+         （Core 630 + Wpf 144 + WinForms 41），比它的 DLL 本身还大，
+         而它们只对 IDE 提示有用，对运行零价值。默认值是 ".pdb;.xml"，这里关掉。 -->
+    <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <ApplicationIcon>pet.ico</ApplicationIcon>
     <!-- ==== 版本号：自更新唯一真值 ====
@@ -31,6 +44,11 @@
          Version 决定 InformationalVersion；三段式 x.y.z 就够（比较逻辑只看三段）。 -->
     <Version>0.1.1</Version>
   </PropertyGroup>
+
+  <!-- ⚠ 本项目唯一的第三方 NuGet 依赖，理由与实测代价见文件头。 -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
 
   <!-- 构建闸：输出目录里绝不允许出现凭据文件。
        凭据只该放 %LOCALAPPDATA%\AzhuPet\（不进 Obsidian 库 ⇒ 不进坚果云）。

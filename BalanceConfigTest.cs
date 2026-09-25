@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 
 namespace AzhuPet
@@ -66,6 +67,100 @@ namespace AzhuPet
                 // 负对照（判据纪律 7：先证明它能失败）：旧行为只回状态码 ⇒ 带响应体时**必须**不再退化为纯「401」。
                 Check(StatusProbe.DescribeHttpFailure(401, @" {""msg"":""unauthorized""}") != "401",
                     "负对照：带响应体时不再退化为纯「401」（旧行为在此判红）", ref pass, ref fail);
+
+                // ---- 浏览器取凭据：采集规则（CredentialCapture）----
+                // ⚠ 2026-09-25：把「面板里登录一次就拿到凭据」的**规则**从浏览器宿主里拆出来，
+                //   唯一目的就是让它有资格被验 —— 真浏览器不会为了让我们验证而变形，
+                //   规则若只能靠「点一次看看」来验，就等于没有判据（判据纪律 7：先证明它能失败）。
+                string hook = CredentialCapture.BuildHookScript(CredentialCapture.WorkbuddyCapturePattern);
+                Check(hook.Contains("\"/billing/meter/get-user-resource\""), "钩子里嵌入抓取目标（走 JSON 编码）", ref pass, ref fail);
+                Check(!hook.Contains("__PATTERN__"), "占位符已被替换（没有残留）", ref pass, ref fail);
+                // ⚠ 这里**不断言转义成了哪种写法**：JsonSerializer 会把 " 编成 \u0022 而不是 \"，
+                //   第一版判据就是写死了 \" 才红的 —— 那是在断言实现细节。真正要保证的性质是
+                //   「PAT 那段字面量解回来必须等于原模式」，所以把那段摘出来当 JSON 解一遍。
+                string nastyPattern = "a\"b\\c\nd";
+                string nastyScript = CredentialCapture.BuildHookScript(nastyPattern);
+                int at = nastyScript.IndexOf("PAT=", StringComparison.Ordinal) + 4;
+                int semi = nastyScript.IndexOf(';', at);
+                Check(JsonSerializer.Deserialize<string>(nastyScript.Substring(at, semi - at)) == nastyPattern,
+                    "负对照：模式含引号/反斜杠/换行时，注入的仍是一段等值的 JS 字符串字面量", ref pass, ref fail);
+
+                Check(CredentialCapture.IsTarget("https://www.workbuddy.cn/billing/meter/get-user-resource", CredentialCapture.WorkbuddyCapturePattern)
+                    && CredentialCapture.IsTarget("https://WWW.WorkBuddy.CN/Billing/Meter/Get-User-Resource", CredentialCapture.WorkbuddyCapturePattern),
+                    "抓取目标：子串匹配、忽略大小写", ref pass, ref fail);
+                Check(!CredentialCapture.IsTarget("https://www.workbuddy.cn/billing/other", CredentialCapture.WorkbuddyCapturePattern)
+                    && !CredentialCapture.IsTarget(null, CredentialCapture.WorkbuddyCapturePattern),
+                    "负对照：别的接口不算命中（否则会抄错请求）", ref pass, ref fail);
+
+                Check(CredentialCapture.IsDroppedHeader("Content-Length") && CredentialCapture.IsDroppedHeader("acCEPT-encoding")
+                    && CredentialCapture.IsDroppedHeader("cookie") && CredentialCapture.IsDroppedHeader("Host"),
+                    "传输层头与 cookie 一律丢弃（大小写无关）", ref pass, ref fail);
+                Check(!CredentialCapture.IsDroppedHeader("content-type") && !CredentialCapture.IsDroppedHeader("x-user-id"),
+                    "负对照：content-type / x-user-id 不许被丢掉", ref pass, ref fail);
+
+                var jar = new List<KeyValuePair<string, string>>
+                {
+                    new KeyValuePair<string, string>("session_2", "bbb"),
+                    new KeyValuePair<string, string>("session", "aaa"),
+                    new KeyValuePair<string, string>("", "空名应被丢弃"),
+                };
+                Check(CredentialCapture.BuildCookieHeader(jar) == "session=aaa; session_2=bbb",
+                    "cookie 头按名字排序拼接（连点两次产出逐字节相同，可 diff）", ref pass, ref fail);
+
+                var cap = CredentialCapture.ParseCaptured(@"{
+                    ""url"": ""https://www.workbuddy.cn/billing/meter/get-user-resource"",
+                    ""method"": ""POST"",
+                    ""headers"": { ""content-type"": ""application/json"", ""x-user-id"": ""abc"", ""content-length"": ""2"" },
+                    ""body"": ""{}"" }");
+                Check(cap != null && cap.Method == "POST" && cap.Headers.Count == 3
+                    && cap.Headers.Any(h => h.Key == "x-user-id" && h.Value == "abc"),
+                    "解析抄到的请求（URL / 方法 / 头 / body）", ref pass, ref fail);
+                Check(CredentialCapture.ParseCaptured("\"just-a-string\"") == null
+                    && CredentialCapture.ParseCaptured("{ broken") == null
+                    && CredentialCapture.ParseCaptured("{}") == null,
+                    "负对照：非对象／坏 JSON／无 URL 一律返回 null 而不是抛（TryGetProperty 对非 Object 会抛）", ref pass, ref fail);
+
+                // 拼出来的文件必须能被**正式读取路径**读回去 —— 同一份数据不许有两个解析口径。
+                BalanceSources.SaveSecret("wb-compose-test.secret.txt", CredentialCapture.ComposeSecret(
+                    cap.Url, cap.Headers, CredentialCapture.BuildCookieHeader(jar), cap.Body));
+                var rt = BalanceSources.ReadSecret("wb-compose-test.secret.txt");
+                Check(rt.headers.Split('\n').Any(l => l.StartsWith("cookie: session=aaa; session_2=bbb", StringComparison.Ordinal))
+                    && rt.headers.Split('\n').Any(l => l.StartsWith("x-user-id: abc", StringComparison.Ordinal)),
+                    "拼出的凭据能被正式读取路径读回（cookie 与 x-user-id 都在）", ref pass, ref fail);
+                Check(!rt.headers.Contains("content-length") && !rt.headers.Contains("accept-encoding"),
+                    "传输层头没有写进文件", ref pass, ref fail);
+                Check(rt.body == "{}", "body 段被读取路径识别", ref pass, ref fail);
+
+                // 负对照（判据纪律 7）：不拼 cookie 罐 → 文件里就不该有 cookie 行。
+                // 这正是最危险的错法：JS 看不到 cookie 头，只抄请求头会得到一份
+                // 「看起来完整、其实没有登录态」的凭据，然后现象是 401。
+                string noCookie = CredentialCapture.ComposeSecret(cap.Url, cap.Headers, "", null);
+                Check(!noCookie.Contains("cookie:"),
+                    "负对照：不拼 cookie 罐时文件里没有 cookie 行（否则上面那条判据不成立）", ref pass, ref fail);
+                Check(noCookie.Split('\n')[0].Trim() == cap.Url, "URL 恒在第一行（读取路径靠这个约定）", ref pass, ref fail);
+                Check(CredentialCapture.ComposeSecret("", cap.Headers, "a=1", null) == "",
+                    "没有 URL 时宁可不写（返回空串，不产生半截凭据）", ref pass, ref fail);
+
+                var tpl = CredentialCapture.DerivedTemplate("https://www.workbuddy.cn/billing/meter/get-user-resource");
+                Check(tpl.Any(h => h.Key == "origin" && h.Value == "https://www.workbuddy.cn") && tpl.Any(h => h.Key == "referer"),
+                    "兜底模板的 origin 由 URL 算出", ref pass, ref fail);
+                Check(CredentialCapture.DerivedTemplate("not-a-url").Count == 0, "负对照：非法 URL 不产出模板", ref pass, ref fail);
+
+                // 「直接抓取」那条路：沿用旧凭据的请求头，只把 cookie 换掉。
+                string oldText = "https://www.workbuddy.cn/billing/meter/get-user-resource\r\nuser-agent: UA\r\ncookie: old=1\r\nx-user-id: abc\r\n";
+                string oldUrl, oldBody;
+                var oldHeaders = CredentialCapture.ParseRawSecretText(oldText, out oldUrl, out oldBody);
+                Check(oldUrl == "https://www.workbuddy.cn/billing/meter/get-user-resource" && oldHeaders.Count == 3
+                    && oldHeaders.Any(h => h.Key == "x-user-id" && h.Value == "abc"),
+                    "能拆出旧凭据的 URL 与请求头（只换 cookie 那条路靠它）", ref pass, ref fail);
+                string replayed = CredentialCapture.ComposeSecret(oldUrl, oldHeaders, "session=new; session_2=new2", null);
+                Check(replayed.Contains("user-agent: UA") && replayed.Contains("x-user-id: abc")
+                    && replayed.Contains("session=new; session_2=new2") && !replayed.Contains("old=1"),
+                    "旧 cookie 被新 cookie 顶掉，其它头原样保留（不出现两个 cookie 行）", ref pass, ref fail);
+
+                Check(new StatusReport().WorkbuddyStatus == -1
+                    && !StatusProbe.LooksLikeCredentialProblem(new StatusReport().WorkbuddyStatus),
+                    "负对照：没拿到响应（-1）不被误判成凭据问题（否则网络一断就让你去换凭据）", ref pass, ref fail);
 
                 var report = new StatusReport();
                 StatusProbe.ApplyCustomResults(report, new Action<StatusReport>[]

@@ -57,13 +57,16 @@ namespace AzhuPet
             Grid.SetRow(title, 0); root.Children.Add(title);
 
             var builtins = new StackPanel();
-            builtins.Children.Add(SectionTitle("内置平台", "凭据过期时在这里覆盖更新，旧内容不会回显。"));
+            builtins.Children.Add(SectionTitle("内置平台", "凭据过期时：点「浏览器登录获取」重新登一次即可；也可手工粘贴。旧内容不回显。"));
             _traeState = new TextBlock();
             _workbuddyState = new TextBlock();
             builtins.Children.Add(BuiltinCard("Trae 积分", "读取可用积分（总额 − 已用）", _traeState,
                 () => OpenCredential("Trae", StatusProbe.TraeSecretFile, "authorization")));
+            // ⚠ Trae 没有浏览器通道：它的凭据是 **IDE 的**（29 个头，含 X-Medusa / X-Neptune / x-lscbd-*
+            //   等客户端签名头），网页登录拿不到同一份 —— 给它一个「浏览器登录」按钮只会让用户白试一趟。
             builtins.Children.Add(BuiltinCard("WorkBuddy 积分", "读取界面同口径的 type=1 可用额度", _workbuddyState,
-                () => OpenCredential("WorkBuddy", StatusProbe.WorkBuddySecretFile, "cookie", "x-user-id")));
+                () => OpenCredential("WorkBuddy", StatusProbe.WorkBuddySecretFile, "cookie", "x-user-id"),
+                () => OpenBrowserLogin()));
             Grid.SetRow(builtins, 1); root.Children.Add(builtins);
 
             var customHead = new Grid { Margin = new Thickness(0, 16, 0, 8) };
@@ -124,10 +127,11 @@ namespace AzhuPet
             return p;
         }
 
-        private Border BuiltinCard(string name, string sub, TextBlock state, Action edit)
+        private Border BuiltinCard(string name, string sub, TextBlock state, Action edit, Action browser = null)
         {
             var g = new Grid();
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var text = new StackPanel { Margin = new Thickness(12, 9, 8, 9) };
@@ -137,9 +141,23 @@ namespace AzhuPet
             state.Margin = new Thickness(8); state.VerticalAlignment = VerticalAlignment.Center;
             state.FontSize = 12; state.FontWeight = FontWeights.SemiBold;
             Grid.SetColumn(state, 1); g.Children.Add(state);
-            var b = SmallButton("更新凭据", (s, e) => edit(), true);
-            b.VerticalAlignment = VerticalAlignment.Center; b.Margin = new Thickness(4, 0, 10, 0);
-            Grid.SetColumn(b, 2); g.Children.Add(b);
+            if (browser != null)
+            {
+                // 有浏览器通道时，它才是「主路」（不用理解请求头、不用开 DevTools）；
+                // 手工粘贴退成备选 —— 但它必须留着：终端用户可能没装 WebView2 运行时。
+                var bb = SmallButton("浏览器登录获取", (s, e) => browser(), true);
+                bb.VerticalAlignment = VerticalAlignment.Center; bb.Margin = new Thickness(4, 0, 0, 0);
+                Grid.SetColumn(bb, 2); g.Children.Add(bb);
+                var eb = SmallButton("手工粘贴", (s, e) => edit(), false);
+                eb.VerticalAlignment = VerticalAlignment.Center; eb.Margin = new Thickness(4, 0, 10, 0);
+                Grid.SetColumn(eb, 3); g.Children.Add(eb);
+            }
+            else
+            {
+                var b = SmallButton("更新凭据", (s, e) => edit(), true);
+                b.VerticalAlignment = VerticalAlignment.Center; b.Margin = new Thickness(4, 0, 10, 0);
+                Grid.SetColumn(b, 2); g.Children.Add(b);
+            }
             return new Border { Background = Panel, BorderBrush = Border, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(7), Child = g, Margin = new Thickness(0, 0, 0, 7) };
         }
 
@@ -266,6 +284,21 @@ namespace AzhuPet
         {
             var dlg = new CredentialEditor(platform, file, required) { Owner = this };
             if (dlg.ShowDialog() == true) { RefreshBuiltins(); _reload?.Invoke(); _notice.Text = platform + " 凭据已更新，可点“测试全部”验证。"; _notice.Foreground = Good; }
+        }
+        /// <summary>浏览器登录取凭据（WorkBuddy 专用）。成功时窗口内部就带了一次真实回测，
+        /// 所以这里只负责刷新卡片与气泡 —— 气泡的余额有 60 秒缓存，不主动丢弃的话最长一分钟仍显示旧的 401。</summary>
+        private void OpenBrowserLogin()
+        {
+            var dlg = new CredentialBrowserWindow(
+                "WorkBuddy 积分",
+                StatusProbe.WorkBuddySecretFile,
+                CredentialCapture.WorkbuddyCapturePattern,
+                CredentialCapture.WorkbuddyLoginUrl,
+                CredentialCapture.WorkbuddyBalanceUrl,
+                _reload) { Owner = this };
+            dlg.ShowDialog();
+            RefreshBuiltins();
+            if (dlg.Saved) { _notice.Text = "WorkBuddy 凭据已从浏览器获取；可点「测试全部」复核。"; _notice.Foreground = Good; }
         }
         private static BalanceSource Clone(BalanceSource s) => new BalanceSource { Name = s.Name, Url = s.Url, Method = s.Method, PathExpr = s.PathExpr, Unit = s.Unit, Enabled = s.Enabled, SecretFile = s.SecretFile, HeadersText = s.HeadersText, Body = s.Body };
     }

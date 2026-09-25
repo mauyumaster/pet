@@ -443,6 +443,7 @@ namespace AzhuPet
         private async Task<Action<StatusReport>> WorkBuddyBalanceAsync(string file)
         {
             string err = null;
+            int httpStatus = -1;   // -1 = 压根没拿到响应（超时/异常），与 4xx/5xx 是两回事
             try
             {
                 string url = null;
@@ -472,6 +473,7 @@ namespace AzhuPet
                     req.Content = new StringContent("{}", Encoding.UTF8, contentType);
                     using (var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead))
                     {
+                        httpStatus = (int)resp.StatusCode;
                         string respBody = await resp.Content.ReadAsStringAsync();
                         if (!resp.IsSuccessStatusCode) err = DescribeHttpFailure((int)resp.StatusCode, respBody);
                         else
@@ -483,6 +485,7 @@ namespace AzhuPet
                                 return r =>
                                 {
                                     r.WorkbuddyOk = true;
+                                    r.WorkbuddyStatus = httpStatus;
                                     r.WorkbuddyRemain = cal.Remain;
                                     r.WorkbuddyAllBucketsRemain = cal.AllBucketsRemain;
                                     r.WorkbuddyType1Count = cal.Type1Count;
@@ -498,7 +501,8 @@ namespace AzhuPet
             }
             catch (Exception ex) { err = Shrink(ex.Message); }
             var e2 = err;
-            return r => r.WorkbuddyError = e2;
+            int e3 = httpStatus;
+            return r => { r.WorkbuddyError = e2; r.WorkbuddyStatus = e3; };
         }
         /// <summary>WorkBuddy 积分的口径判定，**纯函数**：只吃响应体字符串，不联网、不读凭据。</summary>
         // 抽出来的唯一理由（2026-09-18）：口径这种东西若只能靠真接口验，就永远没有资格失败 ——
@@ -938,6 +942,11 @@ namespace AzhuPet
         public int WorkbuddyTotalCount = -1;          // 接口自称的总数；与返回条数不等 ⇒ 读到的可能不完整
         public double WorkbuddyOtherRemain = double.NaN;  // 非 type=1 的余额之和（只作旁证，不进主口径）
         public string WorkbuddyError;            // WorkBuddy 侧错误
+        // HTTP 状态码（-1 = 没走到响应，比如超时/异常）。
+        // ⚠ 为什么要留一个数字：只有它才能回答「这次失败该不该归咎于凭据」——
+        //   「浏览器取凭据」窗口正是靠它决定回测失败后要不要把用户原来的凭据还原回去。
+        //   从错误文案里嗅探「401」是能work但更脆的写法（文案一改就静默失效，本项目的老坑型）。
+        public int WorkbuddyStatus = -1;
         public string Error;                     // 余额侧的简短错误文本（自定义接口 / DeepSeek 那两条路）
         public List<BalanceCell> DynamicRows = new List<BalanceCell>();   // 模板化自定义源(balances.json)的一行一个
     }
