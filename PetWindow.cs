@@ -134,6 +134,17 @@ namespace AzhuPet
         public IntPtr Handle { get; private set; }
         public double DipScale { get; private set; }
 
+        /// <summary>置顶被「借走」的次数（&gt;0 ＝ 正在被借走，比如设置面板开着）。
+        /// ⚠ 计数不是布尔：设置主面板里还能再开子对话框，布尔会被后关的那个提前归还 ——
+        ///   而「谁先关谁后关」是不确定的（2026-09-25 真故障的一条路径）。</summary>
+        private int _topmostHold;
+        private long _lastTopmostCheckMs = -2000;   // 置顶位自愈的节流（-2000 让首帧就能对一次账）
+        private int _topmostHeals;                  // 补回过几次（排障用；正常情况下应当恒为 0）
+        /// <summary>置顶位被外部抹掉后补回来的次数。见 `TopmostGuard` 顶部注释。</summary>
+        public int TopmostHeals { get { return _topmostHeals; } }
+        /// <summary>置顶正被借走（面板开着）。</summary>
+        public bool TopmostSuspended { get { return TopmostGuard.IsSuspended(_topmostHold); } }
+
         private const double Fps = 60;   // 合成渲染上限（桌宠常驻：帧率越高越费电，按需取舍）
         private const double Gravity = 2600;      // 物理像素/秒²
         private const double Restitution = 0.42;
@@ -847,6 +858,33 @@ namespace AzhuPet
                         });
                 }
             }
+
+            // ---- 置顶位自愈（2026-09-25）----
+            // 用户报的是「无法**保持**在所有界面上方」—— 就算把下发顺序都修对，
+            // 置顶位仍可能被外部清掉（shell 重启、别的读-改-写流程、其它置顶工具）。
+            // ⚠ 判据是**真实扩展样式位**，不是 `Window.Topmost` 属性：属性在位被抹掉之后
+            //   仍然读 true ⇒ 靠它永远发现不了，而且拿它去设也救不回来（依赖属性值没变，
+            //   回调不跑，一个 SetWindowPos 都不会发生）。详见 TopmostGuard 顶部注释。
+            // 幂等、只读一次 GetWindowLong（不无脑 SetWindowPos，否则会跟别的置顶窗口抢 z 序），
+            // 且节流到 1 秒 —— 它挂在 120ms 一拍的 SlowTick 上。
+            long topMs = _clock.ElapsedMilliseconds;
+            if (topMs - _lastTopmostCheckMs >= 1000)
+            {
+                _lastTopmostCheckMs = topMs;
+                if (Handle != IntPtr.Zero)
+                {
+                    bool real = Native.HasTopmostBit(Handle);
+                    if (TopmostGuard.NeedReassert(TopmostSuspended, Cfg.Topmost, real))
+                    {
+                        _topmostHeals++;
+                        // ⚠ 只在**真出事**时写一行：正常情况下它一次都不该出现。
+                        //   这一行就是「她有没有被压下去过」的现场记录。
+                        Trace_("topmost: 真实位=" + (real ? "有" : "无") + " 配置=" + (Cfg.Topmost ? "要" : "不要")
+                            + " → 补回第 " + _topmostHeals + " 次");
+                        SyncTopmostBit();
+                    }
+                }
+            }
         }
 
         // ------------------------------------------------------------------ 表达环：她开口
@@ -891,8 +929,68 @@ namespace AzhuPet
             OcrEye.SendText = Cfg.OcrSendText;
             WatchLoop.RoastOn = Cfg.RoastOn;
             Watcher.AdaptiveOn = true;
-            Topmost = Cfg.Topmost;
+            ApplyTopmostFromConfig();          // ⚠ 别写 `Topmost = Cfg.Topmost`：借出期间那一下会被抢
             RebuildSpeaker();
+        }
+
+        // ------------------------------------------------------------------ 置顶
+
+        /// <summary>把置顶按**配置**落到实处（属性与真实位一起保证）。
+        /// ⚠ 借出期间（面板开着）只记配置、不抢 —— 抢回来就会把面板盖住。
+        ///   先把 `Topmost` 属性与配置对齐（值真变了才会触发 WPF 那一次 `SetWindowPos`），
+        ///   再单独查一遍**真实位**：属性自认 true 而位不在，是它自己救不了的场景。</summary>
+        public void ApplyTopmostFromConfig()
+        {
+            if (TopmostGuard.IsSuspended(_topmostHold)) return;
+            bool want = Cfg.Topmost;
+            if (Topmost != want) Topmost = want;
+            SyncTopmostBit();
+        }
+
+        /// <summary>只按「配置 vs 真实位」对账，不动 `Topmost` 属性。
+        /// 幂等、极廉价（一次 `GetWindowLong`），但**只在需要时**才拨 —— 不无脑 SetWindowPos，
+        /// 否则每秒都会把窗口提到置顶带顶部，会跟别的置顶窗口抢 z 序。</summary>
+        private void SyncTopmostBit()
+        {
+            if (Handle == IntPtr.Zero) return;
+            bool real = Native.HasTopmostBit(Handle);
+            if (!TopmostGuard.NeedReassert(TopmostGuard.IsSuspended(_topmostHold), Cfg.Topmost, real)) return;
+            if (Cfg.Topmost) Native.ReassertTopmost(Handle); else Native.DropTopmost(Handle);
+        }
+
+        /// <summary>临时把置顶借走（打开面板期间，好让面板不被她盖住）。
+        /// ⚠ **归还时一律按配置恢复**，绝不写回「借走前的值」——面板里的「保存」可能刚把
+        ///   `Cfg.Topmost` 改成新值，写回旧值会把它抹掉，而配置里明明写着 true
+        ///   （2026-09-25 真故障：她自认置顶、系统不认）。
+        /// 用法：`using (_w.SuspendTopmost()) { … }`；非模态窗（`Show()` 立刻返回）要把
+        /// 返回的凭据挂到 `Closed` 上自己归还。</summary>
+        public IDisposable SuspendTopmost()
+        {
+            _topmostHold = TopmostGuard.Suspend(_topmostHold);
+            Topmost = false;                    // 借出期间她退到普通层，面板才能盖住她
+            return new TopmostHold(this);
+        }
+
+        private void ResumeTopmost()
+        {
+            _topmostHold = TopmostGuard.Resume(_topmostHold);
+            if (TopmostGuard.IsSuspended(_topmostHold)) return;   // 还有人借着
+            ApplyTopmostFromConfig();                              // ⚠ 取配置，不取捕获值
+        }
+
+        /// <summary>借出凭据。⚠ 只许 `Dispose` 一次（内部把引用置空），
+        /// 重复 Dispose 会把 `_topmostHold` 多减一次，把「还欠几次」这件事抹掉。</summary>
+        private sealed class TopmostHold : IDisposable
+        {
+            private PetWindow _w;
+            public TopmostHold(PetWindow w) { _w = w; }
+            public void Dispose()
+            {
+                PetWindow w = _w;
+                if (w == null) return;
+                _w = null;
+                w.ResumeTopmost();
+            }
         }
 
         /// <summary>⚠ 这一回调**可能在后台线程上**被调（真 LLM 是异步的）⇒ 一律切回 UI 线程再碰控件。</summary>

@@ -1,4 +1,4 @@
-// Win32 声明集中在这里。桌宠壳需要的东西几乎全是「问系统」：
+﻿// Win32 声明集中在这里。桌宠壳需要的东西几乎全是「问系统」：
 // 光标在哪、人多久没操作了、前台窗口有没有全屏、屏幕工作区多大。
 using System;
 using System.Collections.Generic;
@@ -40,6 +40,7 @@ namespace AzhuPet
         [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
         [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] public static extern int GetWindowLong(IntPtr hWnd, int idx);
         [DllImport("user32.dll", EntryPoint = "SetWindowLongW")] public static extern int SetWindowLong(IntPtr hWnd, int idx, int val);
+        [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
         [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
         [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
@@ -75,6 +76,40 @@ namespace AzhuPet
         public const int WS_EX_TOOLWINDOW = 0x00000080;
         public const int WS_EX_TRANSPARENT = 0x00000020;
         public const int WS_EX_NOACTIVATE = 0x08000000;
+
+        public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+        public const uint SWP_NOSIZE = 0x0001;
+        public const uint SWP_NOMOVE = 0x0002;
+        public const uint SWP_NOACTIVATE = 0x0010;
+
+        /// <summary>置顶位现在在不在（**唯一**判据，别去看 `Window.Topmost` 属性）。
+        /// 逻辑在 `TopmostGuard` 里，这里只是把窗口句柄接上去。</summary>
+        public static bool HasTopmostBit(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero) return false;
+            return TopmostGuard.HasTopmostBit(GetWindowLong(hWnd, GWL_EXSTYLE));
+        }
+
+        /// <summary>把置顶**真的**拨过去。
+        /// ⚠⚠ 不能靠 `Window.Topmost = true` 来救：那位属性是依赖属性，
+        ///   它**自认已经是 true** 时值没变 ⇒ 属性回调不跑 ⇒ 一个 `SetWindowPos` 都不会发生。
+        ///   于是「位被别人抹掉」之后属性怎么设都回不来 —— 这就是「无法**保持**在最上方」的成因。
+        ///   直接 `SetWindowPos` 才绕得开这层缓存。</summary>
+        public static bool ReassertTopmost(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero) return false;
+            return SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+
+        /// <summary>撤掉置顶（配置里关了、位却还开着时用）。</summary>
+        public static bool DropTopmost(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero) return false;
+            return SetWindowPos(hWnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
 
         public const int WM_NCHITTEST = 0x0084;
         public const int WM_LBUTTONDOWN = 0x0201;

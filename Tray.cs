@@ -158,24 +158,43 @@ namespace AzhuPet
 
         private void OpenBalanceSettings()
         {            // 桌宠通常置顶；设置窗若是普通窗口，会被宠物盖住右下角按钮。
-            // 打开工作区期间临时放下桌宠，关闭后恢复用户原来的置顶选择。
-            bool wasTopmost = _w.Topmost;
-            _w.Topmost = false;
-            var panel = new BalanceSettingsWindow(_w.ReloadBalanceSources);
-            panel.Closed += (s, e) => _w.Topmost = wasTopmost;
-            panel.Show();
-            panel.Activate();
+            // ⚠⚠ 借走置顶这件事必须**成对**，而且归还时的值一律**取配置**（`PetWindow.ResumeTopmost`），
+            //   绝不写回「借走前的值」—— 面板里的「保存」可能刚把配置改成新值，写回旧值会把它
+            //   抹掉，而配置里明明写着 true（2026-09-25 真故障：她自认置顶、系统不认，
+            //   实测 `GWL_EXSTYLE=0x08080080` 里没有 0x8）。详见 TopmostGuard 顶部注释。
+            // ⚠ 归还**不能**靠 `using`：`panel.Show()` 是**非模态**的、立刻返回，
+            //   那样刚打开就归还了，面板又会被她盖住 ⇒ 必须挂到 `Closed` 上。
+            // ⚠ 借出凭据用**计数**而不是布尔：面板连开两次时，谁先关谁后关是不确定的，
+            //   布尔会被先关的那个提前归还（旧写法就是这么把置顶永久弄丢的）。
+            IDisposable hold = _w.SuspendTopmost();
+            BalanceSettingsWindow panel = null;
+            try
+            {
+                panel = new BalanceSettingsWindow(_w.ReloadBalanceSources);
+                panel.Closed += (s, e) => hold.Dispose();
+                panel.Show();
+                panel.Activate();
+            }
+            catch
+            {
+                // ⚠ 窗没开成也必须归还：否则置顶永远回不来，现象是「她再也压不住窗口了」
+                //   而看不出任何报错。归还凭据是幂等的（内部置空后重复 Dispose 无副作用）。
+                hold.Dispose();
+                throw;
+            }
         }
 
         /// <summary>设置主面板 —— 一切配置的唯一入口（说话／模型通道／读屏／产出／外观）。</summary>
         private void OpenSettings()
         {
             // 桌宠通常置顶；设置窗若是普通窗口会被宠物盖住右下角按钮（同余额窗的处理）。
-            bool wasTopmost = _w.Topmost;
-            _w.Topmost = false;
+            // ⚠ 模态窗（`ShowDialog()` 阻塞到关闭）才可以用 `using` —— 它确实覆盖了整段"面板开着"。
+            // ⚠ `SettingsWindow.Save()` 会调 `_w.ApplyConfig()`，而那一下在借出期间**只记配置、
+            //   不抢置顶**；真正拨回置顶发生在下面归还的那一刻，且取的是**配置**。
+            //   （旧写法 `_w.Topmost = wasTopmost` 会把刚保存的新值当场抹掉 ⇒ 勾了「始终置顶」不生效。）
+            using (_w.SuspendTopmost())
             using (var dlg = new SettingsWindow(_w))
                 dlg.ShowDialog();
-            _w.Topmost = wasTopmost;
         }
 
         private void About()

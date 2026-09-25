@@ -388,6 +388,7 @@ namespace AzhuPet
         public bool BalanceSettings;            // --balance-settings：独立打开余额配置中心（无需先找到托盘菜单）
         public bool Settings;                   // --settings：独立打开设置主面板（便于 UI 验收与截图）
         public bool SettingsTest;               // --settingstest：离线验设置面板版式（裁剪／重叠／跟随缩放）
+        public bool TopmostTest;                // --topmosttest：验置顶那一格状态（借出计数／归还取配置／真实位真拨过去了吗）
         public bool NoLayout;                   // --no-layout：负对照 —— 跳过重排，版式判据必须变红
         public bool BalanceConfigTest;          // --balanceconfigtest：离线验保存/备份/坏 JSON/凭据隔离
         public bool ConfigTest;                 // --configtest：离线验主配置「写/读转义对称 + 不膨胀」
@@ -506,6 +507,7 @@ namespace AzhuPet
                 || BalanceConfigTest || ConfigTest || FixConfig || UpdateTest
                 || UpdateDiag
                 || SettingsTest || SummaryTest || SummaryNow
+                || TopmostTest
                 || BalanceSettings || Settings
                 || PixDir != null || ProbeFile != null
                 || Chat != null
@@ -531,6 +533,7 @@ namespace AzhuPet
                     case "--balance-settings": c.BalanceSettings = true; break;
                     case "--settings": c.Settings = true; break;
                     case "--settingstest": c.SettingsTest = true; break;
+                    case "--topmosttest": c.TopmostTest = true; break;
                     case "--no-layout": c.NoLayout = true; break;
                     case "--balanceconfigtest": c.BalanceConfigTest = true; break;
                     case "--configtest": c.ConfigTest = true; break;

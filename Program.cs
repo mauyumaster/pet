@@ -100,6 +100,7 @@ namespace AzhuPet
             if (!string.IsNullOrEmpty(o.InstallBalanceTemplate)) return BalanceTemplateInstaller.Run(o.InstallBalanceTemplate);
             if (o.BalanceSettings) return RunBalanceSettings();
             if (o.SettingsTest) return SettingsTest.Run(o);
+            if (o.TopmostTest) return TopmostTest.Run();
             if (o.Settings) return RunSettings(o);
             return RunNormal(o);
         }
