@@ -139,12 +139,17 @@ Name: "autostart"; Description: "开机时自动启动阿助（之后可在设�
 
 
 [Files]
-; 三文件，与 pack-release.cmd 打 zip 的内容**必须一致**。
+; 四文件，与 pack-release.cmd 打 zip 的内容**必须一致**。
 ; ⚠ 逐条列出而不用 *.* 通配：缺文件时 Inno 在**编译期**就报错，而不是打出一个
 ;   「装完能开、但没有模型/不是她」的包 —— 那种包每一处检查都是绿的。
 Source: "{#PubDir}\{#AppExe}";                DestDir: "{app}";       Flags: ignoreversion
 Source: "{#PubDir}\persona.md";               DestDir: "{app}";       Flags: ignoreversion
 Source: "{#PubDir}\model\chibi_maid_pet.glb"; DestDir: "{app}\model"; Flags: ignoreversion
+; ⚠ WebView2Loader.dll 必须一起装（2026-09-25 加）—— 它**没有**被打进单文件 exe，
+;   缺了它，「浏览器登录 / 自动取余额」会在干净机器上直接 DllNotFoundException。
+;   开发机上一直没暴露，是因为本机 PATH 上恰好有一份（Windows Performance Toolkit 自带的）。
+;   实测方式：把 PATH 收窄到 System32，再跑 pet.exe --webtest。
+Source: "{#PubDir}\WebView2Loader.dll";       DestDir: "{app}";       Flags: ignoreversion
 
 
 [Icons]

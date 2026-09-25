@@ -58,12 +58,16 @@ namespace AzhuPet
         //   少 model/ 她启动就弹「找不到 chibi_maid_pet.glb」直接退出（2026-09-21 真实翻车）。
         //   所以模型也从「可选」升格成「必须有」—— 校验的核心价值就是拦住「装完反而不能用」。
         private static readonly string[] PayloadNames =
-            { "pet.exe", "persona.md", "model/chibi_maid_pet.glb" };
+            { "pet.exe", "persona.md", "model/chibi_maid_pet.glb", "WebView2Loader.dll" };
 
         // ⚠ 向后兼容：2026-09-21 之前的发布包（v0.1.0 及更早）**没有模型**。
         //   如果一口咬定「没有模型就作废」，那些版本永远无法被更新覆盖。
         //   判据：**核心文件（pet.exe/persona.md）缺一即作废；模型缺失则容忍**，
         //   但一旦包里带了模型，就必须完整（有名字、非空）。
+        // ⚠ WebView2Loader.dll 同理**必须容忍缺失**（2026-09-25 加）：它是 0.1.2 才引入 WebView2 时
+        //   该随包分发却漏掉的那一个原生加载器（见 WebTest.cs 顶部的实测）。已经发出去的 0.1.0/0.1.1
+        //   包里没有它，若据「缺它就作废」就再也推不动那些版本 —— 而那恰恰是最需要被修好的用户。
+        //   ⇒ 它在包里就装上，不在就跳过（老用户先升到带它的版本，下一个包再补上）。
         private static bool IsCorePayload(string name)
         {
             return name == "pet.exe" || name == "persona.md";

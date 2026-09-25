@@ -58,12 +58,13 @@ if not exist "%PUBDIR%\model" mkdir "%PUBDIR%\model"
 copy /y "..\model\chibi_maid_pet.glb" "%PUBDIR%\model\chibi_maid_pet.glb" >nul
 if errorlevel 1 goto :failed
 
-echo [4/6] guard: the publish folder must hold ALL THREE files...
+echo [4/6] guard: the publish folder must hold ALL FOUR files...
 rem WHY the guard: a half-staged publish folder is exactly how a release
 rem goes out broken while every test is green. Check before touching the
 rem installed copy, so a bad build can never damage a good install.
 if not exist "%PUBDIR%\persona.md" goto :nopersona
 if not exist "%PUBDIR%\model\chibi_maid_pet.glb" goto :nomodel
+if not exist "%PUBDIR%\WebView2Loader.dll" goto :noloader
 
 rem ---- version: read from the BUILT EXE, never from a hardcoded string ----
 rem WHY: the version lives in exactly one place (pet.csproj <Version>). A
@@ -88,11 +89,17 @@ copy /y "%PUBDIR%\persona.md" "%APPDIR%\persona.md" >nul
 if errorlevel 1 goto :failed
 copy /y "%PUBDIR%\model\chibi_maid_pet.glb" "%APPDIR%\model\chibi_maid_pet.glb" >nul
 if errorlevel 1 goto :failed
+rem WHY the native loader too (added 2026-09-25): it is NOT inside the
+rem single-file exe, so a copy that skips it gives you an install whose
+rem embedded browser dies on any machine that has none on PATH.
+copy /y "%PUBDIR%\WebView2Loader.dll" "%APPDIR%\WebView2Loader.dll" >nul
+if errorlevel 1 goto :failed
 
 echo [6/6] verify what actually landed in %APPDIR%...
 if not exist "%APPDIR%\pet.exe" goto :verifyfail
 if not exist "%APPDIR%\persona.md" goto :verifyfail
 if not exist "%APPDIR%\model\chibi_maid_pet.glb" goto :verifyfail
+if not exist "%APPDIR%\WebView2Loader.dll" goto :verifyfail
 rem Ask the INSTALLED binary its version. Comparing it to the built one is
 rem the only way to know the copy really replaced an older file rather than
 rem silently keeping it.
@@ -109,6 +116,7 @@ echo.
 for %%F in ("%APPDIR%\pet.exe") do echo       pet.exe       %%~zF bytes
 for %%F in ("%APPDIR%\persona.md") do echo       persona.md    %%~zF bytes
 for %%F in ("%APPDIR%\model\chibi_maid_pet.glb") do echo       model         %%~zF bytes
+for %%F in ("%APPDIR%\WebView2Loader.dll") do echo       loader        %%~zF bytes
 echo.
 echo   Start her by double-clicking pet.exe in that folder (or the desktop
 echo   shortcut, if it points there). Nothing was uploaded anywhere.
@@ -179,6 +187,18 @@ echo.
 echo [x] The 3D model did not make it into the publish folder.
 echo     Looked for: ..\model\chibi_maid_pet.glb  (13MB, lives beside the pet folder)
 echo     Without it the app dies at startup with "cannot find model/chibi_maid_pet.glb".
+echo.
+pause
+exit /b 1
+
+:noloader
+echo.
+echo [x] WebView2Loader.dll is missing from the publish folder.
+echo     It is NOT inside the single-file exe, so it has to be copied too.
+echo     Without it the embedded-browser feature ("browser login / auto balance")
+echo     dies with DllNotFoundException on any machine that has no stray copy
+echo     on PATH. A publish folder normally gets it from the WebView2 package;
+echo     re-run the publish step if it is gone.
 echo.
 pause
 exit /b 1

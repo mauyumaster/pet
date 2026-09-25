@@ -123,14 +123,21 @@ if not exist "%PUBDIR%\model" mkdir "%PUBDIR%\model"
 copy /y "..\model\chibi_maid_pet.glb" "%PUBDIR%\model\chibi_maid_pet.glb" >nul
 if errorlevel 1 goto :failed
 
-echo [5/8] guard: the release must contain ALL THREE files...
+echo [5/8] guard: the release must contain ALL FOUR files...
 if not exist "%PUBDIR%\persona.md" goto :nopersona
 if not exist "%PUBDIR%\model\chibi_maid_pet.glb" goto :nomodel
+if not exist "%PUBDIR%\WebView2Loader.dll" goto :noloader
 
 echo [6/8] zip...
 rem tar is present on Windows 10 1803+ and does zip without extra tooling.
+rem WHY WebView2Loader.dll is in this list (added 2026-09-25): it is NOT inside
+rem the single-file exe. Ship the zip without it and the embedded-browser
+rem feature dies with DllNotFoundException on any clean machine. It looked
+rem fine here only because Windows Performance Toolkit puts a stray copy on
+rem PATH -- found by re-running --webtest with PATH narrowed to System32.
+rem The zip is also the self-update payload, so it needs this file too.
 if exist "%ZIP%" del /q "%ZIP%"
-tar -a -c -f "%ZIP%" -C "%PUBDIR%" pet.exe persona.md model/chibi_maid_pet.glb
+tar -a -c -f "%ZIP%" -C "%PUBDIR%" pet.exe persona.md model/chibi_maid_pet.glb WebView2Loader.dll
 if errorlevel 1 goto :failed
 
 echo [7/8] installer (Inno Setup)...

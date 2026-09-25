@@ -191,11 +191,31 @@ namespace AzhuPet
                     "payload 没有 model/ ⇒ 容忍（兼容旧版无模型包）",
                     "不兼容的话，已发出的旧版本永远更新不上来");
 
+                // 场景四之三：**WebView2Loader.dll**（2026-09-25 加）—— 浏览器通道的命门。
+                //   翻车现场：0.1.2 的 zip 与安装器都只装三个文件，把它漏了；而开发机上一直看不出来，
+                //   因为本机 PATH 上恰好有一份（Windows Performance Toolkit 自带的）——
+                //   把 PATH 收窄到 System32 立刻 DllNotFoundException（详见 WebTest.cs）。
+                //   口径与模型同源：带上就必须非空；**不带则容忍** —— 已发出的 0.1.0/0.1.1 包里没有它，
+                //   不兼容的话那批用户永远更新不上来，而「浏览器取数坏掉」的恰恰是他们要修的东西。
+                string loaderFile = Path.Combine(payload, "WebView2Loader.dll");
+                File.WriteAllText(loaderFile, "FAKE-NATIVE-DLL", new UTF8Encoding(false));
+                File.WriteAllText(flag, "{ \"version\": \"99.0.0\" }", new UTF8Encoding(false));
+                Check(Updater.PendingVersion() == "99.0.0",
+                    "payload 含非空 WebView2Loader.dll ⇒ 认得出待替换版本", "读到 " + (Updater.PendingVersion() ?? "(null)"));
+
+                File.WriteAllText(loaderFile, "", new UTF8Encoding(false));
+                Check(Updater.PendingVersion() == null,
+                    "⚠ payload 里 WebView2Loader.dll 为空 ⇒ 整包作废", "0 字节的原生 dll = 浏览器通道报错更难查");
+
+                File.Delete(loaderFile);
+                Check(Updater.PendingVersion() == "99.0.0",
+                    "payload 没有 WebView2Loader.dll ⇒ 容忍（兼容已发出的 0.1.0/0.1.1 包）",
+                    "不兼容的话，最需要被修好的那批老用户反而更新不上来");
+
                 // 场景五：没有 pending 标记 ⇒ 不替换
                 File.Delete(flag);
                 Check(Updater.PendingVersion() == null, "没有 pending 标记 ⇒ 不替换");
                 File.WriteAllText(flag, "{ \"version\": \"99.0.0\" }", new UTF8Encoding(false));
-
                 // 场景六：pending 标记在、payload 目录整个没了 ⇒ 不替换（不能崩）
                 string payloadBak = payload + ".bak";
                 Directory.Move(payload, payloadBak);
@@ -256,6 +276,18 @@ namespace AzhuPet
                 Check(!Directory.Exists(dstModelDir) || File.Exists(dstModel),
                     "替换演练：模型就位后内容可读",
                     File.Exists(dstModel) ? File.ReadAllText(dstModel) : "（没就位）");
+
+                // 场景七之三：加载器要落到 appDir **根目录**（与 exe 同级；它不在 model/ 下）
+                //   ⚠ 这一格单独演一次的理由：上面那些场景都证明「名单认得它」，
+                //   但漏发这一格时程序**不会报错**、只是浏览器通道在干净机器上崩 ——
+                //   所以「能不能真的落到 exe 旁边」值得有一条会红的判据。
+                string srcLoader = Path.Combine(payload, "WebView2Loader.dll");
+                if (!File.Exists(srcLoader)) File.WriteAllText(srcLoader, "NEW-DLL", new UTF8Encoding(false));
+                string dstLoader = Path.Combine(appDir, "WebView2Loader.dll");
+                bool lOk = true;
+                try { File.Move(srcLoader, dstLoader); } catch { lOk = false; }
+                Check(lOk && File.Exists(dstLoader),
+                    "替换演练：WebView2Loader.dll 能落到 appDir 根目录（exe 旁边）");
             }
             catch (Exception ex)
             {
