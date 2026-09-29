@@ -835,9 +835,10 @@ namespace AzhuPet
 
         /// <summary>找源码目录（含 Tray.cs 的那个）：exe 目录、工作目录，以及从这两处向上找含 pet.csproj 的目录。
         /// ⚠ 抽出来是为了让所有「读源码的接线判据」共用一份 —— 各写一份迟早漏改（本项目老毛病「同一份数据两个落点」）。
+        ///   `internal`（不是 private）：BalanceConfigTest 的凭据解析口径判据也读它，两边必须指同一个目录。
         /// ⚠⚠ 找不到时返回 null，**调用方必须报红**：扫描对象是空集时判据会恒绿，
         ///   这正是 2026-09-20 首版 `configApplyIsSingleEntry` 假绿的成因。</summary>
-        private static string FindSourceDir()
+        internal static string FindSourceDir()
         {
             var roots = new List<string>
             {

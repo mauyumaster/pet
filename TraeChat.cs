@@ -371,16 +371,15 @@ namespace AzhuPet
             string file = SecretPath();
             if (!File.Exists(file)) return (false, "找不到凭据文件：%LOCALAPPDATA%\\AzhuPet\\balance_secret.txt\n（余额源配置里勾选至少一个 Trae 来源后会自动生成。）");
 
-            // 从凭据文件解析请求头（第一行是 URL，其余是 headers —— 与 StatusProbe 同一格式）。
-            var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string raw in File.ReadAllLines(file))
-            {
-                string t = raw.Trim();
-                if (t.Length == 0 || t.StartsWith("---", StringComparison.Ordinal)) continue;
-                int c = raw.IndexOf(':');
-                if (c > 0 && raw.Substring(0, c).Trim() != "Host")
-                    headers[raw.Substring(0, c).Trim()] = raw.Substring(c + 1).Trim();
-            }
+            // 从凭据文件解析请求头。
+            // ⚠⚠ **同一份数据不允许有第二个解析口径** —— 走 CredentialCapture.HeadersFromSecretText，
+            //   它内部就是 ParseRawSecretText（与 StatusProbe.TraeBalanceAsync / 自定义余额源同一份实现），
+            //   只是顺手剔掉 Host（HTTP/1.1 的 Host 由 HttpClient 按 URL 自己生成，手写一个会和它打架）。
+            //   此前这里自己手写了一遍循环：所有 `---` 段标记被跳过 ⇒ 不认 ---body---，
+            //   于是 body 段的 JSON 被当成「一行请求头」混进 dictionary（键名非法，最终被
+            //   TryAddWithoutValidation 静默丢掉 —— 不报错，只是悄悄脏了一层）。
+            //   聊天这一发不用文件里的 URL / method / body（地址取 Endpoint 常量、body 自己造）。
+            var headers = CredentialCapture.HeadersFromSecretText(File.ReadAllText(file));
             if (!headers.ContainsKey("authorization")) return (false, "凭据文件缺少 authorization(JWT)，请重新登录 Trae 后刷新凭据。");
 
             // 对话主链路要求的 app 上下文头，余额接口的凭据里没有，这里补齐（smoke 实测必需）。

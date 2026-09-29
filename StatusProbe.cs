@@ -381,32 +381,41 @@ namespace AzhuPet
             return !string.IsNullOrEmpty(BalanceUrl) ? await CustomBalanceAsync() : await DeepSeekBalanceAsync();
         }
 
-        /// <summary>TRAE 余额：读凭据文件（URL + headers + body），POST 取 usage_summary.total_amount / consumed_amount。</summary>
+        /// <summary>从 Trae 凭据文本里拆出这一发要用的四要素（**纯函数**，可离线钉住）。
+        /// ⚠⚠ 必须与其它余额路径共用**同一个解析口径**（`CredentialCapture.ParseRawSecretText`）——
+        ///   见 TryWorkbuddyAsync 上方的纪律说明（「同一份数据不允许有第二个解析口径」）。
+        ///   这条路径此前自己手写了一遍行解析，两个后果：
+        ///   ① `if (t.StartsWith("---")) continue;` 把**所有**段落标记跳过 ⇒ 不认 ---method--- / ---body---；
+        ///   ② `string body = "";` 声明后从未赋值 ⇒ **请求体恒为空**，而这个文件里明明有 ---body--- 段。
+        ///   于是「Trae 积分取不到」至少有两种病因（凭据过期 / 请求体根本没发出去），而症状一模一样
+        ///   （都是 401 加一段 JSON）—— 换通道、补请求头都治不了其中任何一个，只有统一口径能把它们分开。
+        /// ⚠ method 段缺失时回落 POST，与 TryWorkbuddyAsync 那一处**逐字一致**（同样是「历史凭据里
+        ///   没有 method 段」的情形）：这不是替文件编一个事实，而是这一族接口历来的方法；
+        ///   文件里**写了** ---method--- 就以它为准。</summary>
+        internal static void BuildTraeRequest(string text,
+            out string url, out string method, out string body, out List<KeyValuePair<string, string>> headers)
+        {
+            string via, page;
+            headers = CredentialCapture.ParseRawSecretText(text, out url, out body, out method, out via, out page);
+            if (string.IsNullOrEmpty(url)) url = null;
+            if (body == null) body = "";
+            if (string.IsNullOrEmpty(method)) method = "POST";
+        }
+
+        /// <summary>TRAE 余额：读凭据文件（URL + headers + body），POST 取 usage_summary.total_amount / consumed_amount。
+        /// ⚠ 解析一律走 BuildTraeRequest（== CredentialCapture.ParseRawSecretText）—— 不许在这里再写一遍。</summary>
         private async Task<Action<StatusReport>> TraeBalanceAsync()
         {
             string file = TraeSecretPath();
             string err = null;
             try
             {
-                string url = null;
-                var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                string body = "";
-                foreach (string raw in File.ReadAllLines(file))
-                {
-                    string t = raw.Trim();
-                    if (t.StartsWith("---", StringComparison.Ordinal)) continue;
-                    if (url == null && t.Length > 0) { url = t; continue; }
-                    int c = raw.IndexOf(':');
-                    if (c > 0)
-                    {
-                        string k = raw.Substring(0, c).Trim();
-                        string v = raw.Substring(c + 1).Trim();
-                        headers[k] = v;
-                    }
-                }
+                string url, method, body;
+                List<KeyValuePair<string, string>> headers;
+                BuildTraeRequest(File.ReadAllText(file), out url, out method, out body, out headers);
                 if (string.IsNullOrEmpty(url)) return r => r.TraeError = "trae凭据无URL";
 
-                using (var req = new HttpRequestMessage(HttpMethod.Post, url))
+                using (var req = new HttpRequestMessage(new HttpMethod(method), url))
                 {
                     string contentType = "text/plain";
                     foreach (var kv in headers)
@@ -419,7 +428,11 @@ namespace AzhuPet
                         else req.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
                     }
                     // StringContent 会依据 Encoding.UTF8 自带头带 charset；mediaType 只传不含 charset 的部分，避免格式非法。
-                    req.Content = new StringContent(body, Encoding.UTF8, contentType);
+                    // ⚠ 只有非 GET / HEAD 才带请求体 —— method 现在可能来自文件里的 ---method--- 段（GET 带 body 是错的）。
+                    // ⚠ 这一格**没**跟着 TryWorkbuddyAsync 去清 CharSet：本次要验的只有「body 到底发没发出去」
+                    //   这一个变量，charset 那 15 字节留到下次单独量，免得两件事混在一次实验里。
+                    if (req.Method != HttpMethod.Get && req.Method != HttpMethod.Head)
+                        req.Content = new StringContent(body, Encoding.UTF8, contentType);
                     using (var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead))
                     {
                         string respBody = await resp.Content.ReadAsStringAsync();

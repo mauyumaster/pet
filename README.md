@@ -240,7 +240,13 @@ pet.exe --fstest         # 全屏判定 10 项
 pet.exe --personatest    # 人格注入 12 项
 pet.exe --eyetest        # 读屏口径 10 项
 pet.exe --calibertest    # 口径一致性 54 项（含三种响应结构：data.Packages / data.Accounts / data.Response.Data.Accounts）
-pet.exe --balanceconfigtest  # 凭据纯逻辑 142 项（含候选列表择优：同前缀多接口时该采纳哪一个）
+pet.exe --balanceconfigtest  # 凭据纯逻辑 152 项（含候选列表择优：同前缀多接口时该采纳哪一个）
+                         #   ⚠ 2026-09-30 加的 8 条盯「同一份凭据只有一个解析口径」：Trae 余额
+                         #     路径此前自己手写行解析 ⇒ 不认 ---body--- 、请求体恒空（症状与
+                         #     「凭据过期」一模一样，换通道治不了）⇒ 改为与其它余额路径共用
+                         #     CredentialCapture.ParseRawSecretText；聊天链路同理（剔 Host）。
+                         #     判据含 2 条**读源码**的：全项目只许 CredentialCapture.cs /
+                         #     BalanceSource.cs 两处出现段落解析，且两条 Trae 路径必须真的调它
 pet.exe --bubbletest     # 气泡渲染
 pet.exe --settingstest   # 设置面板版式 16 项（含 navBrandAboveList / noSiblingOverlap / textNotClipped）
                          #   ⚠ 三条「盯症状」的判据：左栏品牌区必须在栏目列表之**上**（正向关系，

@@ -469,6 +469,24 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
             return headers;
         }
 
+        /// <summary>从凭据文本里抽请求头，并**剔除 Host**（纯函数）。
+        /// 用途：那些「只要登录态、不要文件里的 URL/body」的调用方（Trae 的聊天链路就是）——
+        /// ⚠ Host 必须剔除：HTTP/1.1 的 Host 由 HttpClient 按 URL 自己生成，手写一个会和它打架。
+        /// ⚠⚠ 解析**只走** `ParseRawSecretText`（同一份数据不允许有第二个解析口径）：
+        ///   此前 TraeChat 自己手写了一遍循环，跳过所有 `---` 段标记 ⇒ 不认 ---body---，
+        ///   于是 body 段的 JSON 被当成「一行请求头」混进来（键名非法，最终被 TryAddWithoutValidation
+        ///   静默丢掉 —— 不报错，只是悄悄脏了一层）。</summary>
+        public static Dictionary<string, string> HeadersFromSecretText(string text)
+        {
+            var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in ParseRawSecretText(text, out _, out _, out _, out _, out _))
+            {
+                if (string.Equals(kv.Key, "Host", StringComparison.OrdinalIgnoreCase)) continue;
+                d[kv.Key] = kv.Value;
+            }
+            return d;
+        }
+
         /// <summary>没抄到、也没有旧文件时的兜底请求头（纯函数）。
         /// ⚠ 这是**退路，不是等价物**：origin 能精确算出来（就是 URL 的来源），
         ///   referer 只能猜成来源加一个斜杠，user-agent 之类根本给不了。

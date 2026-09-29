@@ -621,6 +621,143 @@ namespace AzhuPet
                 using (var doc = JsonDocument.Parse(reportJson))
                     Check(doc.RootElement.GetProperty("dynamic_balances")[0].GetProperty("name").GetString() == "随想余额",
                         "无头报告包含动态余额", ref pass, ref fail);
+
+                // ============ Trae 凭据：必须与其它余额路径共用**同一个解析口径**（2026-09-30）============
+                // 现场：TraeBalanceAsync 是唯一自己手写行解析的余额路径（TraeChat 是第二处），两处后果：
+                //   ① `if (t.StartsWith("---")) continue;` 跳过**所有**段标记 ⇒ 不认 ---method--- / ---body---；
+                //   ② `string body = "";` 声明后从未赋值 ⇒ **请求体恒为空**，而文件里明明有 ---body--- 段。
+                // 于是「Trae 积分取不到」有两种病因（凭据过期 / 请求体根本没发出去），症状却一模一样
+                //   （都是 401 加一段 JSON）—— 换通道、补请求头都治不了其中任何一个，只有统一口径能分开。
+                string traeCred = "https://api.trae.cn/x/usage\r\n"
+                    + "user-agent: UA\r\nx-medusa: sig\r\n"
+                    + "---\r\n---body---\r\n{\"a\":1}\r\n";
+                string tUrl, tMethod, tBody;
+                List<KeyValuePair<string, string>> tHeaders;
+                StatusProbe.BuildTraeRequest(traeCred, out tUrl, out tMethod, out tBody, out tHeaders);
+                Check(tUrl == "https://api.trae.cn/x/usage" && tBody == "{\"a\":1}",
+                    "Trae 凭据里的 ---body--- 段被认出来（此前那套手写解析把 body 行当成请求头、body 恒空）",
+                    ref pass, ref fail);
+                Check(tHeaders.Count == 2 && tHeaders.Any(h => h.Key == "x-medusa" && h.Value == "sig")
+                      && tHeaders.All(h => h.Key.IndexOf('{') < 0 && h.Key.IndexOf('}') < 0),
+                    "Trae 的请求头里不混进 body 那行 JSON（---body--- 段必须被识别，而不是被静默丢弃）",
+                    ref pass, ref fail);
+                Check(tMethod == "POST" && tHeaders.All(h => !h.Key.Equals("POST", StringComparison.OrdinalIgnoreCase)),
+                    "负对照：没有 ---method--- 段时回落 POST，且 method 段的值不被当成一行请求头",
+                    ref pass, ref fail);
+
+                string traeCredMethod = "https://api.trae.cn/x/usage\r\nx-medusa: sig\r\n"
+                    + "---method---\r\nGET\r\n---body---\r\n{}\r\n";
+                string mUrl, mMethod, mBody;
+                List<KeyValuePair<string, string>> mHeaders;
+                StatusProbe.BuildTraeRequest(traeCredMethod, out mUrl, out mMethod, out mBody, out mHeaders);
+                Check(mUrl == "https://api.trae.cn/x/usage" && mMethod == "GET" && mBody == "{}"
+                      && mHeaders.Count == 1 && mHeaders[0].Key == "x-medusa",
+                    "凭据里**写了** ---method--- 就以它为准（不写死 POST），且 method 段不吞掉后面的头",
+                    ref pass, ref fail);
+                string eUrl, eMethod, eBody;
+                List<KeyValuePair<string, string>> eHeaders;
+                StatusProbe.BuildTraeRequest("", out eUrl, out eMethod, out eBody, out eHeaders);
+                Check(eUrl == null && eBody == "" && eMethod == "POST" && eHeaders != null && eHeaders.Count == 0,
+                    "负对照：空凭据里读不出 URL（返回 null，调用方据此报「无 URL」），且 body / headers 都不是 null",
+                    ref pass, ref fail);
+
+                // 聊天链路（TraeChat）只要请求头 —— 也必须走同一个口径，且必须剔掉 Host。
+                string traeHdrCred = "https://api.trae.cn/x/usage\r\nauthorization: Bearer J\r\n"
+                    + "Host: api.trae.cn\r\n---\r\n---body---\r\n{\"a\":1}\r\n";
+                var hdr = CredentialCapture.HeadersFromSecretText(traeHdrCred);
+                Check(hdr.ContainsKey("authorization") && !hdr.ContainsKey("Host") && hdr.Count == 1,
+                    "从凭据文本抽请求头：登录态在、Host 被剔除、body 段那行 JSON 不混进来（聊天链路用）",
+                    ref pass, ref fail);
+                Check(CredentialCapture.HeadersFromSecretText("").Count == 0,
+                    "负对照：空凭据抽不出任何请求头（不抛、不造默认值）", ref pass, ref fail);
+
+                // ---- 读源码：段落解析全项目只许存在于两处权威口径，Trae 两条路径必须复用同一份 ----
+                // 为什么只能读源码：「有人又抄了一份手写解析」这件事，上面那些行为判据观察不到 ——
+                //   BuildTraeRequest 自己是对的，但没人调它、别处又抄一份，行为判据照样全绿。
+                {
+                    string srcDir = SpeakTest.FindSourceDir();
+                    var offenders = new List<string>();
+                    var scanned = new List<string>();
+                    if (srcDir != null)
+                    {
+                        // 这两份文件**就是**该格式的定义，允许出现段落解析（其余文件一律不许）。
+                        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                            { "CredentialCapture.cs", "BalanceSource.cs" };
+                        foreach (string path in Directory.GetFiles(srcDir, "*.cs"))
+                        {
+                            string name = Path.GetFileName(path);
+                            scanned.Add(name);
+                            if (authoritative.Contains(name)) continue;
+                            // 测试文件跳过：判据自身要**构造**这种文本（含 `StartsWith("---"` 这个字样）喂给
+                            // 被测函数 —— 那不是第二个口径。这条判据扫的是**生产路径**。
+                            if (name.EndsWith("Test.cs", StringComparison.Ordinal)) continue;
+                            foreach (string line in File.ReadAllText(path).Split('\n'))
+                            {
+                                string s = line.Trim();
+                                if (s.StartsWith("//", StringComparison.Ordinal)) continue;   // 注释里提到不算
+                                if (s.IndexOf("StartsWith(\"---\"", StringComparison.Ordinal) >= 0)
+                                { offenders.Add(name); break; }
+                            }
+                        }
+                    }
+                    Check(offenders.Count == 0 && scanned.Contains("CredentialCapture.cs") && scanned.Contains("BalanceSource.cs"),
+                        srcDir == null ? "找不到源码目录 —— 这条判据扫不到文件就没资格通过"
+                        : !scanned.Contains("CredentialCapture.cs") ? "扫描没覆盖到源码（连 CredentialCapture.cs 都没扫到）"
+                        : offenders.Count == 0 ? "全项目 " + scanned.Count + " 个 .cs：段落解析只在两处权威口径里"
+                        : "又有地方手写解析这段凭据文本（同一份数据第二个口径）：" + string.Join("、", offenders),
+                        ref pass, ref fail);
+
+                    // 反向的那一半：Trae 的余额路径必须**真的**调它 —— 否则上一条只证明「项目里有个没人用的函数」。
+                    bool traeCalls = false;
+                    string spPath = srcDir == null ? null : Path.Combine(srcDir, "StatusProbe.cs");
+                    if (spPath != null && File.Exists(spPath))
+                    {
+                        string[] sp = File.ReadAllText(spPath).Split('\n');
+                        int from = -1;
+                        for (int i = 0; i < sp.Length; i++)
+                            if (sp[i].IndexOf("private", StringComparison.Ordinal) >= 0
+                                && sp[i].IndexOf("TraeBalanceAsync()", StringComparison.Ordinal) >= 0) { from = i; break; }
+                        // ⚠ 必须限定在 anchor 之后的**有限行数**内：不限定的话，删掉方法体里那句，
+                        //   搜索会一路滑到 BuildTraeRequest 的定义处，判定「还在调」。
+                        // 取 30 行是为了容下那段说明注释（注释行会被跳过，但会占窗口）。
+                        if (from >= 0)
+                            for (int i = from; i < Math.Min(sp.Length, from + 30); i++)
+                            {
+                                string s = sp[i].Trim();
+                                if (s.StartsWith("//", StringComparison.Ordinal)) continue;
+                                if (s.IndexOf("BuildTraeRequest", StringComparison.Ordinal) >= 0) { traeCalls = true; break; }
+                            }
+                    }
+                    Check(traeCalls,
+                        spPath == null ? "读不到 StatusProbe.cs —— 这条判据扫不到文件就没资格通过"
+                        : traeCalls ? "TraeBalanceAsync 走 BuildTraeRequest（与其它余额路径共用同一份解析）"
+                        : "TraeBalanceAsync 里找不到对 BuildTraeRequest 的调用（解析被抄回去了？）",
+                        ref pass, ref fail);
+
+                    // 同理钉住聊天链路：它那处手写解析也必须改用共用口径 —— 别只清掉眼前这一处。
+                    bool chatCalls = false;
+                    string tcPath = srcDir == null ? null : Path.Combine(srcDir, "TraeChat.cs");
+                    if (tcPath != null && File.Exists(tcPath))
+                    {
+                        string[] tc = File.ReadAllText(tcPath).Split('\n');
+                        int from = -1;
+                        for (int i = 0; i < tc.Length; i++)
+                            if (tc[i].IndexOf("ChatAsync(IReadOnlyList<object> messages", StringComparison.Ordinal) >= 0)
+                            { from = i; break; }
+                        if (from >= 0)
+                            for (int i = from; i < Math.Min(tc.Length, from + 60); i++)
+                            {
+                                string s = tc[i].Trim();
+                                if (s.StartsWith("//", StringComparison.Ordinal)) continue;
+                                if (s.IndexOf("HeadersFromSecretText", StringComparison.Ordinal) >= 0) { chatCalls = true; break; }
+                            }
+                    }
+                    Check(chatCalls,
+                        tcPath == null ? "读不到 TraeChat.cs —— 这条判据扫不到文件就没资格通过"
+                        : chatCalls ? "TraeChat.ChatAsync 走 HeadersFromSecretText（聊天链路与余额链路同一份解析）"
+                        : "TraeChat.ChatAsync 里找不到对 HeadersFromSecretText 的调用（它那处手写解析又回来了？）",
+                        ref pass, ref fail);
+                }
             }
             catch (Exception ex)
             {
