@@ -41,14 +41,23 @@ namespace AzhuPet
         public const double Exit = 0.62;  // 淡出动画时长
 
         private readonly List<BubbleItem> _items = new List<BubbleItem>();
+        private Border _headerCard;        // 常驻读数行（见 Header）—— 不参与「定格→淡出」的生命周期
+        private TextBlock _headerText;
+        private string _header;
+        private double _lastNow;           // 上一帧的时间轴位置：Header 变化时要能立刻重排
 
         public double TotalWidth, TotalHeight;
         public event Action Changed;   // 有气泡波及 / 变空时触发，供窗口显示与重定位
 
-        public bool AnyLive
+        /// <summary>普通气泡里还有活的吗（**不含**常驻读数行）。
+        /// ⚠ 与 <see cref="AnyLive"/> 分开是给「表达仲裁」用的：常驻读数行不该把她的嘴一直堵着
+        ///   —— 见 PetWindow.OnFeedChanged 里那句 Clear()。</summary>
+        public bool AnyLiveItem
         {
             get { for (int i = 0; i < _items.Count; i++) if (!_items[i].Done) return true; return false; }
         }
+
+        public bool AnyLive { get { return _headerCard != null || AnyLiveItem; } }
 
         /// <summary>最近出生的一条的实际文本（她是气泡流的"当前内容"，给 BubbleVisible 判据用）。</summary>
         public string LastText
@@ -58,7 +67,46 @@ namespace AzhuPet
 
         public void Push(FeedKind kind, string text, double holdSec = 3.2, double delaySec = 0, double now = 0)
         {
-            var t = new TextBlock
+            TextBlock t;
+            var card = MakeCard(kind, text, true, out t);
+            Children.Add(card);
+            _items.Add(new BubbleItem { Card = card, Text = t, StartT = now + delaySec, HoldSec = holdSec });
+            MarkChanged();
+            // 立刻量一次并显窗：即使渲染循环没跑，测试/托盘触发后窗口也要当场可见
+            Step(now, 0.016);
+        }
+
+        /// <summary>常驻读数行：气泡流**最顶上**的那一格，直到被置回 null。
+        /// 与普通气泡的区别：它不参与「定格→淡出」的生命周期 —— 普通气泡的 holdSec 到点就走，
+        /// 装不下「一直跳动的秒数」这种东西（TRAE 任务计时就是这么用它）。
+        /// ⚠ 它**不进 `_items`**：进了的话 `LastText`（BubbleVisible 判据的口径）会被它顶掉。</summary>
+        public string Header
+        {
+            get { return _header; }
+            set
+            {
+                if (_header == value) return;
+                _header = value;
+                if (value == null)
+                {
+                    if (_headerCard != null) { Children.Remove(_headerCard); _headerCard = null; _headerText = null; }
+                }
+                else if (_headerCard == null)
+                {
+                    _headerCard = MakeCard(FeedKind.Status, value, false, out _headerText);
+                    Children.Add(_headerCard);
+                }
+                else _headerText.Text = value;
+                MarkChanged();
+                Step(_lastNow, 0.016);      // 立刻量一次并显窗（同 Push 的理由）
+            }
+        }
+
+        /// <summary>造一张气泡卡片。<paramref name="entering"/>=true 时带「浮现」初值
+        /// （透明 + 0.9 缩放），交给动画接手；false 时直接是定格态（常驻读数行用）。</summary>
+        private Border MakeCard(FeedKind kind, string text, bool entering, out TextBlock t)
+        {
+            t = new TextBlock
             {
                 Text = text,
                 TextWrapping = TextWrapping.Wrap,
@@ -67,7 +115,7 @@ namespace AzhuPet
                 LineHeight = 15,
                 Foreground = new SolidColorBrush(Fg(kind)),
             };
-            var card = new Border
+            return new Border
             {
                 Background = new SolidColorBrush(Bg(kind)),
                 BorderBrush = new SolidColorBrush(Edge(kind)),
@@ -81,23 +129,33 @@ namespace AzhuPet
                     BlurRadius = 10, ShadowDepth = 1.5, Direction = 270,
                     Opacity = 0.34, Color = Shadow(kind),
                 },
-                Opacity = 0,
+                Opacity = entering ? 0 : 1,
                 RenderTransformOrigin = new Point(0.5, 1),
-                RenderTransform = new ScaleTransform(0.9, 0.9),
+                RenderTransform = entering ? new ScaleTransform(0.9, 0.9) : new ScaleTransform(1, 1),
             };
-            Children.Add(card);
-            _items.Add(new BubbleItem { Card = card, Text = t, StartT = now + delaySec, HoldSec = holdSec });
-            MarkChanged();
-            // 立刻量一次并显窗：即使渲染循环没跑，测试/托盘触发后窗口也要当场可见
-            Step(now, 0.016);
         }
 
         /// <summary>推进所有气泡并重排。由宿主（桌宠渲染循环）每帧调用。</summary>
         public void Step(double now, double dt)
         {
+            _lastNow = now;
             if (dt <= 0) dt = 0.016;
             for (int i = 0; i < _items.Count; i++) UpdateOne(_items[i], now, dt);
             double w = 0, hTotal = 0;
+
+            // 常驻读数行固定在最顶（它没有生命周期，位置也就不动）—— 先量它，普通气泡顺次往下排
+            double headerH = 0;
+            if (_headerCard != null)
+            {
+                _headerCard.Measure(new Size(MaxW, double.PositiveInfinity));
+                headerH = Math.Max(1, Math.Round(_headerCard.DesiredSize.Height));
+                double hw = Math.Max(1, Math.Round(_headerCard.DesiredSize.Width));
+                if (hw > w) w = hw;
+                Canvas.SetLeft(_headerCard, 0);
+                Canvas.SetTop(_headerCard, 0);
+                hTotal += headerH + Gap;
+            }
+
             for (int i = 0; i < _items.Count; i++)
             {
                 var it = _items[i];
@@ -112,7 +170,7 @@ namespace AzhuPet
             TotalHeight = Math.Max(1, hTotal - Gap);
 
             // 布局（顶锚定）：最旧在顶，新的在底；顶部条目淡出后下方的顶上来自动补位
-            double y = 0;
+            double y = headerH > 0 ? headerH + Gap : 0;
             for (int i = 0; i < _items.Count; i++)
             {
                 var it = _items[i];

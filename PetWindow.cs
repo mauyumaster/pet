@@ -57,13 +57,30 @@ namespace AzhuPet
         public int DownCount, MoveCount, UpCount;
         public int DownRejectedHit, DownRejectedLock;
         public int SpinFlipCount;       // 拖拽途中「跨半屏换向」发生了几次（诊断 + 端到端判据读它）
+        /// <summary>「握住 → 拎起」的跃迁发生了几次（2026-09-27 新增，给 --lifttest 读）。
+        /// ⚠ 语义是「跨过 LiftThresholdPx 那一刻」，**不是在按住期间持续为真** ——
+        ///   所以「按住不动」跑 3 秒它应该恒为 0，而「真的拖起来」应该恰好为 1。</summary>
+        public int LiftCount;
+        /// <summary>诊断用：非空时把每次 OnMove 的「拎起判定」明细记进来（`--lifttest` 用）。</summary>
+        public System.Collections.Generic.List<string> LiftTrace;
         public bool Dragging { get { return _dragging; } }
+        /// <summary>是否已「拎起来」（供端到端判据读）。见 `_lifted` 的三段注释。</summary>
+        public bool Lifted { get { return _lifted; } }
 
         // ---- 测试可读：气泡几何（**物理像素**，与截图坐标系一致）----
         public bool BubbleVisible
         {
             get { return _bubbleWin != null && _bubbleWin.Visibility == Visibility.Visible; }
         }
+
+        /// <summary>气泡流顶上那条**常驻读数**（多 agent 计时）此刻的文本；没有则为 null。
+        /// ⚠ 与 <see cref="BubbleText"/> 分开：后者是**最新出生的一条普通气泡**（`LastText`），
+        ///   常驻读数刻意不进 `_items`，所以从 `BubbleText` 里**看不到它**。
+        ///   判「读数会不会丢」必须读这一个 —— 读 `BubbleText` 会把「她刚说的一句话」当成读数。
+        /// ⚠ 同时给出**两个落点**：`_agentTimer.Header`（来源）与 `_feed.Header`（落进流里的那一份）。
+        ///   两者不一致就说明丢失发生在「传过去」这一步，而不是「算出来」那一步。</summary>
+        public string HeaderText { get { return _feed == null ? null : _feed.Header; } }
+        public string TimerHeaderText { get { return _agentTimer == null ? null : _agentTimer.Header; } }
 
         /// <summary>气泡流当前"最新的那一条"在说什么。给 --speakvis 判据用（判「她的话」而不是「状态文案」）。</summary>
         public string BubbleText { get { return _feed == null ? null : _feed.LastText; } }
@@ -146,14 +163,53 @@ namespace AzhuPet
         public bool TopmostSuspended { get { return TopmostGuard.IsSuspended(_topmostHold); } }
 
         private const double Fps = 60;   // 合成渲染上限（桌宠常驻：帧率越高越费电，按需取舍）
+        /// <summary>负对照开关（`--old-frame-gate`）：让主循环回到旧的限帧写法。
+        /// 见 `OnRender` 里那段注释 —— 它存在的唯一目的是让 `motion.frame_dt_jitter` 能变红。</summary>
+        public static bool MotionTest_OldGate;
+        /// <summary>负对照开关（`--old-lift-gate`）：让 `SlowTick` 的拖拽判定回到**上一版**写法
+        /// （`if (_dragging)` 而不是 `if (_lifted)`）。
+        /// ⚠ 为什么必须是**实例**字段而不是 static：`--lifttest` 要在**同一个进程**里
+        ///   跑「关掉」和「打开」两遍（A 组对照组），static 会让第二遍污染第一遍。
+        /// ⚠ 它存在的唯一目的：让 `--lifttest` 的 A 组（按住不动不该转）**能变红** ——
+        ///   上一版那行会把 `OnDown` 刚设的 `Pose.Dragging = false` 覆盖回 true，
+        ///   于是「改了 OnDown 却没改 SlowTick」这个半成品，看起来是全绿的。</summary>
+        public bool OldLiftGate;
+        /// <summary>负对照开关（`--no-lift-clear`）：让 `OnUp` **跳过**清 `_lifted` 那一行，
+        /// 回到「松手后 `_lifted` 残留 true」的上一版行为。
+        /// ⚠ 它存在的唯一目的：让 `--lifttest` 的 **D 组**（松手落地后必须停转）**能变红** ——
+        ///   这是用户 2026-09-27 报的第二个 bug（拎起转圈松手、落地不停转）的判别性对照。
+        ///   正式路径上绝不开。</summary>
+        public bool NoLiftClear;
+        /// <summary>最近一帧真正交给动画（`Pose.Step` / `StepMotion`）的 `dt`，秒。
+        /// ⚠ 存在的理由：`--motiontest` 要判「动画步长是否恒定」，而这个值原本只是 `OnRender`
+        ///   里的局部变量，外部看不见。判据不能靠「采样相邻两帧的时间差」去反推 ——
+        ///   那量到的是**采样节拍**，不是 `dt`（第一版就是这么误报的）。</summary>
+        public double LastAnimDt { get; private set; }
         private const double Gravity = 2600;      // 物理像素/秒²
         private const double Restitution = 0.42;
 
         private DispatcherTimer _slow;
         private readonly Stopwatch _clock = Stopwatch.StartNew();
         private double _lastT;
+        /// <summary>限帧累加器（秒）。见 `OnRender` 里那段注释：不能用「不达标就 return 且不更新
+        /// `_lastT`」的写法 —— 那会把合成器多出来的那些拍的时间**丢掉**，让 `dt` 变成抖动的。 </summary>
+        private double _fpsAccum;
 
         private bool _dragging;
+        /// <summary>「已经**拎起来**了」—— 与 `_dragging`（已按住）不是一回事。
+        ///
+        /// ⚠⚠ 为什么要分开（2026-09-27 用户报）：按下鼠标即 `Pose.Dragging = true` 并给
+        ///   `SpinAccel` ⇒ **按住不动她也会自转**（按得久一点就转圈，很怪）。
+        ///   用户的要求：「仅有当桌宠被拎起来时才触发转圈，站在地上时只跳跃」。
+        ///   ⇒ 按住 = 只是**握住**（准备拖），指针真的移动超过 `LiftThresholdPx` 才算**拎起**，
+        ///     那一瞬间才锁方向、才给角加速度。
+        ///   ⚠ 方向仍在**拎起那一刻**锁定（不是按下那一刻）—— 用户拖她走一段再拎高时，
+        ///     方向该按「她此刻所在的半屏」算，不该按最早按下的位置算。
+        private bool _lifted;
+        /// <summary>判定「拎起来了」的累计位移阈值（物理像素）。
+        /// ⚠ 取值要同时满足：① 大于手抖（按住时指针一般抖 1~3 px）；② 小于「明显在拖」的量。
+        ///   8 px 在 100%~200% 缩放下都不到一个字符宽，既能滤掉抖动又不迟钝。</summary>
+        private const double LiftThresholdPx = 8.0;
         private Native.POINT _dragOrigin;
         private double _dragLeft0, _dragTop0, _lastX, _lastY, _lastMoveT;
         private double _vx, _vy;
@@ -169,6 +225,7 @@ namespace AzhuPet
         private Grid _bubbleHost;                                   // 窗口内容：只放渲染宿主（气泡已移出窗口，见 BuildBubble）
         private Window _bubbleWin;                                  // 气泡 = **独立浮窗**（窗口内没有不遮住模型的位置）
         private BubbleFeed _feed;                                   // 气泡流（多气泡同屏，见 BubbleFeed.cs）
+        private AgentTaskTimer _agentTimer;                         // 多 agent 任务计时：tail TRAE / WorkBuddy / Codex 的日志（见 AgentTaskTimer.cs）
         private bool _doubleTap;                                    // 本次左键按下是双击 → 弹气泡而非拖拽
         private long _lastDownT = long.MinValue;                    // 手动双击识别：上次按下毫秒时间戳
         private System.Windows.Point _lastDownP;                    // 手动双击识别：上次按下位置
@@ -195,6 +252,7 @@ namespace AzhuPet
             _bubbleHost.Children.Add(r.Host);
             Content = _bubbleHost;
             _bubbleWin = BuildBubble();
+            _agentTimer = new AgentTaskTimer();
             // 宠物一动就重新摆气泡（拖拽 / 抛物 / 换挡 / 贴边都覆盖，不用各处手动调）
             LocationChanged += (s2, e2) => UpdateBubblePos();
             Pose.DozeAfter = 45;
@@ -317,11 +375,73 @@ namespace AzhuPet
                     + "Hz hidden=" + (_hidden ? 1 : 0));
                 _bucketT = t; _bCalls = GateCalls; _bFrames = RenderedFrames;
             }
+            // ⚠⚠ 限帧必须用**累加器**，不能「不达标就 return」——
+            //   2026-09-26 量到的真实故障就是这么来的（用户报「不做任何操作她也会高频上下跳」）：
+            //     · 合成器以 ~93 Hz 打事件（0.01075 s 一拍），而门槛是 1/60 − 0.0015 = 0.01517 s；
+            //     · 「不达标就 return 且**不更新 `_lastT`**」⇒ 那一拍的 0.01075 s 被**丢掉**，
+            //       下一拍累加到 0.0215 s 才通过 ⇒ 有效帧率变成 comp/2，
+            //       相邻两帧的 `dt` 在 0.01075 / 0.0215 之间**交替**（采样上看是 0.0025~0.0317）。
+            //     · `_t += dt` 于是被不规则推进 ⇒ 周期 3.4 s 的呼吸被采样成「一顿一顿」；
+            //       `comp` 随系统负载漂移时这个拍频也跟着变 —— 正是用户说的「逐渐变慢」。
+            //   口径修正：`_accum` 每拍都累加、`_lastT` **每拍都推进**，
+            //   只有累加到 ≥ 门槛才渲染一帧，并把**真实经过的时间**作为 `dt` 交下去。
+            //   ⇒ 帧率仍然被限住（省电的初衷不变），但 `dt` 是诚实的、单调均匀的。
+            // ⚠⚠ 限帧的正确口径：**用固定步长推进，不要用墙上时钟的差值。**            //
+            //   2026-09-26 量到的真实故障（用户报「不做任何操作她也会高频上下跳，逐渐变慢直到停」）：
+            //     · 合成器以 **88~100 Hz 持续漂移** 打事件（实测 RateLog，不是稳定的 93），
+            //       而门槛是 1/60 − 0.0015 = 0.01517 s；
+            //     · 于是「几拍渲染一帧」这件事本身就在 2 拍与 3 拍之间**不规则跳动**
+            //       （一拍 0.0100~0.0114 s 的漂移 + JIT/GC 造成的个别长拍）；
+            //     · 若把**真实经过时间**交给 `dt`，`dt` 就会在 0.020 / 0.022 / 0.034 之间乱跳，
+            //       而 `_t += dt` 是按 `dt` 推进呼吸相位的 ⇒ 周期 3.4 s 的呼吸被**不均匀采样**，
+            //       屏幕上正是「一顿一顿地上下跳」；`comp` 漂移时这个拍频跟着变 ⇒「逐渐变慢」。
+            //   ⇒ 修法：限帧判据用**累加的**真实时间（省电的初衷不变），而交给动画的 `dt`
+            //     取「这一帧真实攒够的时间」。
+            //
+            // ⚠⚠ 2026-09-26 第二轮修正（用户：「现在的跳跃有点太慢了」）：
+            //   上一版把 `dt` 固定成 `1/Fps`，本意是「让推进完全均匀」，但**漏算了一件事**：
+            //   合成器只有 88~100 Hz、限帧门槛是 1/60 ⇒ 实际渲染只有 **约 44 帧/秒**，
+            //   于是推进速率 = 44 × (1/60) = **0.79×**，**所有动画一律慢 27%**。
+            //   呼吸那种 3.4 秒的慢动作看不出来，但**点击跳跃是即时反馈** ——
+            //   `JumpT=0.44 s` 实际跑成 **0.57 s**，用户立刻就能觉出「太慢、轻飘飘」。
+            //   ⇒ 固定步长与「真实时间」之间，**必须选真实时间**：
+            //     视觉动画宁可单帧步长有一点抖动，也不能让**整个时间尺度**偏掉 27%
+            //     （抛物物理的 `Gravity=2600` 这些常量也是按真实秒定的，慢 27% 会让手感整体变「飘」）。
+            //   ⚠ 但**不能**退回到「`dt` 取瞬间差值」——那正是第一轮那个 bug。
+            //     正确的 `dt` 是**累加器**的值（这一帧真实攒够的时间），累加器随即**清零**：
+            //       · 合成器 88 Hz ⇒ 每拍 0.0114 s，门槛 0.01517 ⇒ 攒 2 拍（0.0227）才渲染一帧；
+            //       · 渲染率因此是 88/2 = 44 Hz，而 `Σ(44 × 0.0227) = 1.00 × 真实时间` ⇒ **速率严格 1.0×**；
+            //       · 单帧 `dt` 稳定在「≥门槛的最小真实拍数」上（多数 2 拍、偶 3 拍），不再乱跳。
+            //   ⚠⚠ **累加器必须清零，不能「只减去一个 frameBudget 把余量留下」** ——
+            //     我一度那样写过，实测 `anim_rate = 1.592×`（动画快了 59%，跳跃 0.44 s 跑成 0.28 s）：
+            //     因为 `dt` 取的是**整个累加值**，而余量又被留下，于是同一段时间被**算了两次**。
+            //     清零时「每帧的真实时耗」与「被计入 dt 的时间」一一对应，才是恒等 1.0×。
             double dt = t - _lastT;
-            if (dt < 1.0 / Fps - 0.0015) return;         // 桌宠常驻，主动限帧省电
-            GatePass++;
-            _lastT = t;
-            if (dt > 0.5) dt = 1.0 / Fps;                // 系统卡顿/休眠恢复时别积分一大步
+            if (MotionTest_OldGate)
+            {
+                // 负对照（`--old-frame-gate`）：回到**上一版**的写法 —— 累加器判门槛，但 `dt` 固定。
+                //   ⚠ 它复现的是「动画整体慢 27%」那个缺陷：合成器只有约 88 拍/秒 ⇒ 攒 2 拍才渲染
+                //     ⇒ 实际只有约 44 帧/秒，而 `dt` 被钉死在 1/60 ⇒ 推进速率 = 44×(1/60) = **0.79×**，
+                //     跳跃 0.44 s 实跑 0.57 s。`motion.anim_rate` 就是冲着它去的。
+                _lastT = t;
+                _fpsAccum += dt;
+                if (_fpsAccum < 1.0 / Fps - 0.0015) return;
+                GatePass++;
+                _fpsAccum = 0;
+                dt = 1.0 / Fps;
+            }
+            else
+            {
+                _lastT = t;                                  // ★ 每拍都推进：时间是**不丢**的
+                _fpsAccum += dt;
+                double frameBudget = 1.0 / Fps;
+                if (_fpsAccum < frameBudget - 0.0015) return; // 桌宠常驻，主动限帧省电
+                GatePass++;
+                dt = _fpsAccum;                              // ★ 用真实攒够的时间
+                _fpsAccum = 0;                               // ★ **清零**（绝不是结转，见下）
+                if (dt > 0.5) dt = frameBudget;              // 休眠唤醒/长卡顿：别一步积分到头
+            }
+            LastAnimDt = dt;                                 // 给 --motiontest 判「步长是否准」
 
             // ⚠ 淡入淡出必须在「隐藏」判断**之前**跑：否则一旦隐退就再也不会恢复
             //   （本机实测踩到：全屏窗口关掉后阿助永远不回来了）。这是隐退功能的命门。
@@ -391,17 +511,13 @@ namespace AzhuPet
             if (!R.HitTest(e.GetPosition(this))) { DownRejectedHit++; return; }
             _dragging = true;
             _airborne = false;
-            Pose.Dragging = true; Pose.Airborne = false; Pose.SpinDrive = 0;   // 新一次拖拽从停转开始
-            // 拎起旋转：**就在这一刻锁定方向** —— 左半屏从右往左转，右半屏从左往右转（见 Pose.SpinDirFor）。
-            // ⚠ 三条口径要求：
-            //   ① 判据取「窗口**中心**」而不是光标位置 —— 她转到哪边只跟她在哪有关，
-            //      跟鼠标按在她身上哪一点无关（按左脚和按右肩不该转成两个方向）；
-            //   ② 用 `WorkArea()` 而**不是** `SystemParameters.WorkArea`（后者恒为**主**显示器）
-            //      ⇒ 多显示器下，副屏上的她仍按**副屏**的左右半边判方向；
-            //   ③ 单位对齐：Left/ActualWidth 是 DIP，×DipScale 才是物理像素，而 wa 是物理像素。
-            var waDown = WorkArea();
-            _spinDir = PoseEngine.SpinDirFor((Left + ActualWidth / 2) * DipScale, waDown.Left, waDown.Right);
-            Pose.SpinAccel = _spinDir * Pose.SpinAccelMag;   // 引擎侧再 clamp 到 ±SpinMaxVel
+            _lifted = false;                                  // ★ 只是「握住」，还没拎起来
+            // ⚠⚠ 按下时**不给** `Pose.Dragging` / `Pose.SpinAccel` —— 那是「已经在转了」的意思。
+            //   从前这里直接给，于是**按住不动她就开始自转**（2026-09-27 用户报：按久一点就转圈）。
+            //   现在：握住 ⇒ 什么都不做；真的移动超过阈值（见 OnMove）才拎起、才转。
+            //   ⚠ 「点一下」那条路（松手时位移 < 4 px）也靠这个：全程 `Pose.Dragging` 都是 false，
+            //     不会有任何一帧的自转被漏出去 —— 从前得在 OnUp 里补一句清 `SpinAccel` 来擦屁股。
+            Pose.Dragging = false; Pose.Airborne = false; Pose.SpinDrive = 0; Pose.SpinAccel = 0;
             _vx = _vy = 0;
             Native.GetCursorPos(out _dragOrigin);
             _dragLeft0 = Left * DipScale;
@@ -422,6 +538,43 @@ namespace AzhuPet
             double ny = _dragTop0 + (c.Y - _dragOrigin.Y);
             double now = _clock.Elapsed.TotalSeconds;
             double dt = now - _lastMoveT;
+
+            // ---- 「拎起来」的判定（2026-09-27 新增）----
+            // ⚠⚠ 这是「按住不动不该转圈」那条需求的**全部实现**：位移累计超过阈值
+            //   （`LiftThresholdPx`，物理像素）之前，她只是被「握住」；超过之后才算**拎起**，
+            //   在**这一刻**锁方向、给角加速度。
+            // ⚠ 判据用「相对**按下点**的位移」而不是「相对上一帧的增量」：
+            //   前者对「慢慢蹭过去」也成立（每帧只动 1px，累计起来照样算拎起），
+            //   后者会被 `dt > 0.004` 那个采样门槛和手抖抵消掉，表现为「拖了半天她还不转」。
+            // ⚠ 位置：必须在**写 `Left/Top` 之前**判 —— 方向要按「她**此刻**所在的半屏」算。
+            if (!_lifted)
+            {
+                double moved = Math.Abs(nx - _dragLeft0) + Math.Abs(ny - _dragTop0);
+                if (LiftTrace != null)
+                    LiftTrace.Add("OnMove moved=" + moved.ToString("0.##")
+                        + " dCursor=(" + (c.X - _dragOrigin.X) + "," + (c.Y - _dragOrigin.Y) + ")"
+                        + " dragOrigin=(" + _dragOrigin.X + "," + _dragOrigin.Y + ")"
+                        + " cursor=(" + c.X + "," + c.Y + ")"
+                        + " nx=" + nx.ToString("0.#") + " dragLeft0=" + _dragLeft0.ToString("0.#"));
+                if (moved >= LiftThresholdPx)
+                {
+                    _lifted = true;
+                    Pose.Dragging = true; Pose.Airborne = false; Pose.SpinDrive = 0;
+                    // 拎起旋转：**在拎起这一刻锁定方向** —— 左半屏从右往左转，右半屏从左往右转。
+                    // ⚠ 三条口径要求（原在 OnDown，随判定时机一起搬过来）：
+                    //   ① 判据取「窗口**中心**」而不是光标位置 —— 她转到哪边只跟她在哪有关，
+                    //      跟鼠标按在她身上哪一点无关（按左脚和按右肩不该转成两个方向）；
+                    //   ② 用 `WorkArea()` 而**不是** `SystemParameters.WorkArea`（后者恒为**主**显示器）
+                    //      ⇒ 多显示器下，副屏上的她仍按**副屏**的左右半边判方向；
+                    //   ③ 单位对齐：Left/ActualWidth 是 DIP，×DipScale 才是物理像素，wa 是物理像素。
+                    var waLift = WorkArea();
+                    _spinDir = PoseEngine.SpinDirFor(
+                        (Left + ActualWidth / 2) * DipScale, waLift.Left, waLift.Right);
+                    Pose.SpinAccel = _spinDir * Pose.SpinAccelMag;   // 引擎侧再 clamp 到 ±SpinMaxVel
+                    LiftCount++;
+                }
+            }
+
             if (dt > 0.004)
             {
                 double ivx = (nx - _lastX) / dt, ivy = (ny - _lastY) / dt;
@@ -462,6 +615,16 @@ namespace AzhuPet
             if (_doubleTap) { _doubleTap = false; ShowBubble(); e.Handled = true; return; }   // 双击 → 状态气泡
             if (!_dragging) return;
             _dragging = false;
+            // ⚠⚠ 必须同时清 `_lifted`（2026-09-27 用户报：拎起转圈松手、落地后**不停转**）。
+            //   病因是一条**跨线程的时序竞态**：`SlowTick`（120 ms 一拍）按 `_lifted` 写 `Pose.Dragging`，
+            //   而这里从前只清了 `_dragging`。于是松手后 `_lifted` 仍是 true ⇒ 下一拍（≤120 ms 后）
+            //   把 `Pose.Dragging` 又写回 **true** ⇒ `Pose.Step` 落回 **Dragging 分支**（那个分支
+            //   **故意不衰减**，靠 SpinMaxVel 兜）。可 `SpinAccel` 已在下面被清成 0，加速度为零的
+            //   Dragging 分支 = 角速度**原值恒定保持** ⇒ 她就以松手那一刻的满速永远转下去。
+            //   ⇒ 「松手后角速度逐渐减小」的 Airborne 衰减分支**根本没被走到**，症状与用户描述完全一致。
+            //   ⚠ 清它在 `dist` 判定**之前**：点击（<4 px）与抛掷（≥4 px）两条路都不该带着「拎起」状态走。
+            //   ⚠ `NoLiftClear`（`--no-lift-clear`）是负对照：跳过这一行，好让 `--lifttest` 的 D 组能红。
+            if (!NoLiftClear) _lifted = false;
             ReleaseMouseCapture();
             Cursor = null;
             double dist = Math.Abs(Left * DipScale - _dragLeft0) + Math.Abs(Top * DipScale - _dragTop0);
@@ -529,6 +692,10 @@ namespace AzhuPet
         private void OnFeedChanged()
         {
             if (_feed == null) return;
+            // ⚠ 释放表达占用只看**普通气泡**：常驻读数行（TRAE 计时）会在任务期间一直在场，
+            //   若把它也算进「还有气泡」，`Clear()` 就永远不来 —— 她会整整一个任务说不出话，
+            //   而现象只是「她今天很安静」（同型教训：功能可用性寄生在另一个条件的副作用上）。
+            if (!_feed.AnyLiveItem && _brain != null) _brain.Bubble.Clear();
             if (_feed.AnyLive)
             {
                 _bubbleWin.Topmost = Topmost;
@@ -538,7 +705,6 @@ namespace AzhuPet
             else if (_bubbleWin != null && _bubbleWin.Visibility == Visibility.Visible)
             {
                 _bubbleWin.Visibility = Visibility.Collapsed;
-                if (_brain != null) _brain.Bubble.Clear();   // ⚠ 全部收起后必须释放占用，否则她再也说不了话
             }
         }
 
@@ -597,6 +763,20 @@ namespace AzhuPet
             var rows = StatusProbe.FormatRows(rep);
             for (int i = 0; i < rows.Count; i++)
                 _feed.Push(FeedKind.Status, rows[i], 6, i * 0.45, now);   // 错峰 → 「逐条浮现」
+        }
+
+        /// <summary>多 agent 任务计时：把 TRAE / WorkBuddy / Codex 的日志变成气泡流顶上的**常驻读数**（每任务一行）。
+        /// 挂 SlowTick（120ms）而不是 1 秒节拍：秒数要平滑地跳；文件 IO 的节流在 AgentTaskTimer 内部。
+        /// ⚠ 必须自己兜异常 —— 它挂在桌宠的常驻计时器上，抛一次就是一次崩溃。</summary>
+        private void StepAgentTimer()
+        {
+            if (_agentTimer == null || _feed == null) return;
+            try
+            {
+                _agentTimer.Poll(_clock.Elapsed.TotalSeconds);
+                _feed.Header = _agentTimer.Header;
+            }
+            catch (Exception ex) { Trace_("agenttimer: " + ex.Message); }
         }
 
         /// <summary>
@@ -779,10 +959,27 @@ namespace AzhuPet
                 double dx = c.X - cx, dy = c.Y - cy;
                 double d = Math.Sqrt(dx * dx + dy * dy);
                 Pose.Near = d < 260 * DipScale;
-                if (_dragging)
-                {
-                    Pose.Dragging = true;                       // 拖拽：转速由 Pose.SpinAccel 驱动（拎起那一刻锁定方向）
-                }
+                // ---- ⚠⚠ 「握住」≠「拎起」（2026-09-27）----
+                //   这里从前写的是 `if (_dragging) Pose.Dragging = true;`。`_dragging` 只表示
+                //   **鼠标按着**，于是每 120 ms 会把 `OnDown` 刚设的 `Pose.Dragging = false`
+                //   覆盖回 true ⇒ 「按住不动就转圈」那个 bug 会从这儿**复发**（改 OnDown/OnMove 全白做，
+                //   而症状只在慢速路径上出现，很难归因）。
+                //   ⚠ 必须跟 `_lifted` 走 —— 只有真的拎起来（见 OnMove）才算「拖拽中」。
+                //   ⚠ 反向也要写：握住但还没拎起时要把 `Pose.Dragging` 显式按回 false，
+                //     否则它在「拎起过 → 又原地停一会儿」之后会残留 true（Pose 是持久状态）。
+                //   ⚠⚠ 2026-09-27 二次修正：光跟 `_lifted` 还不够，要 `_dragging && _lifted` 的**合取**。
+                //     单看 `_lifted` 时，松手瞬间（`OnUp` 把 `_dragging` 置 false、若那一拍还没轮到
+                //     SlowTick）会出现「没按住、却仍算拎起」的**残留组合**，把 `Pose.Dragging` 写回 true
+                //     ⇒ 落回不衰减的 Dragging 分支、以松手满速永远转下去（就是用户报的「落地不停转」）。
+                //     合取把这条路**从结构上**堵死：松手后 `_dragging` 必为 false，这一拍无论如何写不出 true。
+                //   ⚠ `OldLiftGate`（`--old-lift-gate`）是负对照：把它按回上一版的 `if (_dragging)`，
+                //     好让 `--lifttest` 的 A 组能红。正式路径上绝不开。
+                //   ⚠ `NoLiftClear`（`--no-lift-clear`）是第二个负对照：它对应「OnUp 漏清 `_lifted`」
+                //     那一版 —— ⚠⚠ 光漏清还不够，那一版的 `SlowTick` **也只是单看 `_lifted`**，
+                //     所以负对照必须把这一行**也**退回单看 `_lifted`，否则合取会把残留路径堵死、
+                //     D 组红不了（负对照红不了 = 判据没有区分度 = 白写）。
+                bool liftGate = NoLiftClear ? _lifted : (_dragging && _lifted);
+                if (OldLiftGate ? _dragging : liftGate) Pose.Dragging = true;   // 拖拽：转速由 Pose.SpinAccel 驱动（拎起那一刻锁定方向）
                 else
                 {
                     Pose.Dragging = false;
@@ -807,6 +1004,9 @@ namespace AzhuPet
             }
             NightK = nk;
             R.SetNight(nk);
+
+            // 多 agent 任务计时读数（每拍都走，秒数才会平滑地跳）
+            StepAgentTimer();
 
             // ---- 表达环采样（P0 第四环）----
             // ⚠ 放在最后：它只读前台，与姿态／调光互不相干；万一它抛异常也不该影响上面那些。

@@ -389,6 +389,56 @@ namespace AzhuPet
         public bool Settings;                   // --settings：独立打开设置主面板（便于 UI 验收与截图）
         public bool SettingsTest;               // --settingstest：离线验设置面板版式（裁剪／重叠／跟随缩放）
         public bool TopmostTest;                // --topmosttest：验置顶那一格状态（借出计数／归还取配置／真实位真拨过去了吗）
+        /// <summary>--motiontest：量「**无交互**时她在竖直方向到底动没动」。
+        /// ⚠ 起因是 2026-09-26 用户报的「不做任何操作她也会高频上下跳、逐渐变慢直到停」。
+        ///   物理侧（`_airborne` 只由松手置位）与姿态侧（各包络均定时长）**都推不出**这个现象，
+        ///   所以这里不写判据去「确认猜想」，而是**把序列采下来**：腾空帧数、单帧窗口位移、
+        ///   单帧 Lift 步长（对呼吸基线的倍数）、过零次数 —— 让数据自己指认是哪条通路。</summary>
+        public bool MotionTest;
+        /// <summary>--old-frame-gate：负对照 —— 主循环回到**上一版**的限帧写法（`dt` 固定成 `1/Fps`）。
+        /// ⚠ 专治本案：那一版让所有动画整体慢到 **0.79×**（跳跃 0.44 s 实跑 0.57 s，用户报「太慢」），
+        ///   于是 `--motiontest` 的 `motion.anim_rate` 必须**变红**。
+        ///   没有这条对照，就只是「我改了代码 + 判据是绿的」，证明不了判据真的在守这件事。
+        /// ⚠ 名字里的 "old" 指**上一版**，不是「最初那版」：最初那版（`_lastT` 不更新）的缺陷
+        ///   是「把整拍时间丢掉」，而一旦判据改成累加器，那个缺陷在这台机器上**已无可观测后果**
+        ///   （实测两种写法的 comp / anim_rate / dt 分布全部相同）—— 所以负对照指向**这一轮**
+        ///   真正修掉的那个缺陷，才有区分度。</summary>
+        public bool OldFrameGate;
+        /// <summary>--lifttest：端到端验「按住不动**不该**转圈，真的拎起来**才**转」。
+        /// ⚠ 起因（2026-09-27 用户报）：鼠标按压久一点她就自转 —— 因为 `OnDown` 一按下就给了
+        ///   `Pose.Dragging` ＋ `SpinAccel`（线性升速），而 `SlowTick` 那行还会每 120 ms 覆盖回来。
+        ///   三个实验缺一不可：A 按住不动 2 s 不转（跨 ≥16 拍 SlowTick，才量得到那处覆盖）／
+        ///   B 点一下只跳不转／C 真拖起来仍转（没有 C，前两条可能只是因为把转圈整个禁掉了）。</summary>
+        public bool LiftTest;
+        /// <summary>--old-lift-gate：负对照 —— `SlowTick` 的拖拽判定回到**上一版**写法
+        /// （`if (_dragging)` 而不是 `if (_lifted)`）。
+        /// ⚠ 它必须让 `--lifttest` 的 **A 组变红、C 组仍绿** —— 只有这样才能证明
+        ///   「A 量到的**就是**那条覆盖通路」，而不是「A 红了也只是碰巧」。
+        ///   即判据的**区分度**：修好与没修，取值必须不同。</summary>
+        public bool OldLiftGate;
+        /// <summary>--no-lift-clear：负对照 —— `OnUp` **跳过**清 `_lifted`（回到「松手后残留 true」）。
+        /// ⚠ 它必须让 `--lifttest` 的 **D 组变红**（松手落地后仍在转），
+        ///   而 A/B/C 三组不受影响 —— 这样才证明「D 量到的**就是**松手后 `_lifted` 残留那条通路」。
+        ///   即判据的**区分度**：修好与没修，取值必须不同。</summary>
+        public bool NoLiftClear;
+        /// <summary>--agenttimertest：离线验「多 agent 计时读数不该凭空消失」。
+        /// ⚠ 起因（2026-09-29 用户报）：Codex 在跑时读数在，把桌宠**提起再放下**之后读数就没了。
+        ///   判据必须**离线合成 Codex 日志**（三个根目录覆盖，见 `AgentTaskTimer.*RootOverride`），
+        ///   否则「验读数会不会丢」只能拿用户真在跑的 Codex 日志做实验 —— 不可重复、且依赖真实任务状态。
+        /// ⚠ 两组：A/B/C 走**真拖拽**（读数跨「拎起→放下」必须还在），D 组是**纯逻辑**（不开窗），
+        ///   验 Codex 一个会话横跨多个 rollout 文件时的合并与存活口径。</summary>
+        public bool AgentTimerTest;
+        /// <summary>--old-codex：负对照 —— 把 Codex 的**状态口径**退回上一版
+        /// （状态按文件记、结束只认 `task_complete` 不认 `turn_aborted`）。
+        /// ⚠ 它必须让 `--agenttimertest` 的 **D 组变红**，A/B/C 三组不受影响 ——
+        ///   只有这样才能证明「D 量到的**就是**那两条 Codex 通路」，而不是碰巧。
+        ///   即判据的**区分度**：修好与没修，取值必须不同。</summary>
+        public bool OldCodex;
+        /// <summary>--no-wb-beat：负对照 —— 关掉 WorkBuddy 的**真心跳兜底**（退回「只看日志静默」）。
+        /// ⚠ 它必须让 `--agenttimertest` 的 **E1 变红**（日志静默 21 分钟 ⇒ 正在跑的任务被判死），
+        ///   E2 不受影响。理由同 OldCodex：证明 E1 量到的**就是**那条心跳通路。
+        ///   正式路径上绝不开。</summary>
+        public bool NoWbBeat;
         public bool NoLayout;                   // --no-layout：负对照 —— 跳过重排，版式判据必须变红
         public bool BalanceConfigTest;          // --balanceconfigtest：离线验保存/备份/坏 JSON/凭据隔离
         public bool ConfigTest;                 // --configtest：离线验主配置「写/读转义对称 + 不膨胀」
@@ -507,7 +557,7 @@ namespace AzhuPet
                 || BalanceConfigTest || ConfigTest || FixConfig || UpdateTest
                 || UpdateDiag
                 || SettingsTest || SummaryTest || SummaryNow
-                || TopmostTest
+                || TopmostTest || MotionTest || LiftTest || AgentTimerTest
                 || BalanceSettings || Settings
                 || PixDir != null || ProbeFile != null
                 || Chat != null
@@ -534,6 +584,14 @@ namespace AzhuPet
                     case "--settings": c.Settings = true; break;
                     case "--settingstest": c.SettingsTest = true; break;
                     case "--topmosttest": c.TopmostTest = true; break;
+                    case "--motiontest": c.MotionTest = true; break;
+                    case "--old-frame-gate": c.OldFrameGate = true; break;
+                    case "--lifttest": c.LiftTest = true; break;
+                    case "--old-lift-gate": c.OldLiftGate = true; break;
+                    case "--no-lift-clear": c.NoLiftClear = true; break;
+                    case "--agenttimertest": c.AgentTimerTest = true; break;
+                    case "--old-codex": c.OldCodex = true; break;
+                    case "--no-wb-beat": c.NoWbBeat = true; break;
                     case "--no-layout": c.NoLayout = true; break;
                     case "--balanceconfigtest": c.BalanceConfigTest = true; break;
                     case "--configtest": c.ConfigTest = true; break;

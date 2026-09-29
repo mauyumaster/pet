@@ -50,6 +50,11 @@ namespace AzhuPet
             WpfPetRenderer.MatMode = o.Mat == "flat" ? 1 : o.Mat == "emissive" ? 2 : o.Mat == "uv" ? 3 : 0;
             Glb.VFlip = o.VFlip;
             PetWindow.ForceHitThrough = o.ForceThrough;
+            PetWindow.MotionTest_OldGate = o.OldFrameGate;   // 负对照：见 PetWindow.OnRender 的注释
+            // 多 agent 任务计时：判据模式下关掉。理由不是「省事」而是**判据的输入必须自己钉死** ——
+            // 跑判据的人往往正开着 TRAE/WorkBuddy，只要那边有任务在跑，判据窗口里就会凭空多出常驻读数行，
+            // 把气泡流的宽／高判据整个带偏。
+            AgentTaskTimer.Enabled = !o.AnyTest();
             // apphost 的副本命名为 pet-settings.exe 时可无参数直达配置中心，便于桌面快捷方式与 UI 验收。
             // ⚠⚠ 必须带 `!o.Settings` 守卫 —— 否则 `pet.exe --settings` 会被这一条**抢走**，
             //   落到旧的 RunBalanceSettings（那张简陋的单页表），命令行开关形同虚设。
@@ -101,6 +106,9 @@ namespace AzhuPet
             if (o.BalanceSettings) return RunBalanceSettings();
             if (o.SettingsTest) return SettingsTest.Run(o);
             if (o.TopmostTest) return TopmostTest.Run();
+            if (o.MotionTest) return MotionTest.Run(o);
+            if (o.LiftTest) return LiftTest.Run(o);
+            if (o.AgentTimerTest) return AgentTimerTest.Run(o);
             if (o.Settings) return RunSettings(o);
             return RunNormal(o);
         }

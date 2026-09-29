@@ -213,13 +213,21 @@ pet.exe --ocrtest        # OCR 隐私门 50 项
 pet.exe --fstest         # 全屏判定 10 项
 pet.exe --personatest    # 人格注入 12 项
 pet.exe --eyetest        # 读屏口径 10 项
-pet.exe --calibertest    # 口径一致性 39 项
+pet.exe --calibertest    # 口径一致性 54 项（含三种响应结构：data.Packages / data.Accounts / data.Response.Data.Accounts）
+pet.exe --balanceconfigtest  # 凭据纯逻辑 142 项（含候选列表择优：同前缀多接口时该采纳哪一个）
 pet.exe --bubbletest     # 气泡渲染
 pet.exe --settingstest   # 设置面板版式 13 项
 pet.exe --configtest     # 主配置转义对称性 29 项
 pet.exe --updatetest     # 自更新链路 115 项（版本比较 / feed 解析 / 载荷名单 / 替换回滚）
-pet.exe --spintest       # 拎起旋转 35 项（固定角加速度 / 角速度上限 / 左右半屏方向 / 跨半屏换向 / 壳侧接线）
+pet.exe --spintest       # 拎起旋转 37 项（固定角加速度 / 角速度上限 / 左右半屏方向 / 跨半屏换向 / 壳侧接线）
 pet.exe --topmosttest    # 窗口置顶 31 项（真实位的读写 / 借走与归还 / 被抹掉后的自愈）
+pet.exe --motiontest     # 静止时的竖直运动 13 项（腾空帧 / 窗口位移 / 呼吸幅 / 动画速率 / dt 颗粒度）
+                         #   ⚠ 负对照是 `--old-frame-gate`（回到「固定步长」那一版），不是 `--no-xxx` 前缀
+pet.exe --lifttest       # 「握住」vs「拎起」26 项（按住不动不转 / 点一下只跳 / 真拖起来才转 / 松手落地停转）
+                         #   ⚠ 两个负对照各守一条通路：`--old-lift-gate`（SlowTick 回到 `if (_dragging)`，A 红）
+                         #     与 `--no-lift-clear`（OnUp 不清 `_lifted`，D 红）。
+                         #   ⚠ A/B/C 三段各检一次「按下有没有真的送达」（D 组复用 C 的松手、无独立按下）
+                         #     —— 鼠标注入失败时那几组的绿没有信息量
 pet.exe --webtest        # 浏览器通道 3 项（运行时 / 原生加载器能否解析 / 加载器有没有随包分发）
 pet.exe --updatediag     # 自更新**联网**诊断：代理 / feed 可达 / 地址一致 / 资产存在
 pet.exe --shellprobe     # 真机窗口真值探针
@@ -230,6 +238,18 @@ pet.exe --shellprobe     # 真机窗口真值探针
 > ⚠ 上面这些条数**不是装饰**：`--updatetest` 从 111 涨到 115 是因为 v0.1.2 补了载荷名单的判据，
 > 而 README 里的数字曾经停在旧的上面。改判据时顺手改这里 —— 数字对不上，等于告诉读者
 > 「这份文档没人维护」。
+>
+> ⚠ 2026-09-28 的事故与修复（口径这条线的第三次翻车）：站点改版后首屏先调
+> `/billing/meter/get-user-resource-summary`，而抓取模式 `/billing/meter/get-user-resource`
+> 是它的**前缀** ⇒ 一次登录同时命中多个**结构不同**的接口。旧钩子「只留第一个命中」，
+> 于是定稿到解析不出余额的那一个，界面上报「响应里没有 Accounts」。
+> 修法有两半，缺一不可：
+>   ① **钩子留候选**（`__azhuCaps` 数组，不再只留第一个）；
+>   ② **宿主逐个试**：拿浏览器会话对每个候选各发一次，谁能解析出余额就用谁的 URL 落盘
+>      （钩子不存响应体 ⇒ 真择优只能在宿主侧做）。
+> 另外解析器补齐了三种结构（`--calibertest` 的 ⑨ ⑩ 两组守着）。
+> **教训**：抓取模式是**子串匹配**时，「接口改名」会以「前缀命中」的形式静默发生 ——
+> 这类 bug 只能靠「候选 + 用真实解析器逐个试」防住，靠「猜接口名」防不住。
 
 另有三套守卫不在 `pet.exe` 里（它们守的是「打包」和「配图」，跑起来需要 python / node）：
 

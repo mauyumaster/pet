@@ -43,6 +43,20 @@ namespace AzhuPet
             + @"{""CapacityType"":""1"",""Status"":""3"",""CapacityRemain"":""0"",""CapacitySize"":""900""},"
             + @"{""CapacityType"":""4"",""Status"":""0"",""CapacityRemain"":""500"",""CapacitySize"":""500""}]}}}}";
 
+        // ---- 结构 A 合成响应（2026-09-28 站点改版后的新真值）：data.Packages[].CycleRemainCapacity ----
+        // 与 workbuddy_browser_reading.txt 里那份**真实响应**同形（三个套餐：856.25 / 0 / 1000）。
+        private const string PKG_856 = @"{""PackageCode"":""TCACA_code_007"",""CycleTotalCapacity"":""2510"",""CycleRemainCapacity"":""856.25000169"",""CycleUsedCapacity"":""1653.74999831"",""CapacityUnit"":""credits""}";
+        private const string PKG_0   = @"{""PackageCode"":""TCACA_code_008"",""CycleTotalCapacity"":""500"",""CycleRemainCapacity"":""0"",""CycleUsedCapacity"":""500"",""CapacityUnit"":""credits""}";
+        private const string PKG_1000= @"{""PackageCode"":""TCACA_code_030"",""CycleTotalCapacity"":""1000"",""CycleRemainCapacity"":""1000"",""CycleUsedCapacity"":""0"",""CapacityUnit"":""credits""}";
+        private const string PKG_NOV = @"{""PackageCode"":""TCACA_code_099"",""CycleTotalCapacity"":""100""}";   // 缺 CycleRemainCapacity
+
+        // ---- 结构 C 合成响应（2026-09-28 同期的 free-packages 接口）：data.Accounts[].CapacityRemain ----
+        // ⚠ 与结构 B 的字段口径**完全相同**，只是层级少了两层（旧是 data.Response.Data.Accounts）。
+        private const string DATA_ACCOUNTS =
+            @"{""code"":0,""data"":{""TotalCount"":2,""TotalDosage"":1555,""Accounts"":["
+            + @"{""CapacityType"":1,""Status"":0,""CapacityRemain"":1000,""CapacitySize"":1000},"
+            + @"{""CapacityType"":4,""Status"":0,""CapacityRemain"":500,""CapacitySize"":500}]}}";
+
         public static int Run(Cli o)
         {
             try { Console.OutputEncoding = Encoding.UTF8; } catch { }
@@ -58,6 +72,8 @@ namespace AzhuPet
             F6_BadJson();
             F7_DirtyItems();
             F8_AllStrings();
+            F9_NewPackages();
+            F10_FreePackages();
             HarnessSelfCheck(mixed);
 
             Console.WriteLine();
@@ -169,13 +185,66 @@ namespace AzhuPet
             Console.WriteLine();
         }
 
-        // ⑨ 自检：**断言器**与**漂移哨兵**各自有没有资格失败。
+        // ⑨ 结构 A：站点改版后的新真值 data.Packages[].CycleRemainCapacity。
+        //    ⚠ 这条用例的来历就是本轮现场（2026-09-28 用户报「登录取凭据失败：响应里没有 Accounts」）：
+        //      接口换名字（→ `-summary`）**并**换了层级 ⇒ 旧解析器只能说「没有 Accounts」，
+        //      而真正该报的是「这是新结构」。没有这条用例，这个 bug 只能靠用户撞一次才发现。
+        private static void F9_NewPackages()
+        {
+            Console.WriteLine("[用例 ⑨] 新结构 A：data.Packages[].CycleRemainCapacity（与真实响应同形）");
+            var c = StatusProbe.ParseWorkbuddyJson(
+                @"{""code"":0,""msg"":""OK"",""data"":{""Packages"":[" + PKG_856 + "," + PKG_0 + "," + PKG_1000
+                + @"],""SubscriptionPackageCode"":"""",""IsPaidUser"":false}}");
+            if (!c.Ok) Console.WriteLine("  (Why=" + (c.Why ?? "(null)") + ")");
+            CheckTrue("口径成立（认新结构）", c.Ok);
+            // ⚠ 期望值用**真值原样**（856.25000169），不是四舍五入的 1856.25 —— Eq() 的容差是 1e-9，
+            //   写 1856.25 会差 1.69e-6 ⇒ 假红。（首跑就撞上了，正好证明这条判据真的在比数值。）
+            Check("三套餐余和（856.25000169+0+1000）", c.Remain, 1856.25000169);
+            Check("参与求和的条数", c.Type1Count, 3);
+            Check("返回套餐数", c.AccountCount, 3);
+
+            // 脏条目跳过（同旧口径纪律）：缺 CycleRemainCapacity 的不计入，也不当 0。
+            var d = StatusProbe.ParseWorkbuddyJson(
+                @"{""code"":0,""data"":{""Packages"":[" + PKG_1000 + "," + PKG_NOV + @"]}}");
+            CheckTrue("脏套餐不炸", d.Ok);
+            Check("脏套餐被跳过而非当 0", d.Remain, 1000);
+
+            // ⚠ 负对照：空 Packages 数组 ⇒ **不许当 0 报**（那是「读数变小 ＋ 全绿」的假通过）。
+            var e = StatusProbe.ParseWorkbuddyJson(@"{""code"":0,""data"":{""Packages"":[]}}");
+            CheckFalse("空 Packages 不许当 0 报（负对照）", e.Ok);
+            CheckContains("原因指名 CycleRemainCapacity", e.Why, "CycleRemainCapacity");
+            Console.WriteLine();
+        }
+
+        // ⑩ 结构 C：同期的 free-packages 接口 —— data.Accounts[]（比结构 B 少两层）。
+        //    字段口径与结构 B 完全一致，**只有挂载点不同**。解析器若只认 data.Response.Data，
+        //    遇到这个接口就白瞎（这正是「同前缀多接口」里最容易漏掉的那个）。
+        private static void F10_FreePackages()
+        {
+            Console.WriteLine("[用例 ⑩] 新结构 C：data.Accounts[].CapacityRemain（free-packages 接口）");
+            var c = StatusProbe.ParseWorkbuddyJson(DATA_ACCOUNTS);
+            if (!c.Ok) Console.WriteLine("  (Why=" + (c.Why ?? "(null)") + ")");
+            CheckTrue("口径成立（认浅层 Accounts）", c.Ok);
+            Check("主口径余（type=1）", c.Remain, 1000);
+            Check("非主口径余（type=4）", c.OtherRemain, 500);
+            Check("全桶合计 TotalDosage", c.AllBucketsRemain, 1555);
+            Check("TotalCount", c.TotalCount, 2);
+
+            // 负对照：有 Accounts 但没有主口径条目 ⇒ 必须报「口径失效」，不许当 0。
+            var d = StatusProbe.ParseWorkbuddyJson(
+                @"{""code"":0,""data"":{""Accounts"":[{""CapacityType"":4,""CapacityRemain"":500}]}}");
+            CheckFalse("只有非主口径 ⇒ 口径失效（负对照）", d.Ok);
+            CheckContains("原因指名 type", d.Why, "type=" + StatusProbe.MainCreditType);
+            Console.WriteLine();
+        }
+
+        // ⑪ 自检：**断言器**与**漂移哨兵**各自有没有资格失败。
         //    报不出来 ⇒ 上面所有 PASS 都不算数（本项目判据纪律 7 的元级应用）。
         //    - 断言器用纯比较函数 Eq() 验，避免在正常输出里混进一行看起来像失败的 FAIL 行；
         //    - 漂移哨兵用不一致的三个数喂它，看它会不会报（只写在 --statustest 里就永远逼不出来）。
         private static void HarnessSelfCheck(StatusProbe.WbCaliber mixed)
         {
-            Console.WriteLine("[用例 ⑨] 自检：断言器 + 漂移哨兵有没有资格失败");
+            Console.WriteLine("[用例 ⑪] 自检：断言器 + 漂移哨兵有没有资格失败");
             CheckTrue("断言器：相同值判为相等（1055 vs 1055）", Eq(mixed.Remain, 1055));
             CheckFalse("断言器：不同值判为不等（1055 vs 999）", Eq(mixed.Remain, 999));
             CheckTrue("断言器有资格失败 ⇒ 本测试能变红",
@@ -203,7 +272,7 @@ namespace AzhuPet
         }
 
         // ---- 断言器（PASS/FAIL 计数；不抛异常，全部跑完再汇总）----
-        // 相等判定抽成纯函数 Eq()，好让用例 ⑨ 能直接验「断言器有没有资格失败」。
+        // 相等判定抽成纯函数 Eq()，好让用例 ⑪ 能直接验「断言器有没有资格失败」。
         private static bool Eq(double a, double b) => Math.Abs(a - b) < 1e-9;
         private static void Check(string label, double got, double want)
         {

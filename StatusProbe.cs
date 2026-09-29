@@ -921,8 +921,86 @@ namespace AzhuPet
                         c.Why = "接口 code=" + code + " " + Shrink(msg);
                         return c;
                     }
-                    if (!root.TryGetProperty("data", out var data)
-                        || !data.TryGetProperty("Response", out var R)
+                    if (!root.TryGetProperty("data", out var data))
+                    {
+                        c.Why = "响应里没有 data";
+                        return c;
+                    }
+                    // ---- 结构 A（2026-09-28 站点改版后的**新**真值）：data.Packages[].CycleRemainCapacity ----
+                    // ⚠⚠ 现场：09-28 用户报「登录取凭据失败：响应里没有 Accounts」。查日志发现抄到的 URL
+                    //   从 `/billing/meter/get-user-resource` 变成了 `.../get-user-resource-summary`，
+                    //   响应体也从 `data.Response.Data.Accounts[]` 变成了 `data.Packages[]`：
+                    //     {"code":0,"data":{"Packages":[{"PackageCode":"...","CycleTotalCapacity":"2510",
+                    //       "CycleRemainCapacity":"856.25","CycleUsedCapacity":"1653.75","CapacityUnit":"credits"},…],
+                    //       "IsPaidUser":false}}
+                    //   ⇒ 余额口径 = 各 Package 的 `CycleRemainCapacity` 之和（字符串数字，NumOf 已兼容）。
+                    //   ⚠ 判据：**必须有 Packages 数组且至少一条含 CycleRemainCapacity**，否则落到结构 B 或报错。
+                    //     （空 Packages 数组是合法的「确实没有套餐」⇒ 余额真是 0，这里不敢当 0 报，
+                    //      仍走 type 缺失那条路，宁可报错也不静默报 0 —— 同 F2 用例的纪律。）
+                    if (data.TryGetProperty("Packages", out var pkgs)
+                        && pkgs.ValueKind == JsonValueKind.Array)
+                    {
+                        double sumNew = 0; int got = 0;
+                        foreach (var p in pkgs.EnumerateArray())
+                        {
+                            c.AccountCount++;
+                            double v;
+                            if (!NumOf(p, "CycleRemainCapacity", out v)) continue;   // 脏条目跳过（同旧口径纪律）
+                            sumNew += v; got++;
+                        }
+                        if (got > 0)
+                        {
+                            c.Remain = sumNew;
+                            c.Type1Count = got;                       // 复用「参与求和的条数」语义
+                            c.TotalCount = c.AccountCount;
+                            // 旁证：`IsPaidUser` 等布尔字段不参与口径，不读（读了也没处放，不许编）。
+                            c.Ok = true;
+                            return c;
+                        }
+                        c.Why = "返回 " + c.AccountCount + " 个套餐里没有 CycleRemainCapacity 字段（口径失效，不敢当 0 报）";
+                        return c;
+                    }
+                    // ---- 结构 C（2026-09-28 同时存在的第二个新接口）：data.Accounts[].CapacityRemain ----
+                    // ⚠⚠ 现场：09-28 的 capture_log 里，除了 `-summary`（结构 A），还抄到一个
+                    //   `/billing/meter/get-user-resource-free-packages`，它返回的是**旧口径那套字段**
+                    //   （CapacityType / CapacityRemain），但**层级少了两层**：`data.Accounts[]`
+                    //   而不是 `data.Response.Data.Accounts[]`。
+                    //   ⇒ 同一份「Accounts + CapacityType」的数据，在站点改版后换了挂载点。
+                    //     解析器若只认 `data.Response.Data`，遇到这个接口就白瞎了。
+                    //   ⚠ 顺序放在结构 B 之前：两者字段口径相同，只是层级不同；先试浅的那层，
+                    //     免得结构 C 被判成「没有 Accounts」。
+                    if (data.TryGetProperty("Accounts", out var accsC)
+                        && accsC.ValueKind == JsonValueKind.Array)
+                    {
+                        double sumC = 0, sumOtherC = 0;
+                        foreach (var a in accsC.EnumerateArray())
+                        {
+                            c.AccountCount++;
+                            if (!a.TryGetProperty("CapacityType", out var ct) || !IntEl(ct, out int typ)) continue;
+                            double v;
+                            if (!NumOf(a, "CapacityRemain", out v)) continue;
+                            if (typ == MainCreditType) { sumC += v; c.Type1Count++; }
+                            else if (v > 0) sumOtherC += v;
+                        }
+                        if (c.Type1Count > 0)
+                        {
+                            c.Remain = sumC;
+                            c.OtherRemain = sumOtherC;
+                            if (data.TryGetProperty("TotalDosage", out var tdC) && DblEl(tdC, out double tvC)) c.AllBucketsRemain = tvC;
+                            if (data.TryGetProperty("TotalCount", out var tcC) && IntEl(tcC, out int tcvC)) c.TotalCount = tcvC;
+                            c.Ok = true;
+                            return c;
+                        }
+                        // ⚠ 有 Accounts 数组但没有主口径条目 ⇒ **不许当 0 报**（同结构 B 的纪律）。
+                        //   继续往下走只会撞「没有 Accounts」这句误导的话，所以这里直接给出准确原因。
+                        if (c.AccountCount > 0)
+                        {
+                            c.Why = "返回 " + c.AccountCount + " 条额度里没有 type=" + MainCreditType + " 的条目（口径失效，不敢当 0 报）";
+                            return c;
+                        }
+                    }
+                    // ---- 结构 B（旧结构，2026-09 及以前）：data.Response.Data.Accounts[].CapacityRemain ----
+                    if (!data.TryGetProperty("Response", out var R)
                         || !R.TryGetProperty("Data", out var D)
                         || !D.TryGetProperty("Accounts", out var accs)
                         || accs.ValueKind != JsonValueKind.Array)

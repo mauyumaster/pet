@@ -85,11 +85,36 @@ namespace AzhuPet
 
         // ---- 极值记录（自检用）----
         public int Frames;
-        public double LiftMin = double.MaxValue, LiftMax = double.MinValue;
-        public double RollMin = double.MaxValue, RollMax = double.MinValue;
+        public double LiftMin = double.MaxValue, LiftMax = double.MinValue;        public double RollMin = double.MaxValue, RollMax = double.MinValue;
         public double YawMin = double.MaxValue, YawMax = double.MinValue;
         public double PitchMin = double.MaxValue, PitchMax = double.MinValue;
         public double SyMin = double.MaxValue, SyMax = double.MinValue;
+
+        /// <summary>最近一帧输出的 `Lift`（米）。**只读快照**，给外部判据采样用。
+        /// ⚠ 存在的理由：`--motiontest` 要在 `PetWindow.OnRender` **之外**的采样点上读到
+        ///   「这一帧她被画在了多高」，而 `Step()` 的结果是局部变量、不落任何字段。
+        ///   重新调一次 `Step()` 去取结果是不行的 —— 那会**再推进一次计时器**（`_t`、`_jump`、
+        ///   `_bounce` 全都跟着走），量出来的就不是屏幕上那个她了。
+        ///   ⇒ 只能由 `Step()` 自己在末尾留一份快照。与 `LiftMin/LiftMax` 是同一种「把每帧
+        ///     结果记下来给判据读」的做法，不是新增状态。</summary>
+        public double LastLift { get; private set; }
+
+        /// <summary>最近一帧 `Lift` 的**分量**拆分（米），只给判据读。
+        /// ⚠ 拆分的理由：`--motiontest` 量到 `Lift` 极值 ±0.01497 m，而配置的呼吸幅只有
+        ///   ±0.012 m —— 超出 25%。光看合成值分不清是「呼吸本身冲出去了」还是「跳跃叠上来了」，
+        ///   而这两者的病因一个在 `breatheT` 的相位、一个在 `TriggerJump` 的触发，完全不同。
+        ///   ⇒ 把两项分别留一份快照，让超出的那部分自己认领来源。</summary>
+        public double LastBreatheLift { get; private set; }
+        public double LastJumpLift { get; private set; }
+        /// <summary>最近一帧的偏航角（弧度）——「她转没转」的**只读快照**。
+        /// ⚠ 为什么必须开这个口子：`--lifttest` 要量「按住不动时她有没有转」，
+        ///   而 `Yaw` 是 `Pose.Step` 的**返回值**（结构体），外部拿不到；
+        ///   从前判据只能靠「再调一次 `Step()` 取结果」—— 那会**再推进一次计时器**，
+        ///   把被测系统本身搅乱（同 `LastLift` 那一族的口径）。</summary>
+        public double LastYaw { get; private set; }
+        /// <summary>最近一帧的角速度（rad/s）。⚠ 只作**观察窗**，判据一律用 `LastYaw` 差分反推，
+        /// 不拿它当输入（否则就是拿实现的输出去验实现）。</summary>
+        public double LastSpinVel { get; private set; }
 
         private const double TAU = Math.PI * 2;
         private const double SpinK = 0.006;     // 角速度增速系数：∫SpinDrive·SpinK·dt（**飞行**阶段用）
@@ -139,7 +164,7 @@ namespace AzhuPet
         public Pose Step(double dt)
         {
             if (dt <= 0) dt = 1.0 / 30;
-            if (Freeze) { Frames++; return new Pose(); }   // 量测模式：恒等姿态，连拍可逐像素相减
+            if (Freeze) { Frames++; LastLift = 0; LastBreatheLift = 0; LastJumpLift = 0; LastYaw = 0; LastSpinVel = 0; return new Pose(); }   // 量测模式：恒等姿态，连拍可逐像素相减
             _t += dt;
 
             // 打盹强度平滑过渡（不然「突然睡着」很假）
@@ -247,6 +272,11 @@ namespace AzhuPet
             }
 
             Frames++;
+            LastLift = p.Lift;
+            LastBreatheLift = b * breatheAmp;
+            LastJumpLift = p.Lift - b * breatheAmp;   // 除呼吸外的全部竖直叠加（跳跃等）
+            LastYaw = _yaw;                           // 「转没转」的只读快照（--lifttest 读它差分）
+            LastSpinVel = _spinVel;
             LiftMin = Math.Min(LiftMin, p.Lift); LiftMax = Math.Max(LiftMax, p.Lift);
             RollMin = Math.Min(RollMin, p.Roll); RollMax = Math.Max(RollMax, p.Roll);
             YawMin = Math.Min(YawMin, p.Yaw); YawMax = Math.Max(YawMax, p.Yaw);

@@ -95,8 +95,7 @@ namespace AzhuPet
             fg.Children.Add(texts);
             var btns = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             _reload = SmallButton("重新加载", (s, e) => { try { _view.Source = new Uri(_loginUrl); } catch { } });
-            _manual = SmallButton("我已登录，直接抓取", async (s, e) => await FinishAsync(null, true), true);
-            var copy = SmallButton("复制状态", (s, e) => CopyState());
+            _manual = SmallButton("我已登录，直接抓取", async (s, e) => await FinishAsync(null, true), true);            var copy = SmallButton("复制状态", (s, e) => CopyState());
             var close = SmallButton("关闭", (s, e) => Close());
             btns.Children.Add(_reload); btns.Children.Add(_manual); btns.Children.Add(copy); btns.Children.Add(close);
             Grid.SetColumn(btns, 1); fg.Children.Add(btns);
@@ -189,35 +188,51 @@ namespace AzhuPet
             }
         }
 
-        /// <summary>轮询页面里那个全局变量。抄到了就收工 —— 只认第一个命中（钩子脚本同理）。</summary>
+        /// <summary>轮询页面里那个全局变量。抄到了就收工。
+        ///
+        /// ⚠⚠ 2026-09-28 改：读的是**候选列表** `__azhuCaps`（不是单个 `__azhuCapture`）。
+        ///   原因见 CredentialCapture.ParseCapturedList 的注释 —— 站点改版后，抓取模式
+        ///   `get-user-resource` 成了新接口 `...-summary` 的前缀，一次登录会同时命中**多个结构不同**的
+        ///   接口（`-summary`→Packages、`free-packages`→data.Accounts、旧 `get-user-resource`→Accounts）。
+        ///   旧行为「只认第一个命中」正是本轮报错（「响应里没有 Accounts」）的来源：那个 200 被定稿，
+        ///   而它恰好是结构不同、解析不出余额的那一个。
+        ///   ⇒ 现在把候选排好序，**逐个交回测**；哪一个的重放响应体能解析出余额，就收工。</summary>
         private async void OnTick(object sender, EventArgs e)
         {
             if (_working || _finished || _view?.CoreWebView2 == null) return;
             string raw;
-            try { raw = await _view.CoreWebView2.ExecuteScriptAsync("window.__azhuCapture||''"); }
+            try { raw = await _view.CoreWebView2.ExecuteScriptAsync("JSON.stringify(window.__azhuCaps||[])||''"); }
             catch { return; }   // 导航过程中脚本宿主可能短暂不可用，下一拍再试，不当作错误
             string json = CredentialCapture.DecodeJsString(raw);
-            if (string.IsNullOrEmpty(json)) { Nudge(); return; }
-            var req = CredentialCapture.ParseCaptured(json);
-            if (req == null || !CredentialCapture.IsTarget(req.Url, _capturePattern)) return;
+            var cands = CredentialCapture.OrderCandidates(
+                CredentialCapture.ParseCapturedList(json), _capturePattern);
+            if (cands.Count == 0) { Nudge(); return; }
 
-            // ⚠ 「抄到」不等于「该收工」（2026-09-25 改）：__azhuCapture 在**第一个**命中时就非空了，
-            //   而那个请求很可能是一次失败的（页面刚打开、会话还没就绪）。真正值得抄的是 2xx 那一份 ——
-            //   钩子会在 2xx 时把它覆盖过来。所以这里只认 2xx；非 2xx 继续等，等满 20 秒再拿它交差：
-            //   到那时它本身就是答案（**网站自己发这个请求也没通过**，那就是会话/路径的事，不是我们拼错）。
-            if (req.Status >= 200 && req.Status < 300) { _timer.Stop(); await FinishAsync(req, false); return; }
-            // 抄到的是一份「没成功」的样本。**要让用户看得见**（每 5 秒最多刷一次）：否则他会以为
+            // ⚠ 「抄到」不等于「该收工」：候选里可能只有一次失败的请求（页面刚开、会话没就绪）。
+            //   优先看已经是 2xx 的那些（OrderCandidates 已把它们排在前面）。
+            var good = cands.FirstOrDefault(c => c.Status >= 200 && c.Status < 300);
+            if (good != null)
+            {
+                // 收工前**逐个试**：拿浏览器自己的会话重放，能解析出余额的才算数。
+                // 这一步是本轮修复的落点 —— 排序只是省事，**能不能解析才是真判据**。
+                _timer.Stop();
+                await FinishAsync(cands, false);
+                return;
+            }
+
+            // 只有「没成功」的样本。**要让用户看得见**（每 5 秒最多刷一次）：否则他会以为
             // 程序毫无反应，而实际上我们已经在盯着这个接口了 —— 「静默等待」是本项目反复吃亏的形态。
+            var any = cands[cands.Count - 1];
             if ((DateTime.UtcNow - _lastNudge).TotalSeconds >= 5)
             {
                 _lastNudge = DateTime.UtcNow;
-                SetState(req.Status == 0
+                SetState(any.Status == 0
                     ? "抄到了余额请求，还在等它的响应…"
-                    : "抄到了余额请求，但网站自己发它也返回 " + req.Status + "，再等等看…", Brushes.Orange);
+                    : "抄到了余额请求，但网站自己发它也返回 " + any.Status + "，再等等看…", Brushes.Orange);
             }
             if ((DateTime.UtcNow - _openedAt).TotalSeconds < 20) return;
             _timer.Stop();
-            await FinishAsync(req, false);
+            await FinishAsync(cands, false);
         }
 
         /// <summary>等久了给点方向 —— 光转圈不解释，用户会以为卡死。
@@ -327,9 +342,16 @@ namespace AzhuPet
             return t.Length > 120 ? t.Substring(0, 120) + "…" : t;
         }
 
-        /// <summary>组装并**回测**。captured == null 表示走「直接抓取」那条兜底路（只换 cookie）。</summary>
-        private async Task FinishAsync(CapturedRequest captured, bool manual)
+        /// <summary>组装并**回测**。candidates 为 null 表示走「直接抓取」那条兜底路（只换 cookie）。
+        ///
+        /// ⚠⚠ 2026-09-28 改：参数从**单个** CapturedRequest 变成**候选列表**，并在重放阶段
+        ///   **逐个试解析**。理由：站点改版后一次登录会同时命中多个结构不同的同前缀接口
+        ///   （`-summary`→Packages、`free-packages`→data.Accounts、旧接口→data.Response.Data.Accounts）。
+        ///   钩子不存响应体，只有宿主「浏览器内重放」时才知道哪个能解析出余额 ——
+        ///   所以**真正的择优必须在这里**：谁能解析出余额，就用谁的 URL 落盘。</summary>
+        private async Task FinishAsync(List<CapturedRequest> candidates, bool manual)
         {
+            var captured = (candidates != null && candidates.Count > 0) ? candidates[0] : null;
             if (_working) return;
             _working = true;
             _manual.IsEnabled = false; _reload.IsEnabled = false;
@@ -374,10 +396,12 @@ namespace AzhuPet
                 string url = (captured != null && captured.Url.Length > 0)
                     ? captured.Url
                     : (!string.IsNullOrWhiteSpace(oldUrl) ? oldUrl : _defaultUrl);
+                var initialCap = captured;      // 记下「第一个候选」，后面采纳了别的候选要据此在日志里标注
                 string source = captured != null
                     ? "抄到网站自己的请求（" + captured.Headers.Count + " 个头）＋ 旧凭据补齐浏览器自动头"
                     : (oldHeaders.Count > 0 ? "沿用旧凭据的请求头，只换了 cookie" : "兜底请求头（没有旧凭据可沿用）");
-                var headers = CredentialCapture.BuildFinalHeaders(oldHeaders,
+                // ⚠ 可重新赋值：重放阶段若采纳了别的候选（见下方 tryList 循环），这三项都要重算。
+                List<KeyValuePair<string, string>> headers = CredentialCapture.BuildFinalHeaders(oldHeaders,
                     captured == null ? null : captured.Headers, url,
                     captured == null ? "" : captured.PageUserAgent,
                     captured == null ? "" : captured.PageHref,
@@ -409,13 +433,65 @@ namespace AzhuPet
                 // 挡成 401，而这一发**三次都是 200 并带回真实数据**（TotalCount:29）。它一旦成立，就
                 // 没有理由再去撞那条注定失败的路 —— 而在此之前这段结果只写进日志就被丢掉：
                 // 用户看到红色失败，我们手里其实已经握着答案（2026-09-25 卡住的那一轮）。
+                //
+                // ⚠⚠ 2026-09-28：**逐个候选都试**，谁解析得出余额就用谁。
+                //   这是本轮修复的落点。站点改版后 `get-user-resource` 成了 `-summary` 的前缀，
+                //   一次登录同时命中多个结构不同的接口；只重放「第一个」就会挑错（现场报错
+                //   「响应里没有 Accounts」）。钩子不存响应体 ⇒ 只能在这里试。
+                //   ⚠ 上限 4 个：候选最多 8，但真需要试到第 5 个的情况不存在（同类接口就那两三个），
+                //     而每次重放要等最多 6 秒 —— 试太多会让用户干等。
                 SetState("正在用浏览器自己的会话取一次数…", Muted);
-                var replay = await ReplayInBrowserAsync(url,
-                    captured == null ? "POST" : captured.Method, captured == null ? null : captured.Body);
+                BrowserFetch replay = new BrowserFetch();
+                StatusProbe.WbCaliber? replayCal = null;
+                CapturedRequest picked = captured;      // 最终采纳的那个候选（决定落盘的 URL/头/body）
+                int triedN = 0;
+                var tryList = (candidates != null && candidates.Count > 0)
+                    ? candidates : new List<CapturedRequest> { captured };
+                foreach (var cand in tryList)
+                {
+                    if (triedN >= 4) break;
+                    string tryUrl = (cand != null && cand.Url.Length > 0)
+                        ? cand.Url
+                        : (!string.IsNullOrWhiteSpace(oldUrl) ? oldUrl : _defaultUrl);
+                    var tryReplay = await ReplayInBrowserAsync(tryUrl,
+                        cand == null ? "POST" : cand.Method, cand == null ? null : cand.Body);
+                    triedN++;
+                    LogDiag("候选" + triedN + "/" + Math.Min(tryList.Count, 4) + " " + DescribeReplay(tryReplay));
+                    var cal = tryReplay.Ok ? StatusProbe.ParseWorkbuddyJson(tryReplay.Body)
+                                           : (StatusProbe.WbCaliber?)null;
+                    if (cal.HasValue && cal.Value.Ok)
+                    {
+                        replay = tryReplay; replayCal = cal; picked = cand;
+                        if (triedN > 1)
+                            LogDiag("✓ 第 " + triedN + " 个候选解析成功 ⇒ 采纳 " + tryUrl);
+                        break;
+                    }
+                    // 记住最后一次（哪怕是失败的）—— 全都解析不出来时，要用它给用户报原因
+                    if (replay.Status == 0 && tryReplay.Status != 0) replay = tryReplay;
+                }
                 LogDiag(DescribeReplay(replay));
 
-                StatusProbe.WbCaliber? replayCal = replay.Ok
-                    ? StatusProbe.ParseWorkbuddyJson(replay.Body) : (StatusProbe.WbCaliber?)null;
+                // 采纳的候选若与初始 captured 不同，URL / 请求头 / body / composed 都要跟着换 ——
+                // 否则会出现「用 A 的响应体验成功、却把 B 的地址落了盘」这种自相矛盾的凭据。
+                captured = picked;
+                url = (captured != null && captured.Url.Length > 0)
+                    ? captured.Url
+                    : (!string.IsNullOrWhiteSpace(oldUrl) ? oldUrl : _defaultUrl);
+                // ⚠ 换了候选就必须重算头与正文：captured 一换，来源页 / UA / 抄到的头 / method / body 全变。
+                headers = CredentialCapture.BuildFinalHeaders(oldHeaders,
+                    captured == null ? null : captured.Headers, url,
+                    captured == null ? "" : captured.PageUserAgent,
+                    captured == null ? "" : captured.PageHref,
+                    captured == null ? "" : captured.PageLanguage,
+                    captured == null ? "" : captured.PageChUa,
+                    captured == null ? "" : captured.PageChUaMobile,
+                    captured == null ? "" : captured.PageChUaPlatform);
+                composed = CredentialCapture.ComposeSecret(url, headers, cookieHeader,
+                    captured == null ? null : captured.Body, captured == null ? null : captured.Method);
+                if (composed.Length == 0) { Fail2("组装失败：没有可用的请求地址。", "原凭据未改动。"); return; }
+                LogDiag("采纳候选 url=" + url + " method=" + (captured == null ? "-" : captured.Method)
+                    + " picked=" + (captured != null && !ReferenceEquals(captured, initialCap) ? "换过" : "首个"));
+
                 if (replayCal.HasValue && replayCal.Value.Ok)
                 {
                     // 把「哪条通道真取到过数」连同来源页一起写进凭据，并留下这次读数。

@@ -558,6 +558,38 @@ namespace AzhuPet
                       && CredentialCapture.DecodeJsString("{不是JSON") == "",
                     "ExecuteScriptAsync 返回值解码：解出一层引号；解不出来当空（宁可不说话）", ref pass, ref fail);
 
+                // ---- 候选列表（2026-09-28）：一次登录会命中多个同前缀接口，必须能全读出来、排好序 ----
+                // 这条判据的来历就是本轮 bug：抓取模式 `get-user-resource` 成了新接口 `-summary` 的
+                // **前缀** ⇒ 同时命中两三个结构不同的接口；旧钩子只留第一个 ⇒ 定稿到解析不出余额的那个。
+                string caps = "["
+                    + "{\"url\":\"https://www.workbuddy.cn/billing/meter/get-user-resource-summary\","
+                    + "  \"method\":\"POST\",\"headers\":{},\"body\":\"{}\",\"status\":200},"
+                    + "{\"url\":\"https://www.workbuddy.cn/billing/meter/get-user-resource\","
+                    + "  \"method\":\"POST\",\"headers\":{},\"body\":\"{}\",\"status\":401},"
+                    + "{\"url\":\"https://www.workbuddy.cn/other/thing\",\"method\":\"GET\","
+                    + "  \"headers\":{},\"body\":\"\",\"status\":200}]";
+                var parsed = CredentialCapture.ParseCapturedList(caps);
+                Check(parsed.Count == 3,
+                    "候选列表：三个元素全读出来（不被模式过滤——过滤是排序层的事）", ref pass, ref fail);
+                Check(CredentialCapture.ParseCapturedList("[]").Count == 0
+                      && CredentialCapture.ParseCapturedList("{不是数组").Count == 0
+                      && CredentialCapture.ParseCapturedList("").Count == 0,
+                    "候选列表：空数组 / 非数组 / 空串都返回空表，绝不抛（同 ParseCaptured 的纪律）",
+                    ref pass, ref fail);
+                Check(CredentialCapture.ParseCapturedList("[1,null,{\"url\":\"\"}]").Count == 0,
+                    "候选列表：非对象 / 缺 url 的元素被跳过，不占位、不炸", ref pass, ref fail);
+
+                var ordered = CredentialCapture.OrderCandidates(parsed,
+                    CredentialCapture.WorkbuddyCapturePattern);
+                Check(ordered.Count == 2,
+                    "排序层：只保留命中模式的（other/thing 被滤掉）", ref pass, ref fail);
+                Check(ordered[0].Status == 200 && ordered[0].Url.Contains("-summary"),
+                    "排序层：2xx 的排前面（且它是更具体的那个 URL）——这正是该被采纳的那个", ref pass, ref fail);
+                Check(ordered[1].Status == 401,
+                    "排序层：非 2xx 的排后面（仍保留：全都失败时它本身就是答案）", ref pass, ref fail);
+                Check(CredentialCapture.OrderCandidates(parsed, "不存在的模式").Count == 0,
+                    "排序层：模式一个都不命中 ⇒ 返回空表（宿主据此继续等，而不是拿错的收工）", ref pass, ref fail);
+
                 // ---- 浏览器通道的失败必须分三种说，不能都说成「401」 ----
                 Check(StatusProbe.DescribeBrowserAttempt(new BrowserFetch { Status = 401 }, "x").Contains("重新登录"),
                     "浏览器自己发也被拒 ⇒ 结论只能是「会话失效，去重新登录」（补头、换凭据都不会有变化）",

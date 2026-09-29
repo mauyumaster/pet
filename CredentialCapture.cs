@@ -115,6 +115,15 @@ var o={url:abs(u),method:''+(m||'GET'),headers:hdrs(h),
 body:((typeof b==='string')?b:''),
 ua:(navigator.userAgent||''),href:pg(),org:og(),lang:(navigator.language||''),
 chua:HH.chua,chuam:HH.chuam,chuap:HH.chuap,status:0};
+// ⚠⚠ 2026-09-28 起改为**候选列表**（原来只留第一个命中）：
+//   站点改版后首屏先调 `get-user-resource-summary`（返回 Packages），而旧接口 `get-user-resource`
+//   （返回 Accounts）不再被首屏调用。只留「第一个命中」时，抄到的是那个**结构不同**的新接口
+//   ⇒ 回测拿它去打，200 却解析不出余额（现场报错「响应里没有 Accounts」）。
+//   ⇒ 命中目标模式的**每一个**都留下来（上限 8 个，防内存），由**宿主**按「响应体能不能解析出余额」
+//     择一 —— 这比在脚本里猜接口名精确得多，站点再换名字也不怕。
+if(!window.__azhuCaps)window.__azhuCaps=[];
+window.__azhuCaps.push(o);
+if(window.__azhuCaps.length>8)window.__azhuCaps.shift();
 if(!window.__azhuCapObj){window.__azhuCapObj=o;window.__azhuCapture=JSON.stringify(o);}
 return o;
 }catch(e){return null;}}
@@ -311,6 +320,76 @@ if(o&&x.addEventListener)x.addEventListener('loadend',function(){done(o,x.status
                 }
             }
             catch { return null; }
+        }
+
+        /// <summary>把钩子留下的**候选列表**（`window.__azhuCaps`，一段 JSON 数组）解析成请求对象列表。
+        ///
+        /// ⚠ 为什么要候选列表（2026-09-28）：站点改版后，抓取模式 `get-user-resource`
+        ///   成了新接口 `get-user-resource-summary` 的**前缀** ⇒ 子串匹配同时命中两个结构不同的接口。
+        ///   旧钩子「只留第一个命中」，于是定稿的可能是**结构不同**的那一个（解析不出余额）。
+        ///   现在钩子把每个命中都留下，由宿主逐个**用真实解析器试**，挑能解出余额的那个 ——
+        ///   这比在脚本里猜接口名精确得多，站点以后再换名字也不怕。
+        ///
+        /// 行为：解析不出来的元素**跳过**（不炸、不占位）；顺序**原样保留**（最新在最后，钩子按发生顺序 push）。
+        /// 上限与钩子一致（8 条）—— 但那是钩子的约束，这里只负责如实读出来。</summary>
+        public static List<CapturedRequest> ParseCapturedList(string json)
+        {
+            var list = new List<CapturedRequest>();
+            if (string.IsNullOrWhiteSpace(json)) return list;
+            try
+            {
+                using (var doc = JsonDocument.Parse(json))
+                {
+                    var root = doc.RootElement;
+                    if (root.ValueKind != JsonValueKind.Array) return list;
+                    foreach (var el in root.EnumerateArray())
+                    {
+                        if (el.ValueKind != JsonValueKind.Object) continue;
+                        var req = ParseCaptured(el.GetRawText());
+                        if (req != null) list.Add(req);
+                    }
+                }
+            }
+            catch { }   // 解析不出来就当没抄到 —— 宁可多等一拍，也不下结论
+            return list;
+        }
+
+        /// <summary>把候选**排成「最可能对」的顺序**（纯函数），交给宿主逐个试。
+        ///
+        /// ⚠ 这里**不做真择优** —— 真择优需要响应体，而钩子**不存响应体**（它只记 URL/头/body，
+        ///   响应体要到宿主「浏览器内重放」时才有）。所以纯函数这一层只负责**排序**，
+        ///   真正的判定在 CredentialBrowserWindow.FinishAsync（拿真解析器逐个体试）。
+        ///   **不许**在这一层假装能判「哪个解析得出来」——那就是编造判据。
+        ///
+        /// 排序规则（都是启发式，只为少试几次，错了也不致命）：
+        ///   ① 2xx 的排在非 2xx 前面（2xx = 网站自己发它成功了，更可能拿到真数据）；
+        ///   ② 同为 2xx 时，**URL 更长的靠前** —— 改版后真接口是 `...-summary`（是旧名的超串）；
+        ///   ③ 其它情况保持钩子给的先后（最新在最后 ⇒ 同分时取更新的那条，更贴近当下会话）。
+        ///
+        /// 返回的列表**可能为空**（候选里一个都不命中模式）⇒ 宿主应继续等。</summary>
+        public static List<CapturedRequest> OrderCandidates(IEnumerable<CapturedRequest> candidates, string capturePattern)
+        {
+            var list = new List<CapturedRequest>();
+            if (candidates == null) return list;
+            foreach (var c in candidates)
+                if (c != null && IsTarget(c.Url, capturePattern)) list.Add(c);
+
+            // 稳定排序：先按「是不是 2xx」，再按「URL 长度倒序」。List.Sort 不稳定，
+            // 所以用带序号的比较，保证同分时保留钩子给的先后（后出现的在后）。
+            var indexed = new List<KeyValuePair<int, CapturedRequest>>();
+            for (int i = 0; i < list.Count; i++) indexed.Add(new KeyValuePair<int, CapturedRequest>(i, list[i]));
+            indexed.Sort((a, b) =>
+            {
+                bool a2 = a.Value.Status >= 200 && a.Value.Status < 300;
+                bool b2 = b.Value.Status >= 200 && b.Value.Status < 300;
+                if (a2 != b2) return a2 ? -1 : 1;                       // 2xx 优先
+                int byLen = b.Value.Url.Length.CompareTo(a.Value.Url.Length);   // 长的优先
+                if (byLen != 0) return byLen;
+                return a.Key.CompareTo(b.Key);                          // 同分：保持原序（稳定）
+            });
+            var ordered = new List<CapturedRequest>();
+            foreach (var kv in indexed) ordered.Add(kv.Value);
+            return ordered;
         }
 
         /// <summary>宽容取整数（数字与数字字符串都收），纯函数。

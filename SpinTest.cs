@@ -50,6 +50,13 @@
 //     **2 条红** —— `wire.ondown_sets_initial_dir`、`wire.shell_never_touches_omega`。
 //   ⚠⚠ **本轮最贵的一课**：源码级判据「看着对」而实际**漏检了两次**，两次的输出都是**全绿** ——
 //     只有真跑负对照才能发现。凡是「查文本」的判据，都藏着两个前提：**先剥注释**、**限定范围**。
+//
+//   ⚠ 2026-09-27 更新：那条「OnDown 定初值」的口径**已随需求作废** —— 现在方向是
+//     **拎起那一刻**（OnMove 的拎起分支）才锁的，OnDown 反而必须**不**含 SpinDirFor。
+//     ⇒ 判据改名成一对：`wire.ondown_does_not_spin`（按下不许锁方向）＋
+//       `wire.onmove_locks_dir_at_lift`（拎起分支必须锁）。K 组从 3 条变 4 条。
+//     ⚠ 这正是「判据要跟着**语义**走，不是跟着**实现位置**走」的反面教材：位置搬了，
+//       旧的文本断言就成了**在守一个已经作废的契约**，它红了不代表代码错了。
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -334,7 +341,7 @@ namespace AzhuPet
                 string shellPath = Path.Combine(repoRoot, "PetWindow.cs");
                 string shellSrc = File.Exists(shellPath) ? File.ReadAllText(shellPath) : "";
                 string shellCode = StripCommentLines(shellSrc);
-                kGroup = 3;
+                kGroup = 5;
                 // ⚠⚠ 这里的两条边界**都是负对照实测出来的**（首版两条全漏检，两次都打印全绿）：
                 //   ① 不能 `Contains` 原始源码 —— 注释掉的代码仍是一段包含该子串的文本，
                 //      于是「把接线注释掉」（最常见的退化方式）**照样全绿**。⇒ 必须先剥注释。
@@ -342,14 +349,27 @@ namespace AzhuPet
                 //      查全文时，把 `OnMove` 的**换向**接线注释掉仍然匹配得到 ⇒ 又全绿。
                 //      「按下那一刻定初值」与「拖拽途中跨屏换向」是**两件不同的事**，必须分开守。
                 //   ⚠ 教训：源码级判据两次「看着对」而实际漏检 —— 只跑正对照是发现不了的。
+                //   ⚠⚠ 2026-09-27 变更：「拎起那一刻锁方向」的判定**从 `OnDown` 搬到了 `OnMove`**。
+                //     起因是用户报「按住不动她就转圈」—— `OnDown` 一按下就锁方向＋给角加速度，
+                //     而 `Pose.Step` 的 Dragging 分支是线性升速 ⇒ 按住不动也自转。
+                //     新语义：按下只是「握住」，指针位移超过 `LiftThresholdPx` 才算「拎起」，
+                //     在**那一刻**才锁方向（按「她此刻所在的半屏」算，不是按下那一刻的位置）。
+                //   ⇒ 本判据随之改成守 `OnMove`：`SpinDirFor(` 与 `SpinAccel` 初值都必须出现在 OnMove 里。
+                //     （若谁把这段又搬回 OnDown，本条会红 —— 正是我们要拦的退化。）
                 string onDown = MethodBody(shellCode, "private void OnDown(", "private void OnMove(");
                 string onMove = MethodBody(shellCode, "private void OnMove(", "private void OnUp(");
-                bool downWired = onDown.Contains("PoseEngine.SpinDirFor(")
-                              && onDown.Contains("Pose.SpinAccel = _spinDir * Pose.SpinAccelMag");
-                chk(downWired,
-                    "spin.wire.ondown_sets_initial_dir",
-                    "OnDown 内同时含 SpinDirFor 调用与 SpinAccel 初值 = " + downWired
-                        + "（缺任一个 ⇒ 按下那一刻没定方向）");
+                bool downCleared = onDown.Contains("Pose.Dragging = false")
+                                && !onDown.Contains("PoseEngine.SpinDirFor(");
+                chk(downCleared,
+                    "spin.wire.ondown_does_not_spin",
+                    "OnDown 内**不**含 SpinDirFor 调用、且把 Dragging 置 false = " + downCleared
+                        + "（含它 ⇒ 按下即锁方向 ⇒ 按住不动就转圈，2026-09-27 那个 bug 会复发）");
+                bool liftWired = onMove.Contains("PoseEngine.SpinDirFor(")
+                              && onMove.Contains("Pose.SpinAccel = _spinDir * Pose.SpinAccelMag");
+                chk(liftWired,
+                    "spin.wire.onmove_locks_dir_at_lift",
+                    "OnMove 的**拎起分支**内同时含 SpinDirFor 调用与 SpinAccel 初值 = " + liftWired
+                        + "（缺任一个 ⇒ 拎起来那一刻没定方向）");
                 bool moveWired = onMove.Contains("PoseEngine.SpinDirForHyst(")
                               && onMove.Contains("Pose.SpinAccel = _spinDir * Pose.SpinAccelMag");
                 chk(moveWired,
@@ -362,13 +382,24 @@ namespace AzhuPet
                     "spin.wire.shell_never_touches_omega",
                     "PetWindow.cs 的**代码行**里不出现 `_spinVel` = " + (!omegaInCode)
                         + "（角速度只能由引擎改；壳侧碰它就是「突变」的唯一来源）");
+                // ⚠⚠ 2026-09-27 新增（用户报的第二个 bug）：`OnUp` 必须清 `_lifted`。
+                //   病因：只清 `_dragging` 时，`SlowTick`（120 ms 一拍）仍按 `_lifted` 把
+                //   `Pose.Dragging` 写回 true ⇒ 松手落地后落进**不衰减**的 Dragging 分支、
+                //   以满速永远转下去（用户原话：「松手后角速度逐渐减小的逻辑没了」）。
+                //   ⚠ 行为侧的对照是 `--lifttest` 的 **D 组**；本条是源码侧，两者一源码一行为。
+                string onUp = MethodBody(shellCode, "private void OnUp(", "private void OnRight(");
+                bool liftCleared = onUp.Contains("_lifted = false");
+                chk(liftCleared,
+                    "spin.wire.onup_clears_lifted",
+                    "OnUp 内含 `_lifted = false` = " + liftCleared
+                        + "（缺它 ⇒ 松手后 `_lifted` 残留 ⇒ SlowTick 把 Pose.Dragging 写回 true ⇒ 落地不停转）");
             }
 
             // ================= 防空转（纪律页第 30 条）=================
             // 判据在**空集**上恒真：一个都没匹配到，和全都合格，输出一模一样。
             // 阈值 = 上面各组的条数之和（**不含本条**）：
             //   A6 + B2 + C4 + D3 + E1 + F1 + H2 + I10 + J2 = **31**
-            //   ＋ K 组（只在源码在身边时才加入，2 条）⇒ 源码在时 **33**、不在时 **31**。
+            //   ＋ K 组（只在源码在身边时才加入，5 条）⇒ 源码在时 **36**、不在时 **31**。
             // ⚠⚠ 为什么不是 33+1：`chk(pass, name, detail)` 的参数是**先求值**的，
             //   所以在**本条判据内部**读 `checks.Count` 时，「防空转」自己**还没被 Add 进去**
             //   （读到 33，而外部打印是 34）。这个隐式求值顺序是这里最容易算错的地方 ——
