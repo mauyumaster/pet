@@ -9,20 +9,28 @@
 // ⚠ 为什么换应用（proc 变化）不归这里管：那是原有观察的职责（「他刚换到 X」）。
 //   同一次切换若两路都触发，她会连说两句 —— 两个触发器必须对同一件事只有一个负责。
 //
-// ⚠ 冷却为什么是 200 秒而不是更短：全局闸门 `SpeechGate.Cooldown` 放宽到 180 秒（用户拍板
-//   「统一放宽」）。触发间隔若比闸门短，触发会被闸门拦下 ⇒ 每秒产出一条被拦的观察 ⇒
-//   memory.jsonl 被 veto 记录灌爆。触发间隔 > 闸门 ⇒ 触发时闸门必然放行，两套数字不打架。
+// ⚠⚠ 这两个值**不是常量了**（2026-09-29）：它们跟着「设置 → 说话与吐槽 → 触发节奏」里
+//   用户填的频率走，由 `SpeechFreq.Apply()` 唯一一处下发。这里的初值 = **默认配置换算出来的值**
+//   （10 分钟一句 ⇒ 冷却 620、保底 600），所以万一某条路径漏接下发，行为也仍是新的默认行为，
+//   不会悄悄退回旧值。
+//
+// ⚠ 为什么必须「吐槽冷却 > 开口冷却」：吐槽触发的那一刻，全局闸门必须已经放行。
+//   触发间隔若比闸门短，触发会被闸门拦下 ⇒ **每一拍**产出一条被拦的观察 ⇒
+//   memory.jsonl 被 veto 记录灌爆。⇒ 这个关系由 `SpeechFreq.RoastCooldownSec()` **派生**保证，
+//   谁都不该手写这两个值（判据 `roastCooldownAboveGate` 会盯着）。
 using System;
 
 namespace AzhuPet
 {
     internal static class Roast
     {
-        /// <summary>两次吐槽之间的最小间隔（秒）。必须 &gt; `SpeechGate.Cooldown`，理由见文件头。</summary>
-        public const double CooldownSec = 200;
+        /// <summary>两次吐槽之间的最小间隔（秒）。必须 &gt; `SpeechGate.Cooldown`，理由见文件头。
+        /// ⚠ 由 `SpeechFreq.Apply()` 下发；初值 = 默认配置（10 分钟 + 20 秒冗余）。</summary>
+        public static double CooldownSec = 620;
 
-        /// <summary>定时保底：连续这么久没有任何发言，就冒一句（秒）。</summary>
-        public const double IdleNudgeSec = 600;
+        /// <summary>定时保底：连续这么久没有任何发言，就冒一句（秒）。
+        /// ⚠ 由 `SpeechFreq.Apply()` 下发；初值 = 默认配置（10 分钟）。</summary>
+        public static double IdleNudgeSec = 600;
 
         /// <summary>
         /// **纯函数**：这一拍该不该冒一句吐槽。返回 null ＝ 不该。

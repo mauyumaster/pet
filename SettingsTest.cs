@@ -126,6 +126,105 @@ namespace AzhuPet
                               : "左栏 " + navW + " 宽，与内容区不重叠")));
                 }
 
+                // ⓪''' 左栏内部：品牌区必须在栏目列表**之上**，两段各占各的高度
+                //    ⚠ 为什么光有「不重叠」不够：brand 若被排成 0 高，也算「不重叠」，
+                //      而那时 6 个栏目会各往上窜、整列错位。所以这里断言的是一条**正向**关系。
+                {
+                    Panel nav = FindNav(form);
+                    Control brand = null, list = null;
+                    if (nav != null)
+                        foreach (Control k in nav.Controls)
+                        {
+                            if (k.Name == SettingsWindow.NavBrandName) brand = k;
+                            if (k.Name == SettingsWindow.NavListName) list = k;
+                        }
+                    bool good = nav != null && brand != null && list != null
+                                && brand.Height > 0
+                                && list.Top >= brand.Bottom - 1
+                                && list.Bottom <= nav.ClientSize.Height + 1;
+                    Check("navBrandAboveList", good,
+                        nav == null ? "找不到左侧导航栏容器"
+                        : (brand == null || list == null ? "左栏里找不到「品牌区／栏目列表」（Name 被改掉了？）"
+                           : "品牌区 y=" + brand.Top + ".." + brand.Bottom + "、栏目列表 y=" + list.Top + ".." + list.Bottom
+                             + "（期望：列表整体在品牌区**下方**，且不超出左栏高 " + nav.ClientSize.Height + "）"));
+                }
+
+                // ⓪'''' **同级可见控件两两不许相交** —— 一条通用不变量，覆盖两族真事故
+                //    ⚠⚠ 本条是用户报的两个现象逼出来的，而当时 13 条判据**全绿**：
+                //      ① 「设置面板里没有『说话与吐槽』这一栏」：`_nav` 内 `Dock=Top` 的 brand
+                //         与 `Dock=Fill` 的 host 被排到了同一块地方（host 拿到整个高度、
+                //         brand 叠在顶上）⇒ 第 1 个栏目被**整块盖住**、第 2 个被压掉小半。
+                //         `navVisibleAndDisjoint` 只看 `_nav` 与内容区，**不看 `_nav` 内部**。
+                //      ② 「文字溢出遮挡／被遮挡」：`ToggleRow` 里标题 Label（AutoSize，真实高 30px）
+                //         与副标题 Label（写死 y=24）叠了 11px。`rowsDoNotOverlap` 只比较
+                //         **行与行**（卡片的直接子控件），差一层粒度 —— 行**内部**的兄弟它一个都不看。
+                //    ⇒ 与其为每个构件各写一条（必有遗漏），不如钉住这条通用不变量。
+                //    ⚠⚠ **必须逐栏验，不能只验当前这一栏**：另外 5 栏是 `Visible=false` 的，
+                //      从未排过版 ⇒ 它们的行全在 y=0、宽度还是构造时的默认值，
+                //      「同级不许相交」在它们身上**恒真**（这正是本仓最警惕的那种假绿：
+                //      判据只在被验的那一栏有效，其余全是空气）。
+                //      所以这里把每一栏轮流 `ShowPage` 出来、重排、再量，最后合起来判。
+                {
+                    var pages = FindPages(form);
+                    var found = new List<string>();
+                    var clipFound = new List<string>();
+                    int checkedPages = 0;
+                    int clipOv = 0;
+                    var perPage = new List<string>();
+                    // ① 外壳（窗体／左栏／页脚／内容区）只验**一次** —— 放在逐栏循环里会被重复计数
+                    //    （外壳在 6 次迭代里都可见），诊断数字会虚高到没法读。
+                    var skip = new HashSet<Control>();
+                    foreach (var pg in pages) skip.Add(pg);
+                    int sibOv = CountSiblingOverlaps(form, found, skip);
+                    // ② 每一栏各验一次自己的子树。
+                    //    ⚠⚠ **「点亮哪一栏」与「量哪一栏」必须是同一个对象**：
+                    //      第一版用 `ShowPage(IndexOf(page))` 去点亮、再量那一页，结果两层顺序
+                    //      一旦差一格（内容区自己也被算成一页），就有 5 栏量到的是**空树**、
+                    //      读数恒 0 而总数照样是 6 —— 典型的假绿，我在这上面连栽两次。
+                    //      现在直接把目标页设成可见、再量它本身，中间不存在任何「下标映射」。
+                    for (int pi = 0; pi < pages.Count; pi++)
+                    {
+                        var target = pages[pi];
+                        foreach (var pg in pages) pg.Visible = ReferenceEquals(pg, target);
+                        form.PerformLayout();
+                        InvokeRelayout(form);
+                        form.Update();
+                        checkedPages++;
+                        int n = CountSiblingOverlaps(target, found, null);
+                        if (n > 0) perPage.Add(PageName(target) + "×" + n);
+                        sibOv += n;
+                        clipOv += CountClippedText(target, clipFound);
+                    }
+                    // ⚠⚠ 必须**恢复回第 1 栏**再往下走：隐藏容器不参与重排（`ClientSize` 停在旧值），
+                    //   下面的 `widthTracksResize` 量的是「页面 0 的第一张卡片」，若这时可见的是最后一栏，
+                    //   它拿到的就是没被重排过的宽度 —— 现象是 `596 → 596`（本判据自己把下一条判据弄红了）。
+                    if (pages.Count > 0)
+                    {
+                        foreach (var pg in pages) pg.Visible = ReferenceEquals(pg, pages[0]);
+                        form.PerformLayout();
+                        InvokeRelayout(form);
+                        form.Update();
+                    }
+
+                    Check("noSiblingOverlap", sibOv == 0 && checkedPages >= 6,
+                        checkedPages < 6 ? "只找到 " + checkedPages + " 栏（必须逐栏验；少于 6 栏 ⇒ 有栏没被排过版）"
+                        : (sibOv == 0 ? "逐栏验过 " + checkedPages + " 栏，所有同级控件都不互相盖住"
+                                      : sibOv + " 处重叠（分布：" + string.Join("、", perPage.ToArray()) + "）："
+                                        + string.Join("；", found.ToArray())));
+
+                    // ⑧ 文字不许被自己的盒子裁掉 —— 与 ⑦ 是一对，缺一条就漏一半
+                    //    ⚠ ⑦ 管「两块地方叠在一起」（两行字糊成一团）；
+                    //      本条管「Height 写死一行、而那段文字实际换了两行 ⇒ 第二行被裁掉」。
+                    //      两者都是用户报的「文字显示有问题」，但**重叠判据对裁字完全无感** ——
+                    //      被裁的文字盒子本身没有压到任何人身上。所以必须单独量。
+                    //    ⚠ 需要的高度用 `SettingsTheme.TextBlockH`（＝框架自己排出来要多少），
+                    //      不用任何自算公式，否则「量法比别人松」就成了假绿。
+                    clipOv += CountClippedText(form, clipFound);
+                    Check("textNotClipped", clipOv == 0,
+                        clipOv == 0 ? "逐栏加外壳都查过：没有文字的盒子比它那段文字还矮"
+                                    : clipOv + " 处文字被裁：" + string.Join("；", clipFound.ToArray()));
+                }
+
                 // ① 内容不被裁：卡片高 ≥ 内容下沿 + 下内边距
                 //    ⚠ 额外要求：卡片**必须真的被排过**。一个从没排过的卡片高度是默认值，
                 //      「高 ≥ 内容下沿」在它身上会**因为所有行都在 0 位置而恒真** ——
@@ -424,21 +523,106 @@ namespace AzhuPet
             return true;                                    // 满屏品红 ⇒ 什么都没画
         }
 
-        /// <summary>找出所有「页面容器」（承载卡片流的那几个 Panel）。</summary>
-        private static List<Panel> FindPages(Form form)
+        /// <summary>数「文字比自己的盒子还长、下沿被裁掉」的控件。
+        /// 只看 `AutoSize=false` 的文字控件 —— `AutoSize=true` 的高度是框架按文字算的，不会裁。
+        /// ⚠ 需要的高度用 <see cref="SettingsTheme.TextBlockH"/> 求（框架自己的度量），
+        ///   不用任何自算公式，否则「量法比别人松」就成了假绿。</summary>
+        private static int CountClippedText(Control root, List<string> into)
         {
-            var list = new List<Panel>();
+            int n = 0;
             Action<Control> walk = null;
             walk = (c) =>
             {
                 foreach (Control k in c.Controls)
                 {
-                    if (k is Panel p && !(k is FlowLayoutPanel) && p.AutoScroll && p.Controls.Count > 0)
-                        list.Add(p);
+                    if (k is Label l && !l.AutoSize && ShownAlongChain(l)
+                        && !string.IsNullOrEmpty(l.Text) && l.Width > 0)
+                    {
+                        int need = SettingsTheme.TextBlockH(l.Text, l.Font, l.Width);
+                        if (l.Height + 1 < need)
+                        {
+                            n++;
+                            if (into != null && into.Count < 12)
+                                into.Add(Describe(l) + "（高 " + l.Height + " < 需要 " + need + "，" + l.Width + "px 宽）");
+                        }
+                    }
                     if (k.HasChildren) walk(k);
                 }
             };
-            walk(form);
+            walk(root);
+            return n;
+        }
+
+        /// <summary>给一栏起个能认出来的名字（诊断用）：取它第一张卡的标题。</summary>
+
+        /// ⚠ **不要**用「第几栏」去索引左栏的导航项 —— 那又引入一次下标映射，
+        ///   而本轮所有假绿都出在「两套顺序差一格」上。</summary>
+        private static string PageName(Panel page)
+        {
+            var cards = FindCards(page);
+            return cards.Count > 0 ? "「" + (cards[0].Title ?? "?") + "」栏" : "无名栏";
+        }
+
+        /// <summary>沿 Parent 链查可见性。`Control.Visible` 只看自己那一层 ——
+        /// 隐藏页里的卡片自己仍是 `Visible=true`，不查链就会把 6 个页面判成 6 个互相压住的兄弟。</summary>
+        private static bool ShownAlongChain(Control c)
+        {
+            for (Control q = c; q != null; q = q.Parent) if (!q.Visible) return false;
+            return true;
+        }
+
+        /// <summary>数「同一个父容器下的可见兄弟控件」有几对相交，并把说明追加进 <paramref name="into"/>。
+        /// 这是本文件唯一的**通用**不变量 —— 它不问控件是什么，只问「两块地方有没有叠在一起」，
+        /// 所以能同时覆盖「Dock 处理顺序排错」与「行内写死坐标撞字」两族问题。
+        /// ⚠ 收集用 `List&lt;string&gt;` 而不是 `ref string`：`ref` 参数不许在 lambda 里用（CS1628）。</summary>
+        /// <param name="skipSubtree">不往下递归的容器（逐栏验时用它把「外壳」与「各栏」分开数，
+        /// 否则外壳会被计 6 次）。传 null 表示整棵树都走。</param>
+        private static int CountSiblingOverlaps(Control root, List<string> into, HashSet<Control> skipSubtree)
+        {
+            int n = 0;
+            Action<Control> walk = null;
+            walk = (parent) =>
+            {
+                for (int i = 0; i < parent.Controls.Count; i++)
+                    for (int j = i + 1; j < parent.Controls.Count; j++)
+                    {
+                        Control a = parent.Controls[i], b = parent.Controls[j];
+                        if (!ShownAlongChain(a) || !ShownAlongChain(b)) continue;
+                        if (a.Width <= 0 || a.Height <= 0 || b.Width <= 0 || b.Height <= 0) continue;
+                        int ox = Math.Min(a.Right, b.Right) - Math.Max(a.Left, b.Left);
+                        int oy = Math.Min(a.Bottom, b.Bottom) - Math.Max(a.Top, b.Top);
+                        if (ox > 1 && oy > 1)
+                        {
+                            n++;
+                            if (into != null && into.Count < 40)
+                                into.Add(Describe(a) + " 压住 " + Describe(b)
+                                    + "（" + ox + "×" + oy + "px，同在 " + Describe(parent) + " 内）");
+                        }
+                    }
+                foreach (Control k in parent.Controls)
+                    if (k.HasChildren && (skipSubtree == null || !skipSubtree.Contains(k))) walk(k);
+            };
+            walk(root);
+            return n;
+        }
+
+        /// <summary>找出 6 个「页面容器」（承载卡片流的那几个 Panel）。
+        ///
+        /// ⚠⚠ **不要**写成「凡是 AutoScroll 的 Panel 就算一页」—— 内容区自己也是 `AutoScroll`，
+        ///   于是它会被当成「第 0 页」、后面每一栏**整体错位一格**：逐栏验时「显示出来的页」
+        ///   与「量到的那棵树」不是同一个 ⇒ 有 5 栏量到的是空树，读数恒 0。
+        ///   危险之处在于**总项数照样是 6**、`>= 6` 的断言照样过，看起来像验完了。
+        ///   （2026-09-29 实测：修正前逐栏只报 6 处重叠，修正后同一份代码报 15 处。）
+        ///   正确口径：页面 = **内容区（窗体上 `Dock=Fill` 的那个 Panel）的直接子控件**。</summary>
+        private static List<Panel> FindPages(Form form)
+        {
+            var list = new List<Panel>();
+            Panel content = null;
+            foreach (Control c in form.Controls)
+                if (c is Panel p && p.Dock == DockStyle.Fill) content = p;
+            if (content == null) return list;
+            foreach (Control k in content.Controls)
+                if (k is Panel pg && !(k is FlowLayoutPanel) && pg.Controls.Count > 0) list.Add(pg);
             return list;
         }
 
@@ -509,6 +693,21 @@ namespace AzhuPet
                 if (r != null) return r;
             }
             return null;
+        }
+
+        /// <summary>给重叠诊断一个**人能认出来的名字**。判据失败时最怕读到
+        /// 「Panel 压住 Panel」—— 那就等于没报。所以卡片/导航栏目/开关/有文字的控件各有其名。</summary>
+        private static string Describe(Control c)
+        {
+            if (c == null) return "?";
+            if (c is Card cd) return "卡片「" + (cd.Title ?? "?") + "」";
+            if (c is NavItem ni) return "栏目「" + (ni.Title ?? "?") + "」";
+            if (c is Toggle) return "拨动开关";
+            string t = (c.Text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+            if (t.Length > 0) return "\"" + (t.Length > 16 ? t.Substring(0, 16) + "…" : t) + "\"";
+            if (!string.IsNullOrEmpty(c.Name)) return c.Name;
+            if (c is Form) return "整窗体";
+            return c.GetType().Name;
         }
 
         private static int Report(bool ok, List<object> checks, bool negative)

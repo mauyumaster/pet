@@ -79,6 +79,12 @@ namespace AzhuPet
         /// 正式路径上绝不开。</summary>
         public static bool NoWbBeat;
 
+        /// <summary>负对照（`--no-beat-cap`）：去掉心跳兜底的两条**上限**（静默窗口 ＋ 封顶判定），
+        /// 回到「只要心跳新鲜就一直算活着」。⚠ 那正是用户 2026-09-29 报的「一直显示进行中」的行为 ——
+        /// 没有它，E4/E5 的绿说明不了任何事（可能只是我把读数焊死在屏幕上了）。
+        /// 正式路径上绝不开。</summary>
+        public static bool NoBeatCap;
+
         private const double ScanEverySec = 5.0;          // 重新定位日志文件的节流（agent 重启会换目录）
         private const double ReadEverySec = 0.5;          // 增量读日志的节流
         private const double StaleSec = 2 * 3600;         // 单个任务跑超过 2 小时 ⇒ 当作残留
@@ -110,6 +116,20 @@ namespace AzhuPet
         //   而存活判据原本只看「日志最近有没有被写」⇒ 正在跑的任务被从读数里抹掉。
         private const double WbBeatFreshSec = 180;    // 心跳多久算新鲜（容 3–6 次丢跳）
 
+        // ⚠⚠ 心跳只能证明「客户端进程活着」，**不能**证明「这一轮还在跑」：
+        //   `sessions\<pid>.json` 只要 WorkBuddy 开着就一直在跳，跟有没有任务无关。
+        //   不管它的话，一个「开始了、但没等到结束标记」的任务会**一直挂在读数上**
+        //   （实测 2026-09-29：用户报「一直显示进行中」，其实早就没任务了）。
+        //   ⇒ 心跳续命必须有**时钟上限**：日志静默超过它，就不认心跳。
+        private const double WbBeatMaxSilenceSec = 1800;   // 30 分钟（当初加心跳要救的现场是静默 21 分钟）
+
+        // WorkBuddy 的会话日志会**封顶**：实测两份都停在 10485663 / 10485558 字节
+        // （10 MiB = 10485760，只差几十字节），且 mtime 冻结 —— 之后该会话**永久**不再落新事件。
+        // ⚠ 不敢把 10 MiB 写死当判据 —— 那是从两个样本推出来的值，写偏了会在「日志本来就大、
+        //   又真的静默」时误杀**真长任务**（而那恰恰是加心跳要救的场景）。
+        //   ⇒ 这里只取「够大」这一个弱条件，再配上「已过正常静默阈值」才认定它封顶。
+        private const long WbLogBigBytes = 8L * 1024 * 1024;
+
         private enum Agent { Trae, WorkBuddy, Codex }
 
         /// <summary>一个被 tail 的日志文件。**只负责「读到哪了」**，任务状态不挂在这里
@@ -121,6 +141,7 @@ namespace AzhuPet
             public string Tag;               // 文件级标签：TRAE 的 w1、WorkBuddy/Codex 的会话号片段
             public string SessId;            // **文件级**会话号：只有 Codex 有（取文件名里第一段 UUID）
             public long Pos;                 // 已消费到的字节偏移
+            public long Len;                 // 最后一次看到的**文件大小**（判「已封顶的大日志」，见 WbLogBigBytes）
             public string Carry;             // 上一段结尾那半行（换行还没来）
             public DateTime WriteUtc;        // 该文件最后被写的时间（判断「还有人在写吗」）
         }
@@ -360,6 +381,7 @@ namespace AzhuPet
                 var fi = new FileInfo(s.Path);
                 long len = fi.Length;
                 s.WriteUtc = fi.LastWriteTimeUtc;
+                s.Len = len;
 
                 // ⚠⚠ Codex 必须在**扫边界之前**就把「这个文件属于哪个会话」登记上，
                 //   不能等扫到边界才登记：一个会话的多个 rollout 文件里，**有的文件一条边界都没有**
@@ -420,6 +442,7 @@ namespace AzhuPet
                     var fi = new FileInfo(s.Path);
                     long len = fi.Length;
                     s.WriteUtc = fi.LastWriteTimeUtc;
+                    s.Len = len;                                     // 见 WbLogBigBytes（封顶判定）
                     if (len < s.Pos) { s.Pos = 0; s.Carry = null; }   // 被截断 / 轮转 ⇒ 从头再来
                     if (len == s.Pos) continue;
 
@@ -503,19 +526,31 @@ namespace AzhuPet
                 // 存活看**文件**有没有在被写（会话自己不会报心跳），所以取承载它的那些文件里
                 // **最新被写的那个**。⚠ 不能只看某一个：Codex 一个会话横跨多个文件，旧文件
                 // 在 compact 之后就冻住了，只盯它会把「还在跑」判成「已经没了」。
-                DateTime newest = DateTime.MinValue; bool has = false;
+                DateTime newest = DateTime.MinValue; bool has = false; long newestLen = 0;
                 foreach (string p in t.Paths)
                 {
                     if (!_src.TryGetValue(p, out Source src)) continue;
                     has = true;
-                    if (src.WriteUtc > newest) newest = src.WriteUtc;
+                    if (src.WriteUtc > newest) { newest = src.WriteUtc; newestLen = src.Len; }
                 }
                 if (!has) continue;
+                double silent = (DateTime.UtcNow - newest).TotalSeconds;
+
                 // ⚠ WorkBuddy 额外走**真心跳**兜底：它一轮对话中途可以十几分钟不写日志，
                 //   只看「日志静默」会把正在跑的任务判死（见 RefreshWbHeartbeats 那段）。
                 //   是**兜底**不是替代 —— 日志判据原样保留。
-                bool alive = (DateTime.UtcNow - newest).TotalSeconds <= NoWriteSec(t.Agent)
-                             || (!NoWbBeat && WbBeatAlive(t));
+                // ⚠⚠ 但**没有上限的兜底＝假「进行中」的永久许可证**（2026-09-29 用户报）。加两条上限：
+                //   ① 日志静默超过 <see cref="WbBeatMaxSilenceSec"/> ⇒ 不再认心跳
+                //      （当初加心跳要救的现场是静默 21 分钟，30 分钟窗口盖得住）。
+                //   ② 承载文件已是**大文件且早已停写** ⇒ 那是会话日志**封顶**了
+                //      （见 <see cref="WbLogBigBytes"/>）—— 此时「没有结束标记」不是「还在跑」，
+                //      而是「再也不会有了」。
+                bool wbFrozen = t.Agent == Agent.WorkBuddy
+                                && newestLen >= WbLogBigBytes && silent > NoWriteSec(t.Agent);
+                bool beatOk = !NoWbBeat
+                              && (NoBeatCap || (silent <= WbBeatMaxSilenceSec && !wbFrozen))
+                              && WbBeatAlive(t);
+                bool alive = silent <= NoWriteSec(t.Agent) || beatOk;
 
                 if (t.StartMs > t.EndMs)
                 {

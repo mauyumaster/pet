@@ -291,8 +291,18 @@ namespace AzhuPet
         /// </summary>
         public static Func<string> ScreenSource = OcrEye.TextForSpeaking;
 
-        /// <summary>台词上限（人格页 §4：一两句，多了就不像说话，像播报）。可被 --speak-max 覆盖。</summary>
+        /// <summary>台词上限（人格页 §4：一两句，多了就不像说话，像播报）。
+        /// ⚠ 口径是**可见字数**：换行符不计（说了几行不是「话多」，字才是）—— 由 Judge 走 VisibleLength。
+        /// ⚠ 旧注释写「可被 --speak-max 覆盖」，而全仓**没有**这个开关（2026-09-29 核实）⇒ 已删该说法。</summary>
         public int MaxChars = 30;
+
+        /// <summary>允许多行台词（2026-09-29 用户拍板：「多行输出也可以」）。
+        /// 起因：换成有性格的模型后，她主动搭话常写成「数字。⏎ 反问」两行，撞下面那条「一句台词不该分行」
+        /// 被**整句丢弃** ⇒ 表现是「她有时不开口」（实测采用率在 0–50% 之间抖）。
+        /// 而气泡流 <see cref="BubbleFeed"/> 本来就是 TextWrapping=Wrap ＋卡片高度自测量，两行放得下 ——
+        /// 「多行塞不进去」说的是**旧的窗口内覆盖层**（PetWindow 注释里那段），那个实现早就废了。
+        /// ⚠ `--no-multiline` 是**负对照**：回到旧行为（含换行即丢弃），判据必须变红。</summary>
+        public static bool AllowMultiline = true;
 
         public async Task<Verdict> SayAsync(Observation obs)
         {
@@ -305,14 +315,34 @@ namespace AzhuPet
         /// <summary>
         /// 长短与空值的裁决。**抽成纯函数** ⇒ 不必联网就能验「超长必须被丢弃」。
         /// ⚠ 超限**丢弃**、不截断：半句话比不说更糟，而且会让「为什么没说话」无法归因。
+        /// ⚠ 2026-09-29 起**多行不再丢弃**（用户拍板），且字数口径同时改成**只数可见字符** ——
+        ///   否则「放开多行」会被「超 N 字」原地拦下（两行必然多出换行符），改动等于没做。
         /// </summary>
         public static Verdict Judge(string text, int max)
         {
             text = (text ?? "").Trim();
             if (text.Length == 0) return new Verdict { Speak = false, Why = "模型回了空内容" };
-            if (text.Length > max) return new Verdict { Speak = false, Text = text, Why = "超 " + max + " 字（丢弃，不截断）" };
-            if (text.IndexOf('\n') >= 0) return new Verdict { Speak = false, Text = text, Why = "多行（一句台词不该分行）" };
+            if (VisibleLength(text) > max) return new Verdict { Speak = false, Text = text, Why = "超 " + max + " 字（丢弃，不截断）" };
+            // ⚠ 多行那条规则**保留在代码里、由静态位控制**，而不是直接删掉：
+            //   `--no-multiline` 是它的负对照 —— 没有负对照的绿没有信息量，
+            //   而这条判据要证的恰恰是「换行**不再**被丢」。
+            if (!AllowMultiline && text.IndexOf('\n') >= 0)
+                return new Verdict { Speak = false, Text = text, Why = "多行（一句台词不该分行）" };
             return new Verdict { Speak = true, Text = text, Why = "模型（trae）" };
+        }
+
+        /// <summary>「字数」口径：**只数可见字符**（`\r`／`\n` 不计入）。
+        /// 理由：上限管的是「她话太多」，换行不是话 —— 两行各 15 字与一行 30 字一样长。</summary>
+        public static int VisibleLength(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return 0;
+            int n = 0;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c != '\n' && c != '\r') n++;
+            }
+            return n;
         }
 
         /// <summary>

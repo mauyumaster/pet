@@ -111,10 +111,14 @@ namespace AzhuPet
     /// </summary>
     internal sealed class SpeechGate
     {
-        // ⚠ 2026-09-20 用户拍板「统一放宽」：45 → 180 秒（支持吐槽通道后每句之间隔几分钟）。
-        //   ⚠ Roast.CooldownSec（200）必须**大于**这个值 —— 否则吐槽触发会被这里拦下，
-        //     每秒产出一条被拦的观察，memory.jsonl 会被 veto 记录灌爆（理由见 Roast.cs 文件头）。
-        public double Cooldown = 180;    // 两次开口之间的最小间隔（秒）
+        // ⚠ 沿革：45 →（2026-09-20 用户拍板「统一放宽」）180 →（2026-09-29 用户拍板
+        //   「十分钟一句」）600 秒。**现在这个默认值只是「没人下发时」的兜底** ——
+        //   真实值由 `SpeechFreq.Apply()` 从配置（设置 → 说话与吐槽 → 触发节奏）下发。
+        //   两处必须一致，判据 `speechFreqDefaultIsTenMinutes` 盯着。
+        //   ⚠ `Roast.CooldownSec` 必须**大于**这个值 —— 否则吐槽触发会被这里拦下，
+        //     每一拍产出一条被拦的观察，memory.jsonl 会被 veto 记录灌爆（理由见 Roast.cs 文件头）。
+        //     这条关系现在由 `SpeechFreq.RoastCooldownSec()` 派生保证，别手写。
+        public double Cooldown = 600;    // 两次开口之间的最小间隔（秒）
         public int DailyCap = 200;       // 每天最多几句（原 60，用户拍板 200）
 
         private DateTime _last = DateTime.MinValue;

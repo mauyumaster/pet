@@ -67,6 +67,25 @@ namespace AzhuPet
                 Check(back.VaultPath == @"D:\Obsidian_SecondBrain\SecondBrain",
                     "反斜杠路径逐字节还原", "读到 <" + back.VaultPath + ">");
 
+                // ---- ②' 说话频率三字段的往返保真（2026-09-29 加）----
+                //     既有条目都只盯 vaultPath 那条路径；新字段要自己有一条 —— 否则
+                //     「面板填了但读不回来」会一路静默，症状只是「她按旧值说话」，最难查的那类。
+                var cf = new PetConfig { SpeechCooldownMin = 12.5, RoastIdleMin = 25, SpeechDailyCap = 77 };
+                cf.Save();
+                var bf = PetConfig.Load();
+                Check(bf.SpeechCooldownMin == 12.5 && bf.RoastIdleMin == 25 && bf.SpeechDailyCap == 77,
+                    "说话频率三字段往返保真（含小数）",
+                    "读到 " + bf.SpeechCooldownMin + " 分钟／" + bf.RoastIdleMin + " 分钟／" + bf.SpeechDailyCap + " 句");
+
+                // ---- ②'' 旧配置里没有这三个键时必须回落默认 ----
+                //     用户现有的 config.json 就没有它们 ⇒ 这条正是「不打扰用户」的保证：
+                //     升级后不改配置，行为就是新的默认（十分钟一句）。
+                File.WriteAllText(Path.Combine(tmp, "config.json"), "{\r\n  \"size\": 1\r\n}\r\n");
+                var bOld = PetConfig.Load();
+                Check(bOld.SpeechCooldownMin == 10 && bOld.RoastIdleMin == 10 && bOld.SpeechDailyCap == 200,
+                    "旧配置缺这三个键时回落默认（十分钟一句／200 句）",
+                    "读到 " + bOld.SpeechCooldownMin + " 分钟／" + bOld.RoastIdleMin + " 分钟／" + bOld.SpeechDailyCap + " 句");
+
                 // ---- ③ 反斜杠数量不许增长（直接盯住那个翻倍的量）----
                 int n0 = CountBackslashes(back.VaultPath);
                 for (int i = 0; i < 6; i++) { back.Save(); back = PetConfig.Load(); }

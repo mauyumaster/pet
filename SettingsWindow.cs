@@ -61,7 +61,10 @@ namespace AzhuPet
         // ---- 控件引用（保存时统一回读）----
         private CheckBox _cSpeech, _cLlm, _cRoast, _cSummary, _cOcr, _cOcrSend, _cEye;
         private NumericUpDown _nInterval;
+        private NumericUpDown _nCooldown, _nIdle, _nDaily;    // 说话频率三旋钮（第 1 栏）
         private TextBox _tVault, _tBase, _tModel, _tKey;
+        // 备用通道（可选，2026-09-29 加）：主通道被限流时改走它。
+        private TextBox _tBase2, _tModel2, _tKey2;
         private CheckBox _cTopmost, _cNight, _cAutostart;
         private ComboBox _cSize;
         private Toggle _tSpeech, _tLlm, _tRoast, _tSummary, _tOcr, _tOcrSend, _tEye, _tTopmost, _tNight, _tAutostart;
@@ -81,6 +84,11 @@ namespace AzhuPet
         private const int PadX = 24;          // 内容区左右留白
         private const int PadY = 20;          // 内容区上下留白
         private const int CardPad = 16;       // 卡片内部留白
+
+        /// <summary>左栏两个容器的 Name。**判据靠它认出谁是谁** —— 版式判据要断言
+        /// 「品牌区在栏目列表之上」，用名字取比「猜类型／写死坐标」稳（坐标正是会漂的那个量）。</summary>
+        internal const string NavBrandName = "navBrand";
+        internal const string NavListName = "navList";
 
         public SettingsWindow(ISettingsHost w)
         {
@@ -168,7 +176,9 @@ namespace AzhuPet
         {
             var pal = SettingsTheme.Pal;
 
-            var brand = new Panel { Dock = DockStyle.Top, Height = 78, BackColor = Color.Transparent };
+            // ⚠ Name 不是装饰：`--settingstest` 的 `navBrandAboveList` 靠它认出「品牌区」与
+            //   「栏目列表」，不靠猜类型、也不靠写死坐标 —— 否则判据自己会和版式一起漂。
+            var brand = new Panel { Name = NavBrandName, Dock = DockStyle.Top, Height = 78, BackColor = Color.Transparent };
             brand.Paint += (s, e) =>
             {
                 var g = e.Graphics;
@@ -182,8 +192,17 @@ namespace AzhuPet
             };
             _nav.Controls.Add(brand);
 
-            var host = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Padding = new Padding(8, 4, 8, 8) };
+            var host = new Panel { Name = NavListName, Dock = DockStyle.Fill, BackColor = Color.Transparent, Padding = new Padding(8, 4, 8, 8) };
             _nav.Controls.Add(host);
+
+            // ⚠⚠ **`Dock=Fill` 必须最后被处理**，否则它把左栏**整个高度**吃光，
+            //   而 `Dock=Top` 的品牌区只能叠在顶上 ⇒ 第 1 个栏目被**整块盖住**、第 2 个被压掉大半。
+            //   2026-09-29 用户报「设置面板里没有『说话与吐槽』这一栏」，就是这么来的
+            //   （那一栏一直存在、也一直被选中，只是被品牌区盖住了看不见）。
+            //   实测：不调它时 brand 与 host 都报 y=0..78 / y=0..620，重叠 210×78px。
+            //   ⚠ 这与本文件窗体级那条 `_content.BringToFront()` 是**同一个机制**，
+            //     别只改一处 —— 少一处的症状就是「某个区域整块不见了，而所有判据全绿」。
+            host.BringToFront();
 
             // 顺序＝用户第一次打开会依次想的顺序：先「她怎么说话」，再「她靠什么说话」…
             AddNav(host, "◍", "说话与吐槽", "她会主动开口吗");
@@ -385,6 +404,64 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             card.Controls.Add(row);
         }
 
+        /// <summary>
+        /// 造一行「标签 ＋ 数字框 ＋ 单位（默认值提示）」。三行频率旋钮共用。
+        /// ⚠ 抽出来不是为了省几行 —— 是**三个 x 坐标只写一遍**：手写三份各偏几像素，
+        ///   正是旧版错位的来源（本仓老毛病「同一份数据两个落点」的排版版）。
+        /// </summary>
+        private Panel NumRow(string label, double val, double min, double max, double step,
+                             string unit, string hint, out NumericUpDown box)
+        {
+            var pal = SettingsTheme.Pal;
+            box = new NumericUpDown
+            {
+                Minimum = (decimal)min, Maximum = (decimal)max, Increment = (decimal)step,
+                BackColor = pal.Field, ForeColor = pal.Text, BorderStyle = BorderStyle.FixedSingle,
+                Value = (decimal)Math.Max(min, Math.Min(max, val)),
+            };
+            return FieldRow(label, box, 140, 74,
+                unit + (string.IsNullOrEmpty(hint) ? "" : "（" + hint + "）"));
+        }
+
+        /// <summary>
+        /// 造一行「标签 ＋ 输入控件 ＋ 可选尾注」。**三个输入行共用**（开口间隔／安静保底／每天上限，
+        /// 另外第 4、5 栏的两行也走它）。
+        ///
+        /// ⚠⚠ **高度与输入框的 x 都不许写死**（2026-09-29 用户报「文字溢出遮挡其他元素或被遮挡」）：
+        ///   字体是**按 DPI 缩放**的 —— 本机 150% 缩放下 9.5pt 的实测行高是 **30px**，
+        ///   而这一带原来是按 96dpi 写的死数字（面板高 32、标签 y=8、输入框 x=140）：
+        ///     · 标签（y 8..38，高 30）比面板（32）还高 ⇒ 下沿被截；
+        ///     · 「安静时多久冒一句」实测 **163px** 宽，直接压在 x=140 的输入框上（实测重叠 23×29px）。
+        ///   ⇒ 行高取 `max(标签行高, 控件高) + GapSm`、两者垂直居中；
+        ///     输入框的 x 由**标签实测宽**推出：`max(minFieldX, 标签宽 + GapMd)`。
+        ///   ⚠ 有 `minFieldX` 兜底是为了三行**对齐**（长短不一的标签不会让输入框参差不齐）。
+        /// </summary>
+        private Panel FieldRow(string label, Control field, int minFieldX, int fieldWidth, string tail)
+        {
+            var pal = SettingsTheme.Pal;
+            var lbl = new Label { Text = label, AutoSize = true, ForeColor = pal.Text, Font = SettingsTheme.Body };
+            int lh = SettingsTheme.LineH(SettingsTheme.Body);   // 真实行高（不是 Font.Height，见 SettingsTheme.LineH）
+            int fh = Math.Max(lh, field.Height);          // 控件高还没被框架定下来时，至少不矮于标签
+            int h = fh + SettingsTheme.GapSm;
+
+            var row = new Panel { Height = h, BackColor = pal.Card };
+            lbl.Location = new Point(0, (h - lh) / 2);
+            row.Controls.Add(lbl);
+
+            int fx = Math.Max(minFieldX, lbl.PreferredWidth + SettingsTheme.GapMd);
+            field.Location = new Point(fx, Math.Max(0, (h - fh) / 2));
+            field.Width = fieldWidth;
+            row.Controls.Add(field);
+
+            if (!string.IsNullOrEmpty(tail))
+                row.Controls.Add(new Label
+                {
+                    Text = tail, AutoSize = true, ForeColor = pal.Faint, Font = SettingsTheme.Body,
+                    Location = new Point(fx + fieldWidth + SettingsTheme.GapSm, (h - lh) / 2),
+                });
+            return row;
+        }
+
         /// <summary>结算卡片：算标题高度、摆放行、定高。**可在 Resize 时重复调用**（幂等），
         /// 所以它只依赖 <see cref="CardCtx"/> 里的数据与卡片当前宽度，不累积任何状态。</summary>
         private void FinishCard(Card card)
@@ -457,13 +534,24 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             AddRow(c1, _trow3);
             FinishCard(c1);
 
+            // ---- 触发节奏（2026-09-29 由只读说明改成可调）----
+            // ⚠ 用户拍板「十分钟一句」＋「频率在设置里可调」。三个数字之间的**不变式**
+            //   （保底 ≥ 冷却、吐槽冷却 > 冷却）由 `SpeechFreq.Apply` 一处钳制搞定 ——
+            //   面板这边**不做任何校验**，否则就是第二个口径（本仓老毛病「同一份数据两个落点」）。
             var c2 = BeginCard(flow, "触发节奏",
-                "这三条是「她多久冒一次话」的口径，暂时锁在默认值。");
-            AddRow(c2, Note("• 停留多久才算「她看到了」：8 秒\n"
-                          + "• 两次吐槽之间的最短间隔：200 秒\n"
-                          + "• 每天最多主动说：200 句\n\n"
-                          + "改动它们要三个数字配套调（例如冷却必须大于闸门冷却），单独放开容易让她刷屏 —— "
-                          + "需要时告诉我，我一起调。", SettingsTheme.Pal.Muted));
+                "她多久说一句。改完点「保存并生效」立刻起作用，不用重启。");
+            AddRow(c2, NumRow("两次开口至少隔", _w.Cfg.SpeechCooldownMin, 1, 240, 1,
+                "分钟", "默认 10", out _nCooldown));
+            AddRow(c2, NumRow("安静时多久冒一句", _w.Cfg.RoastIdleMin, 1, 240, 1,
+                "分钟", "默认 10", out _nIdle));
+            AddRow(c2, NumRow("每天最多说", _w.Cfg.SpeechDailyCap, 1, 2000, 10,
+                "句", "默认 200", out _nDaily));
+            AddRow(c2, Note("• 第一条是**硬闸门**：两次开口之间的最小间隔，与她有没有话要说无关。\n"
+                          + "• 第二条只在**完全安静**时用得上（标题没变、你也没换应用）—— 免得她像死掉了。\n"
+                          + "• 「换了页面就吐槽一句」的间隔会自动跟着第一条走（必须比它长，否则触发会被闸门\n"
+                          + "   一次次拦下，把她的观察记录灌爆）。\n"
+                          + "• 不受影响的口径：停留多久才算「她看到了」仍是自适应的 4–8 秒；手动「让她说一句」\n"
+                          + "   永远能开口，不看这些数。", SettingsTheme.Pal.Muted));
             FinishCard(c2);
         }
 
@@ -490,6 +578,24 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
                 + "    本地 ollama → http://localhost:11434/v1 ＋ qwen2.5", SettingsTheme.Pal.Faint);
             AddRow(c1, hint);
             FinishCard(c1);
+
+            // ---- 备用通道（可选，2026-09-29 加）----
+            // 为什么要有这一栏：免费档（如 glm-4.7-flash）在平台算力吃紧时会返回
+            // HTTP 429 / 业务码 1305「该模型当前访问量过大」—— 用户实测撞到过，聊天窗里只显示一句
+            // 429。官方处置就是「稍后再试」，代码已会自己重试几次；仍然不通时才改走这里，
+            // 这样她不会因为你选了免费档就整段答不上话。
+            var cFb = BeginCard(flow, "备用通道（可选）",
+                "主通道被限流时自动改走这里。地址与 key 都填才生效，不填＝行为与以前完全一致。");
+            _tBase2 = TextRow(cFb, "接口地址", _w.Cfg.FallbackBase, "https://api.deepseek.com");
+            _tModel2 = TextRow(cFb, "模型名", _w.Cfg.FallbackModel, "deepseek-chat");
+            _tKey2 = TextRow(cFb, "API key", _w.Cfg.FallbackKey, "sk-…（留空＝保留已存的 key）", secret: true);
+            AddRow(cFb, NoteBox("什么时候会用到它：\n"
+                + "• 免费档被挤爆时服务端返回 429。上面那条通道会自动重试几次（1.2 秒起步、逐次翻倍）。\n"
+                + "• 仍然不通，才改走这里 —— 于是她不会因为你选了免费档就整段答不上话。\n"
+                + "• 只在**限流**时回落。key 错／地址错回落毫无意义（那只会把真正的原因盖住），所以不会走它。\n\n"
+                + "建议填一条付费通道（如 DeepSeek）。完全不想花钱的话，这一栏留空即可。",
+                SettingsTheme.Pal.Faint));
+            FinishCard(cFb);
 
             var c2 = BeginCard(flow, "Trae 通道（内置，无需配置）",
                 "不填上面任何一项时，她走这条通道。");
@@ -543,18 +649,15 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             var c1 = BeginCard(flow, "开关与间隔");
             var _trow7 = ToggleRow("每满一段时间写一篇小结", "由模型把「应用 → 时长」写成一段话", out _tSummary, out _cSummary, _w.Cfg.SummaryOn);
             AddRow(c1, _trow7);
-            var row = new Panel { Height = 32, BackColor = SettingsTheme.Pal.Card };
-            row.Controls.Add(new Label { Text = "间隔（分钟）", AutoSize = true, ForeColor = SettingsTheme.Pal.Text, Location = new Point(0, 8) });
+            // ⚠ 走 FieldRow 而不是就地手写：「标签 + 数字框 + 尾注」这一行的度量只许有一处
+            //   （手写第二份 = 第二个会漂的口径，本仓老毛病）。
             _nInterval = new NumericUpDown
             {
                 Minimum = 10, Maximum = 600, Increment = 10,
-                Location = new Point(140, 5), Width = 90,
                 BackColor = SettingsTheme.Pal.Field, ForeColor = SettingsTheme.Pal.Text, BorderStyle = BorderStyle.FixedSingle,
                 Value = (decimal)Math.Max(10, Math.Min(600, _w.Cfg.SummaryIntervalMin)),
             };
-            row.Controls.Add(_nInterval);
-            row.Controls.Add(new Label { Text = "默认 60（每小时一次）", AutoSize = true, ForeColor = SettingsTheme.Pal.Faint, Location = new Point(240, 8) });
-            AddRow(c1, row);
+            AddRow(c1, FieldRow("间隔（分钟）", _nInterval, 140, 90, "默认 60（每小时一次）"));
             FinishCard(c1);
 
             var c2 = BeginCard(flow, "写到哪里");
@@ -574,18 +677,14 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             var flow = BeginPage("外观与启动", "她在桌面上什么样、开机要不要自己起来。");
 
             var c1 = BeginCard(flow, "尺寸");
-            var row = new Panel { Height = 32, BackColor = SettingsTheme.Pal.Card };
-            row.Controls.Add(new Label { Text = "显示尺寸", AutoSize = true, ForeColor = SettingsTheme.Pal.Text, Location = new Point(0, 8) });
             _cSize = new ComboBox
             {
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                Location = new Point(140, 5), Width = 140,
                 BackColor = SettingsTheme.Pal.Field, ForeColor = SettingsTheme.Pal.Text, FlatStyle = FlatStyle.Flat,
             };
             _cSize.Items.AddRange(new object[] { "小（176×220）", "中（240×300）", "大（320×400）" });
             _cSize.SelectedIndex = Math.Max(0, Math.Min(2, _w.Cfg.SizeIndex));
-            row.Controls.Add(_cSize);
-            AddRow(c1, row);
+            AddRow(c1, FieldRow("显示尺寸", _cSize, 140, 140, null));
             FinishCard(c1);
 
             var c2 = BeginCard(flow, "窗口行为");
@@ -880,18 +979,26 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
         private Panel ToggleRow(string title, string sub, out Toggle toggle, out CheckBox carrier, bool value, bool warn = false)
         {
             var pal = SettingsTheme.Pal;
-            var p = new Panel { Height = 46, BackColor = SettingsTheme.Pal.Card };
-            var t = new Toggle { Checked = value, Top = 11 };
+            // ⚠⚠ 行高与两个标签的 y 一律**按字体真实度量**算，不许写死 —— 见 FieldRow 的长注释。
+            //   写死 96dpi 的那一套（面板高 46、标题 y=5、副标题 y=24）在 150% 缩放下会让
+            //   标题（5..35，真实高 30）与副标题（24..41）叠 **11px**，屏幕上就是两行字糊在一起。
+            int titleH = SettingsTheme.LineH(SettingsTheme.BodyBold);
+            int subH = SettingsTheme.LineH(SettingsTheme.Small);
+            int top = SettingsTheme.GapXs;
+            int subTop = top + titleH + SettingsTheme.GapXs;      // 两行之间留一格气
+            int rowH = subTop + subH + SettingsTheme.GapXs;
+            var p = new Panel { Height = rowH, BackColor = SettingsTheme.Pal.Card };
+            var t = new Toggle { Checked = value, Top = Math.Max(0, (rowH - 24) / 2) };   // 24 = Toggle 构造时定死的 Size.Height
             t.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             var lbl = new Label
             {
                 Text = title, AutoSize = true, ForeColor = warn ? pal.Warn : pal.Text,
-                Font = SettingsTheme.BodyBold, Location = new Point(0, 5),
+                Font = SettingsTheme.BodyBold, Location = new Point(0, top),
             };
             var sub2 = new Label
             {
                 Text = sub, AutoSize = false, ForeColor = warn ? pal.Warn : pal.Faint,
-                Font = SettingsTheme.Small, Location = new Point(0, 24), Height = 17,
+                Font = SettingsTheme.Small, Location = new Point(0, subTop), Height = subH,
             };
             p.Controls.Add(lbl);
             p.Controls.Add(sub2);
@@ -900,6 +1007,17 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             {
                 t.Left = p.Width - t.Width;
                 sub2.Width = Math.Max(60, p.Width - t.Width - 12);
+                // ⚠ 副标题按**实际可用宽度**量换行高度：窗口拉到最窄时最长的说明会换行，
+                //   高度写死一行 ⇒ 第二行被裁（「文字被遮挡」的另一半）。
+                //   ⚠ 顺序是有讲究的：`RelayoutCard` 先设 `r.Width` 再读 `RowHeight(r)`，
+                //     所以在这里撑开的高度**会被卡片读到**、行距跟着长，不用回调它。
+                int need = Math.Max(subH, SettingsTheme.TextBlockH(sub2.Text, SettingsTheme.Small, sub2.Width));
+                sub2.Height = need;
+                int wantH = subTop + need + SettingsTheme.GapXs;
+                if (p.Height != wantH) p.Height = wantH;      // ⚠ 判等再写，避免 Resize 自递归
+                // ⚠ 开关垂直居中也放在这里（而不是只在构造时算一次）：控件高跟 DPI 走，
+                //   构造期拿到的可能还不是最终值。
+                t.Top = Math.Max(0, (p.Height - t.Height) / 2);
             };
             toggle = t;
             carrier = t;      // 同一个对象，不是第二份真值
@@ -910,7 +1028,11 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
         private TextBox TextRow(Card card, string label, string value, string placeholder, bool secret = false)
         {
             var pal = SettingsTheme.Pal;
-            var p = new Panel { Height = 56, BackColor = SettingsTheme.Pal.Card };
+            // ⚠⚠ 标签与输入框的垂直间距同样按字体度量算：写死 `Top = 24` 时，
+            //   标签的真实高是 30（150% 缩放）⇒ 两者叠 6px（实测 85×6px）。
+            int lh = SettingsTheme.LineH(SettingsTheme.BodyBold);
+            int boxTop = lh + SettingsTheme.GapXs;
+            var p = new Panel { Height = boxTop + 26 + SettingsTheme.GapXs, BackColor = SettingsTheme.Pal.Card };
             p.Controls.Add(new Label
             {
                 Text = label, AutoSize = true, ForeColor = pal.Text,
@@ -918,7 +1040,7 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             });
             var t = new TextBox
             {
-                Top = 24, Left = 0, Height = 26,
+                Top = boxTop, Left = 0, Height = 26,
                 BackColor = pal.Field, ForeColor = pal.Text, BorderStyle = BorderStyle.FixedSingle,
                 UseSystemPasswordChar = secret,
             };
@@ -1010,7 +1132,12 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
                 need = new SizeF(width, l.Font.Height);
             }
             l.Width = Math.Min(width, Math.Max(20, (int)Math.Ceiling(need.Width)));
-            l.Height = Math.Max(l.Font.Height, (int)Math.Ceiling(need.Height));
+            // ⚠⚠ 高度**不要**用上面那个 `need.Height`：它带 `NoPadding`，每行比 Label 实际
+            //   排出来矮约 **4px**（本机 150% 缩放）。拿它定高，多行说明的**最后一行会被裁掉** ——
+            //   2026-09-29 加 `settingstest.textNotClipped` 判据时一次性量出 **13 段**说明全中
+            //   （「填写规则」那段实得 286、需要 378，少了两行多）。
+            //   ⇒ 交给 `SettingsTheme.TextBlockH`：它按 `LineH`（＝框架自己排一行要多少）累加行数。
+            l.Height = SettingsTheme.TextBlockH(l.Text, l.Font, l.Width);
         }
 
         /// <summary>等宽字体的说明段（填法示例、路径、命令行 —— 对齐才好读）。</summary>
@@ -1102,6 +1229,10 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             bool speech = _tSpeech != null && _tSpeech.Checked;
             SetEnabled(_tLlm, speech, pal);
             SetEnabled(_tRoast, speech, pal);
+            // 频率三旋钮同理：她都不主动说话了，「多久说一句」就完全没作用 ⇒ 一起灰掉。
+            SetNumEnabled(_nCooldown, speech, pal);
+            SetNumEnabled(_nIdle, speech, pal);
+            SetNumEnabled(_nDaily, speech, pal);
 
             bool summary = _tSummary != null && _tSummary.Checked;
             if (_nInterval != null) { _nInterval.Enabled = summary; _nInterval.BackColor = summary ? pal.Field : pal.Divider; }
@@ -1116,6 +1247,16 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
                 _statusText.Text = "● 有未保存的修改";
                 _statusText.ForeColor = pal.Warn;
             }
+        }
+
+        /// <summary>数字框的灰化：`Enabled=false` 管用，但它的底色不吃 Enabled
+        /// （与自绘 Toggle 同族的问题）⇒ 手动换色，否则「灰掉」在数字框上看不出来。</summary>
+        private static void SetNumEnabled(NumericUpDown n, bool on, SettingsPalette pal)
+        {
+            if (n == null) return;
+            n.Enabled = on;
+            n.BackColor = on ? pal.Field : pal.Divider;
+            n.ForeColor = on ? pal.Text : pal.Faint;
         }
 
         private static void SetEnabled(Control c, bool on, SettingsPalette pal)
@@ -1164,6 +1305,9 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             _tRoast.Checked = d.RoastOn;
             _tSummary.Checked = d.SummaryOn;
             _nInterval.Value = (decimal)d.SummaryIntervalMin;
+            _nCooldown.Value = (decimal)d.SpeechCooldownMin;
+            _nIdle.Value = (decimal)d.RoastIdleMin;
+            _nDaily.Value = (decimal)d.SpeechDailyCap;
             _tOcr.Checked = d.OcrOn;
             _tOcrSend.Checked = d.OcrSendText;
             _tEye.Checked = d.EyeOn;
@@ -1187,12 +1331,21 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             c.EyeOn = _tEye.Checked;
             c.SummaryOn = _tSummary.Checked;
             c.SummaryIntervalMin = (double)_nInterval.Value;
+            // 说话频率（分钟）。⚠ 这里**不做任何钳制** —— 不变式由 SpeechFreq.Apply 一处保证
+            //   （面板若也钳一次，就是第二个口径；将来改了一边忘了另一边，症状只是「她变奇怪」）。
+            c.SpeechCooldownMin = (double)_nCooldown.Value;
+            c.RoastIdleMin = (double)_nIdle.Value;
+            c.SpeechDailyCap = (int)_nDaily.Value;
             string vault = Clean(_tVault);
             if (vault.Length > 0) c.VaultPath = vault;      // 空＝保留原值（别把库路径清成空串）
             c.OpenAiBase = Clean(_tBase);
             c.OpenAiModel = Clean(_tModel);
             string key = Clean(_tKey);
             if (key.Length > 0) c.DeepSeekKey = key;        // 空＝保留已存 key（凭据不回显）
+            c.FallbackBase = Clean(_tBase2);
+            c.FallbackModel = Clean(_tModel2);
+            string key2 = Clean(_tKey2);
+            if (key2.Length > 0) c.FallbackKey = key2;      // 与上面同一条口径：空＝保留已存 key
             c.Topmost = _tTopmost.Checked;
             c.NightDim = _tNight.Checked;
             c.SizeIndex = _cSize.SelectedIndex;

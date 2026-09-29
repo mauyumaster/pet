@@ -1101,6 +1101,10 @@ namespace AzhuPet
                              : Cfg.SpeechLlm ? (ISpeaker)new LlmSpeaker() : new StubSpeaker();
             _brain = new Brain(Watcher.Probe, () => DateTime.Now, speaker, OnVerdict, Trace_);
             _brain.WireRoast();          // 吐槽通道：LastSpoke 接到 Gate（不接 ⇒ roast 永不触发，判据红）
+            // ⚠ 频率必须在**接线时**就下发一次：只靠 ApplyConfig（面板保存时）会留下一个
+            //   「开机后到第一次保存设置之前，她按出厂值说话」的空档 —— 判据 speechFreqStartupWired
+            //   盯的就是这个空档。两处调同一个函数，不会分叉。
+            SpeechFreq.Apply(Cfg, _brain.Gate);
         }
 
         /// <summary>换说话人（托盘切「台词用模型生成」）。
@@ -1120,8 +1124,9 @@ namespace AzhuPet
         /// （本仓老毛病「同一份数据两个落点」；旧版托盘里就这么写过一次 `OcrEye.SendText = ...`）。
         ///
         /// 覆盖的静态位：`OcrEye.Enabled`／`OcrEye.SendText`（D 档）、`WatchLoop.RoastOn`／
-        /// `Watcher.AdaptiveOn`（自动感知）、窗口置顶、说话人。
+        /// `Watcher.AdaptiveOn`（自动感知）、说话频率（`SpeechFreq`）、窗口置顶、说话人。
         /// ⚠ 它**不** Save —— 落盘是调用方的事（有些入口改的是内存态）。
+        /// ⚠ 频率**改完立刻生效**（不重启）：Gate 与 Roast 都是活对象／静态位，改一下个采样拍就吃到。
         /// </summary>
         public void ApplyConfig()
         {
@@ -1129,6 +1134,7 @@ namespace AzhuPet
             OcrEye.SendText = Cfg.OcrSendText;
             WatchLoop.RoastOn = Cfg.RoastOn;
             Watcher.AdaptiveOn = true;
+            SpeechFreq.Apply(Cfg, _brain == null ? null : _brain.Gate);   // 说话频率（面板可调）
             ApplyTopmostFromConfig();          // ⚠ 别写 `Topmost = Cfg.Topmost`：借出期间那一下会被抢
             RebuildSpeaker();
         }

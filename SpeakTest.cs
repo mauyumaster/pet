@@ -112,6 +112,54 @@ namespace AzhuPet
                 "日限额 1、共 2 次观察 → 开口 " + b2.Brain.Spoken + " 次、被拦 " + b2.Brain.Suppressed + " 次（期望 1／1）");
             Check("gateDailyCapWhyReadable", b2.AnyWhy("日限额"), "被拦原因：" + b2.LastWhy());
 
+            // ============ B'. 说话频率：配置下发 ＋ 两条不变式（2026-09-29 用户要求可调）============
+            // ⚠ 为什么值得单独一组：用户拍板「十分钟一句」＋「频率在设置里可调」。
+            //   这三个数字之间有**不变式**（保底 ≥ 冷却、吐槽冷却 > 冷却），填反了**不会报错**，
+            //   只表现为她刷屏、或把 memory.jsonl 的 veto 记录灌爆 —— 只能靠判据盯着。
+            // ⚠ 全局静态位（Roast.*）改完要还原：同一次运行里别的判据也读它们。
+            double oldRoastCd = Roast.CooldownSec, oldRoastIdle = Roast.IdleNudgeSec;
+            try
+            {
+                // ① 出厂默认就是十分钟一句 —— 用户那句要求直接锁进判据，防止哪天被顺手改回去
+                var dflt = new PetConfig();
+                Check("speechFreqDefaultIsTenMinutes",
+                    dflt.SpeechCooldownMin == 10 && SpeechFreq.CooldownSec(dflt) == 600
+                    && Math.Abs(new SpeechGate().Cooldown - 600) < 0.001,
+                    "默认配置 " + dflt.SpeechCooldownMin + " 分钟 → " + SpeechFreq.CooldownSec(dflt)
+                    + " 秒；SpeechGate 出厂值 " + new SpeechGate().Cooldown + " 秒（期望 600／600）");
+
+                // ② 配置里的分钟数真能走到闸门上（接线）
+                var freqCfg = new PetConfig { SpeechCooldownMin = 3, RoastIdleMin = 7, SpeechDailyCap = 33 };
+                var freqGate = new SpeechGate();
+                SpeechFreq.Apply(freqCfg, freqGate);
+                Check("speechFreqConfigReachesGate",
+                    Math.Abs(freqGate.Cooldown - 180) < 0.001 && freqGate.DailyCap == 33,
+                    "填 3 分钟／33 句 → 闸门 " + freqGate.Cooldown + " 秒、" + freqGate.DailyCap
+                    + " 句（期望 180／33）");
+
+                // ③ 不变式一：保底不得短于冷却（填反了 ⇒ 每拍产出一条被拦的观察 ⇒ 记录灌爆）
+                var freqBad = new PetConfig { SpeechCooldownMin = 30, RoastIdleMin = 2 };
+                SpeechFreq.Apply(freqBad, freqGate);
+                Check("speechFreqIdleNotShorterThanCooldown",
+                    Math.Abs(Roast.IdleNudgeSec - 1800) < 0.001,
+                    "冷却 30 分钟、保底填 2 分钟 → 保底被抬到 " + Roast.IdleNudgeSec + " 秒（期望 1800）");
+
+                // ④ 不变式二：吐槽冷却恒 > 开口冷却
+                Check("roastCooldownAboveGate",
+                    Roast.CooldownSec > freqGate.Cooldown
+                    && Math.Abs((Roast.CooldownSec - freqGate.Cooldown) - SpeechFreq.RoastLeadSec) < 0.001,
+                    "开口 " + freqGate.Cooldown + " 秒 → 吐槽 " + Roast.CooldownSec + " 秒（期望 +"
+                    + SpeechFreq.RoastLeadSec + "）");
+
+                // ⑤ 下限：别低到骚扰档（面板最小值 1 分钟，这里防的是配置文件被手改成 0）
+                var freqZero = new PetConfig { SpeechCooldownMin = 0 };
+                Check("speechFreqFloorHolds",
+                    SpeechFreq.CooldownSec(freqZero) >= SpeechFreq.MinCooldownSec,
+                    "填 0 分钟 → " + SpeechFreq.CooldownSec(freqZero) + " 秒（下限 "
+                    + SpeechFreq.MinCooldownSec + "）");
+            }
+            finally { Roast.CooldownSec = oldRoastCd; Roast.IdleNudgeSec = oldRoastIdle; }
+
             // ================= C. 出口回调 + 记忆 =================
             // ⚠ 上面几个场景各自用**独立**的记忆文件；否则 a 写完 b1 又写 b2，
             //   最后「a 写了几行」会读成 6（首跑实况：断言期望 2、实得 6）。
@@ -233,8 +281,21 @@ namespace AzhuPet
             var longV = LlmSpeaker.Judge(new string('啊', 31), 30);
             Check("llmDropsTooLong", !longV.Speak && (longV.Why ?? "").IndexOf("超", StringComparison.Ordinal) >= 0,
                 "31 字（上限 30）→ " + longV.Why);
+            // ⚠ 2026-09-29 起多行**不再丢弃**（用户拍板「多行输出也可以」）。
+            //   原来那条 llmDropsMultiline 断言的是旧行为，现在反过来断言「换行被接受」；
+            //   负对照 `--no-multiline` 会让它变红（旧行为：含换行即整句丢弃）。
             var mlV = LlmSpeaker.Judge("第一行\n第二行", 30);
-            Check("llmDropsMultiline", !mlV.Speak, "含换行 → " + mlV.Why);
+            Check("llmAcceptsMultiline", mlV.Speak,
+                "含换行 → " + (mlV.Speak ? "采用（多行不再丢弃）" : "⚠ 被丢弃：" + mlV.Why));
+            // ⚠⚠ **配套判据（非有不可）**：字数口径改成只数**可见字符**。否则「放开多行」会被
+            //   「超 30 字」原地拦下（两行必然多出换行符），改动等于没做。两条一起把口径钉死：
+            //   可见 30 字＋换行 ⇒ 采用；可见 31 字＋换行 ⇒ 仍丢弃。
+            var mlFit = LlmSpeaker.Judge(new string('啊', 15) + "\n" + new string('啊', 15), 30);
+            Check("llmMultilineCountsVisibleOnly", mlFit.Speak,
+                "可见 30 字＋中间一个换行 → " + (mlFit.Speak ? "采用（换行不占字数）" : "⚠ " + mlFit.Why));
+            var mlOver = LlmSpeaker.Judge(new string('啊', 15) + "\n" + new string('啊', 16), 30);
+            Check("llmMultilineStillCapped", !mlOver.Speak,
+                "可见 31 字＋换行 → " + mlOver.Why + "（换行不计入 ≠ 不设上限）");
             var okV = LlmSpeaker.Judge("嗯，累了？", 30);
             Check("llmAcceptsShort", okV.Speak, "6 字 → " + (okV.Speak ? "采用" : okV.Why));
 
@@ -410,6 +471,163 @@ namespace AzhuPet
                 && TraeChat.ShouldUseOpenAi(Tuple.Create("https://x", "sk-x", "m")),
                 "路由条件四象限：base 与 key **都有**才走兼容端点，否则一律回落 Trae（原有行为一字不动）");
 
+            // ---- 「关思考」：现代混合推理模型必须显式关掉（2026-09-29）----
+            // 背景：智谱官方文档写 thinking.type **默认 enabled**，并把 GLM-4.7 归入「强制思考」；
+            //   DeepSeek 官方定价页同样写「思考模式（默认）」。而思考 token **计入 max_tokens**，
+            //   本程序写死 600 ⇒ 思考跑完正文为空，报的是「模型没有返回内容。」——
+            //   **这句话指向不了真因**，看起来像模型坏了或网络问题。
+            Check("openAiBodyAsksThinkingOff", TraeChat.AsksThinkingOff(body),
+                "兼容端点的请求体必须带 thinking=disabled（不带 ⇒ 现代推理模型的正文会被思考挤空）");
+            Check("openAiBodyThinkingIsOptOutable",
+                !TraeChat.AsksThinkingOff(TraeChat.BuildOpenAiBody("deepseek-chat", inner, false)),
+                "退避路径（显式 disableThinking=false）**不许**带 thinking —— "
+                + "否则「模型拒绝关思考」时的退避毫无意义（等于原样再发一次）");
+            Check("thinkingRejectJudge",
+                TraeChat.LooksLikeThinkingRejected(400, "{\"error\":\"Unsupported parameter: thinking\"}")
+                && TraeChat.LooksLikeThinkingRejected(422, "reasoning is not supported")
+                && TraeChat.LooksLikeThinkingRejected(400, "{\"message\":\"不支持关闭思考\"}")
+                && !TraeChat.LooksLikeThinkingRejected(400, "invalid api key")
+                && !TraeChat.LooksLikeThinkingRejected(401, "thinking disabled not allowed")
+                && !TraeChat.LooksLikeThinkingRejected(404, "billing/meter not found, thinking"),
+                "「模型拒绝关思考」四象限：只认 400/422 × 文本提到 thinking/reasoning/思考；"
+                + "401（key）与 404（地址）即便文本里带 thinking 也不退避（退避会把真因盖掉）");
+            Check("emptyContentJudge",
+                TraeChat.LooksLikeEmptyContent("模型没有返回内容。")
+                && !TraeChat.LooksLikeEmptyContent("HTTP 429 限流"),
+                "「没吐正文」要能被单独认出来 —— 它是唯一会补上「思考吃光预算」线索的那一种报错");
+
+            // ================= G1. 限流（429）重试与备用通道回落 =================
+            // 2026-09-29：用户实测 glm-4.7-flash 在聊天窗里回「HTTP 429 {code:1305 该模型当前访问量过大}」。
+            // 官方错误码表（docs.bigmodel.cn/cn/faq/api-code）把 429 家族分得很细，**处置完全不同**：
+            //   1302（你发太快）与 1305（**平台算力过载**，与你的频率无关）—— 等一下就好；
+            //   1113 欠费／1308·1310·1316-1321 配额／1309 套餐／1311 权限 —— 等到明天也不会好。
+            // ⇒ 「429 就一律重试」是错的：对后一组重试只会白花配额，还把「该充值了」拖成看不出原因的慢失败。
+            Check("rateLimitJudge",
+                TraeChat.LooksLikeTransientOverload(429, "{\"error\":{\"code\":\"1305\",\"message\":\"该模型当前访问量过大，请您稍后再试\"}}")
+                && TraeChat.LooksLikeTransientOverload(429, "{\"error\":{\"code\":\"1302\",\"message\":\"您已达到速率限制\"}}")
+                && TraeChat.LooksLikeTransientOverload(429, "")     // 只有状态码、没有正文 ⇒ 按标准语义
+                && TraeChat.LooksLikeTransientOverload(503, "")
+                && !TraeChat.LooksLikeTransientOverload(429, "{\"error\":{\"code\":\"1113\",\"message\":\"您的账户已欠费，请充值后重试\"}}")
+                && !TraeChat.LooksLikeTransientOverload(429, "{\"error\":{\"code\":\"1310\",\"message\":\"您已达到每周/每月使用上限\"}}")
+                && !TraeChat.LooksLikeTransientOverload(401, "user rate limit reached")
+                && !TraeChat.LooksLikeTransientOverload(400, "{\"error\":{\"code\":\"1305\"}}")
+                && !TraeChat.LooksLikeTransientOverload(200, ""),
+                "限流判据：只认 429/503；429 里 1302/1305 值得「稍后再试」，而 1113(欠费)/1308·1310(配额)"
+                + "/1309(套餐)/1311(权限) 重试**毫无意义**；401/400/200 一律不算");
+
+            // ⚠ 下面这一组用**脚本化发送器**驱动（TraeChat.OpenAiSender），不打真网络。
+            //   理由：「有没有重试」「有没有回落备用通道」是**行为契约**，而「此刻那个模型挤不挤」
+            //   是外部状态 —— 拿真网络当判据输入，判据就会随天气变红变绿
+            //   （本仓在 motiontest 的帧步长上刚吃过同一个亏）。延迟也置 0：判据不该真睡 3.6 秒。
+            {
+                var savedSender = TraeChat.OpenAiSender;
+                var savedFallback = TraeChat.FallbackSource;
+                var savedDelay = TraeChat.RateLimitDelayMs;
+                TraeChat.RateLimitDelayMs = 0;
+                // ⚠ 这里**不许**把 RateLimitRetries 硬写成 2：那样 `--no-rate-retry` 这张负对照牌就废了
+                //   （判据自己把被测机制拧回默认值 ⇒ 关掉机制它照样绿）。期望次数一律从**当前值**算。
+                try
+                {
+                    var msgs = new List<object>
+                    {
+                        new Dictionary<string, object> { ["role"] = "user", ["content"] = "在吗" }
+                    };
+                    const string RATE = "{\"error\":{\"code\":\"1305\",\"message\":\"该模型当前访问量过大，请您稍后再试\"}}";
+                    const string BROKE = "{\"error\":{\"code\":\"1113\",\"message\":\"您的账户已欠费，请充值后重试\"}}";
+                    const string CHAT_OK = "{\"choices\":[{\"message\":{\"content\":\"在的\"}}]}";
+                    const string MAINBASE = "https://main.example.com";
+
+                    // ① 前几次被限流、耗尽重试预算后的一次成功 ⇒ 必须自己重试并拿到回复
+                    //    （＝用户那天本该看到的结局）。⚠ 脚本要**刚好耗尽预算**：
+                    //    失败条数 = max(1, 当前预算)，末条成功。这样「关掉重试」（--no-rate-retry
+                    //    把预算置 0）时首发必失败且不再重试 ⇒ r.Ok 变 false ⇒ 这张负对照牌才有牙。
+                    {
+                        var urls = new List<string>();
+                        var script = new List<(bool Ok, int Status, string Body, string Text)>();
+                        for (int k = 0, need = Math.Max(1, TraeChat.RateLimitRetries); k < need; k++)
+                            script.Add((false, 429, RATE, "HTTP 429\n" + RATE));
+                        script.Add((true, 200, CHAT_OK, "在的"));
+                        TraeChat.FallbackSource = () => null;
+                        TraeChat.OpenAiSender = ScriptedSender(urls, script.ToArray());
+                        var r = TraeChat.ChatOpenAiAsync(MAINBASE, "k", "m", msgs).GetAwaiter().GetResult();
+                        Check("rateRetryRecovers",
+                            r.Ok && r.Text == "在的" && urls.Count == 1 + TraeChat.RateLimitRetries,
+                            "限流（429/1305）应自己重试到成功：实得 成功=" + r.Ok + "、正文「" + r.Text
+                            + "」、发了 " + urls.Count + " 次请求（期望 " + (1 + TraeChat.RateLimitRetries)
+                            + " = 首发 + " + TraeChat.RateLimitRetries + " 次重试）；备注「" + TraeChat.LastRetryNote + "」");
+                    }
+
+                    // ② 一直限流 ⇒ 停在上限（不许无限重试），且报错必须**自己说出**这是服务端过载
+                    {
+                        var urls = new List<string>();
+                        TraeChat.FallbackSource = () => null;
+                        TraeChat.OpenAiSender = ScriptedSender(urls, (false, 429, RATE, "HTTP 429\n" + RATE));
+                        var r = TraeChat.ChatOpenAiAsync(MAINBASE, "k", "m", msgs).GetAwaiter().GetResult();
+                        bool told = r.Text.Contains("服务端") && r.Text.Contains("无关");
+                        Check("rateRetryGivesUp",
+                            !r.Ok && urls.Count == 1 + TraeChat.RateLimitRetries && told,
+                            "一直限流就该停在上限（首发 + " + TraeChat.RateLimitRetries + " 次重试 = "
+                            + (1 + TraeChat.RateLimitRetries) + " 次），实得 " + urls.Count + " 次；"
+                            + "且报错要自己说明「这是服务端过载、与 key/地址无关」（实得："
+                            + (told ? "已说明" : "**没说明** ⇒ 用户只会去反复检查 key 和地址") + "）");
+                    }
+
+                    // ③ 欠费类 429：一次都不许重试（重试不会让它变有钱）
+                    {
+                        var urls = new List<string>();
+                        TraeChat.FallbackSource = () => null;
+                        TraeChat.OpenAiSender = ScriptedSender(urls, (false, 429, BROKE, "HTTP 429\n" + BROKE));
+                        var r = TraeChat.ChatOpenAiAsync(MAINBASE, "k", "m", msgs).GetAwaiter().GetResult();
+                        Check("rateRetrySkipsFatal", !r.Ok && urls.Count == 1,
+                            "1113（欠费）这类 429 重试毫无意义，必须**一次就停**：实得发了 " + urls.Count
+                            + " 次（期望 1）");
+                    }
+
+                    // ④ 主通道一直限流、备用通道通 ⇒ 必须改走备用通道（这是用户那天该看到的结局）
+                    {
+                        var urls = new List<string>();
+                        TraeChat.FallbackSource = () => Tuple.Create("https://alt.example.com", "k2", "m2");
+                        TraeChat.OpenAiSender = (url, key, body) =>
+                        {
+                            urls.Add(url);
+                            bool alt = url.StartsWith("https://alt.", StringComparison.Ordinal);
+                            return Task.FromResult<(bool, int, string, string)>(
+                                alt ? (true, 200, CHAT_OK, "在的") : (false, 429, RATE, "HTTP 429\n" + RATE));
+                        };
+                        var r = TraeChat.ChatOpenAiAsync(MAINBASE, "k", "m", msgs).GetAwaiter().GetResult();
+                        bool hitAlt = urls.Count > 0 && urls[urls.Count - 1].StartsWith("https://alt.");
+                        Check("rateFallbackToAlt", r.Ok && r.Text == "在的" && hitAlt,
+                            "主通道被限流 ⇒ 应改走备用通道并成功：实得 成功=" + r.Ok + "、正文「" + r.Text
+                            + "」、最后打到 " + (urls.Count > 0 ? urls[urls.Count - 1] : "(没发)")
+                            + "；备注「" + TraeChat.LastRetryNote + "」");
+                    }
+
+                    // ⑤ 非限流的失败**不许**回落（key 错落到备用通道只是把一个真因换成另一个真因）
+                    {
+                        var urls = new List<string>();
+                        TraeChat.FallbackSource = () => Tuple.Create("https://alt.example.com", "k2", "m2");
+                        TraeChat.OpenAiSender = (url, key, body) =>
+                        {
+                            urls.Add(url);
+                            return Task.FromResult<(bool, int, string, string)>(
+                                (false, 401, "{\"error\":{\"code\":\"1000\",\"message\":\"身份验证失败\"}}", "HTTP 401"));
+                        };
+                        var r = TraeChat.ChatOpenAiAsync(MAINBASE, "bad-key", "m", msgs).GetAwaiter().GetResult();
+                        Check("noFallbackOnAuthError",
+                            !r.Ok && urls.Count == 1 && urls[0].StartsWith("https://main."),
+                            "401（key 错）**不许**回落备用通道：实得发了 " + urls.Count + " 次、首个打到 "
+                            + (urls.Count > 0 ? urls[0] : "(没发)")
+                            + "（期望只打主通道 1 次）—— 回落会把真因盖住，比不回落更难查");
+                    }
+                }
+                finally
+                {
+                    TraeChat.OpenAiSender = savedSender;
+                    TraeChat.FallbackSource = savedFallback;
+                    TraeChat.RateLimitDelayMs = savedDelay;
+                }
+            }
+
             // ================= G. 手动触发必须支持**异步**说话人 =================
             // ⚠ 真模型（LlmSpeaker）必然是异步的。若 SpeakNow 只会读 task.IsCompleted，
             //   那么在模型模式下点托盘「让她说一句」会**静默无效** —— 没有任何提示，
@@ -442,31 +660,9 @@ namespace AzhuPet
             //   ⇒ 一条都没扫，判据恒绿。**判据扫的对象必须真的存在** —— 找不到源码要报红，不许沉默跳过。
             //   这是「扫描对象必须是输入，不是处理结果」的第三种形态：这次扫的是**空集**。
             {
-                // 宿主目录（exe）＋ 工作目录（从源码树跑时）＋ 开发环境的固定路径，三处找源码；
+                // 宿主目录（exe）＋ 工作目录（从源码树跑时）＋ 从这两处向上找含 pet.csproj 的目录，共三处。
                 // 一个都找不到 ⇒ **报红**（发布目录里当然没有源码，但发布版也不跑这条判据 —— 见下）。
-                var roots = new List<string>
-                {
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    Directory.GetCurrentDirectory(),
-                };
-                // 从源码树跑（本项目常态）：向上找含 pet.csproj 的目录。
-                foreach (string start in roots.ToArray())
-                {
-                    string walk = start;
-                    for (int i = 0; i < 6 && !string.IsNullOrEmpty(walk); i++)
-                    {
-                        if (File.Exists(Path.Combine(walk, "pet.csproj"))) { roots.Add(walk); break; }
-                        string up = Path.GetDirectoryName(walk.TrimEnd(Path.DirectorySeparatorChar));
-                        if (string.IsNullOrEmpty(up) || up == walk) break;
-                        walk = up;
-                    }
-                }
-
-                string srcDir = null;
-                foreach (string r in roots)
-                {
-                    if (!string.IsNullOrEmpty(r) && File.Exists(Path.Combine(r, "Tray.cs"))) { srcDir = r; break; }
-                }
+                string srcDir = FindSourceDir();
 
                 if (srcDir == null)
                     Check("configApplyIsSingleEntry", false,
@@ -497,7 +693,117 @@ namespace AzhuPet
                         offenders.Count == 0
                             ? "扫了 " + srcDir + " 的 3 个 UI 文件：没有裸写静态位（一律走 PetWindow.ApplyConfig）"
                             : "发现绕过唯一入口的裸赋值：" + string.Join("；", offenders));
+
+                    // ---- 接线判据：`--llmtest` 必须真的测「用户配的那条通道」（2026-09-29）----
+                    // 现场：通道路由原先只接在 `RunNormal` 里，而 `--llmtest` 在 Switch 更早处就 return
+                    //   ⇒ 那时 `TraeChat.OpenAiSource` 仍是 null ⇒ **它测的是 Trae 中转通道**。
+                    // 后果极坏：用户填好 GLM/DeepSeek 的 base+key、跑 --llmtest 拿到绿色，
+                    //   而那条绿与新通道毫无关系 —— 「测错对象的绿」，比红更难发现。
+                    // 为什么只能读源码：判据自己就在那个入口里跑，行为判据无法观察到「入口没接线」。
+                    {
+                        string progPath = Path.Combine(srcDir, "Program.cs");
+                        string psrc = File.Exists(progPath) ? File.ReadAllText(progPath) : "";
+                        // ⚠ 注释里提到不算 —— **只认真正的调用语句**（同 configApplyIsSingleEntry 对注释的处理）。
+                        //   否则「把那行注释掉」也会被判成接上了 ⇒ 判据自己先假绿。
+                        int atWire = -1;
+                        for (int at = psrc.IndexOf("WireOpenAi(o, null)", StringComparison.Ordinal);
+                             at >= 0;
+                             at = psrc.IndexOf("WireOpenAi(o, null)", at + 1, StringComparison.Ordinal))
+                        {
+                            int ls = psrc.LastIndexOf('\n', at) + 1;
+                            if (!psrc.Substring(ls, at - ls).TrimStart().StartsWith("//")) { atWire = at; break; }
+                        }
+                        int atLlm = psrc.IndexOf("if (o.LlmTest)", StringComparison.Ordinal);
+                        bool wired = psrc.Length > 0 && atWire >= 0 && atLlm >= 0 && atWire < atLlm;
+                        Check("llmTestWiresChannelFirst", wired,
+                            psrc.Length == 0 ? "读不到 Program.cs —— 这条判据扫不到文件就没资格通过"
+                            : atWire < 0 ? "Program.Main 里找不到**未被注释**的 `WireOpenAi(o, null)` —— 通道路由没接上"
+                            : atLlm < 0 ? "Program.Main 里找不到 `if (o.LlmTest)`（开关改名了？判据要跟着改）"
+                            : wired ? "通道路由在 --llmtest 分支之前接上（偏移 " + atWire + " < " + atLlm + "）"
+                                    : "⚠ 接线在 --llmtest 之后（" + atWire + " > " + atLlm + "）⇒ --llmtest 测的是 Trae 通道");
+                    }
+
+                    // ---- 接线判据：说话频率必须真的送到闸门（2026-09-29）----
+                    // 上面那几条频率判据验的是**纯函数**（换算对不对）。「配置有没有被送到闸门」
+                    // 是另一件事：`SpeechFreq.Apply` 只有两个调用点 —— `StartBrain`（接线时）与
+                    // `ApplyConfig`（面板保存时）。任缺一个，症状都是「她按出厂值说话」，
+                    // 而纯函数判据照样全绿。⇒ 只能读源码（行为判据观察不到「入口漏接」）。
+                    {
+                        string pwPath = Path.Combine(srcDir, "PetWindow.cs");
+                        string wsrc = File.Exists(pwPath) ? File.ReadAllText(pwPath) : "";
+
+                        // ⚠ 两条约束，缺一条这条判据就会假绿：
+                        //   ① 注释里提到不算（本仓踩过：注释掉那行之后判据依然全绿）；
+                        //   ② 必须限定在 anchor 之后的**有限行数**内 —— 否则删掉 StartBrain 里那句，
+                        //      搜索会一路滑到 ApplyConfig 里的那一句，判定「接线还在」。
+                        bool CallAfter(string anchor, int lines)
+                        {
+                            int from = wsrc.IndexOf(anchor, StringComparison.Ordinal);
+                            if (from < 0) return false;
+                            int i = from, seen = 0;
+                            while (i < wsrc.Length && seen < lines)
+                            {
+                                int eol = wsrc.IndexOf('\n', i);
+                                if (eol < 0) eol = wsrc.Length;
+                                string line = wsrc.Substring(i, eol - i);
+                                if (!line.TrimStart().StartsWith("//")
+                                    && line.IndexOf("SpeechFreq.Apply", StringComparison.Ordinal) >= 0) return true;
+                                i = eol + 1; seen++;
+                            }
+                            return false;
+                        }
+
+                        bool inStartBrain = CallAfter("private void StartBrain()", 20);
+                        bool inApplyCfg = CallAfter("public void ApplyConfig()", 20);
+                        Check("speechFreqWiredToGate", wsrc.Length > 0 && inStartBrain && inApplyCfg,
+                            wsrc.Length == 0 ? "读不到 PetWindow.cs —— 这条判据扫不到文件就没资格通过"
+                            : inStartBrain && inApplyCfg ? "接线时与面板保存时都下发了频率（两处调用点齐）"
+                            : "缺调用点：" + (inStartBrain ? "" : "StartBrain（开机后到首次保存设置之前按出厂值说话）")
+                              + (!inStartBrain && !inApplyCfg ? "；" : "")
+                              + (inApplyCfg ? "" : "ApplyConfig（面板改了频率不生效）"));
+                    }
                 }
+            }
+
+            // ============ H3. 判据**不许写用户的真配置**（2026-09-29 事故）============
+            // 现场：跑一次 `--lifttest` 就把 %LOCALAPPDATA%\AzhuPet\config.json 覆盖成了判据自己
+            //   构造的那份（speechOn=false、deepSeekKey/openAiBase 全空）—— 用户刚配好的 GLM key
+            //   就这么没了。机制：判据要「真窗口」，而窗口摆位那条路（PlaceFeetOnFloor／SavePos／
+            //   SetSize）会 `Cfg.Save()`，直接落到真路径。7 类判据都有窗口（lifttest／motiontest／
+            //   dragtest／selftest／spintest／topmosttest／agenttimertest）。
+            // ⚠ 这条判据**真的去调一次 Save()**，看守卫有没有拦下它 —— 只断言那个静态开关等于测自己
+            //   （判据的读数必须来自被测对象，不是来自它自己的假设）。
+            // ⚠ 判据的读数取自**守卫自己的计数器**，而不是「比对文件字节」：后者会被**正在运行的桌宠**
+            //   顺手保存一次搅出假红（她保存的是内存里那份好配置，字节变了、值没变）——
+            //   「判据的读数不许来自另一个进程的时序」。
+            {
+                string cfgPath = Path.Combine(PetConfig.Dir, "config.json");
+                // ⚠⚠ 本判据**必须处在「非重定向」状态**才有意义 —— 守卫是**两个条件**：
+                //   `!RealWriteAllowed` **且** 没设 `AZHU_CONFIG_DIR`（后者是给判据自己的临时沙箱开的门，
+                //   见 `PetConfig.Save`）。谁沙箱化跑判据（顺手 `AZHU_CONFIG_DIR=… ./pet.exe --speaktest`），
+                //   守卫就按设计放行 ⇒ 计数不涨 ⇒ 本条**假红**，看着像守卫坏了。
+                //   ⇒ 这里临时摘掉它。安全性：守卫正常时 Save() 被挡、根本不落盘；万一守卫真坏了，
+                //   落盘的是 `Load()` 读出来的**原值**（不是判据构造的那份）⇒ 不会丢 key。这正是本条该冒的险 ——
+                //   它存在的意义就是证明守卫真挡得住，只断言那个静态开关等于测自己的假设。
+                string savedCfgDir = Environment.GetEnvironmentVariable("AZHU_CONFIG_DIR");
+                int before = PetConfig.BlockedSaves;
+                try
+                {
+                    Environment.SetEnvironmentVariable("AZHU_CONFIG_DIR", null);
+                    PetConfig.Load().Save();
+                }
+                finally
+                {
+                    Environment.SetEnvironmentVariable("AZHU_CONFIG_DIR", savedCfgDir);
+                }
+                bool blockedOnce = PetConfig.BlockedSaves == before + 1;
+                Check("testModeRefusesRealConfigWrite", blockedOnce,
+                    blockedOnce
+                        ? "判据模式下 Save() 被守卫挡下（挡下计数 " + before + " → " + PetConfig.BlockedSaves
+                          + "），真路径 " + cfgPath + " 没被写"
+                        : "⚠ 判据模式下 Save() **穿透了守卫**（挡下计数停在 " + PetConfig.BlockedSaves
+                          + "）—— 跑一次 --lifttest 就会把 " + cfgPath
+                          + " 覆盖成判据构造的那份（speechOn=false、key/base 全空），用户的 key 会丢");
             }
 
             // ================= H. 落点 =================
@@ -507,6 +813,52 @@ namespace AzhuPet
             Check("memoryOutsideSyncDir", outside, "真落点 " + realPath);
 
             return Report(ok, checks, negative, null, "speaktest");
+        }
+
+        /// <summary>脚本化发送器：按调用序号返回响应（越界则一直用最后一条），供限流重试／回落判据使用。
+        /// ⚠ 逐个记下收到的 URL —— 「有没有重试」「有没有改走备用通道」只**能**从 URL 序列上看出来：
+        ///   光看「最后成功了没」，是分不清「一次就成」与「重试两次才成」的（同「判据的读数必须能分辨对象」）。</summary>
+        private static Func<string, string, Dictionary<string, object>,
+            Task<(bool Ok, int Status, string Body, string Text)>>
+            ScriptedSender(List<string> urls,
+                params (bool Ok, int Status, string Body, string Text)[] script)
+        {
+            int i = 0;
+            return (url, key, body) =>
+            {
+                urls.Add(url);
+                var r = i < script.Length ? script[i] : script[script.Length - 1];
+                i++;
+                return Task.FromResult(r);
+            };
+        }
+
+        /// <summary>找源码目录（含 Tray.cs 的那个）：exe 目录、工作目录，以及从这两处向上找含 pet.csproj 的目录。
+        /// ⚠ 抽出来是为了让所有「读源码的接线判据」共用一份 —— 各写一份迟早漏改（本项目老毛病「同一份数据两个落点」）。
+        /// ⚠⚠ 找不到时返回 null，**调用方必须报红**：扫描对象是空集时判据会恒绿，
+        ///   这正是 2026-09-20 首版 `configApplyIsSingleEntry` 假绿的成因。</summary>
+        private static string FindSourceDir()
+        {
+            var roots = new List<string>
+            {
+                AppDomain.CurrentDomain.BaseDirectory,
+                Directory.GetCurrentDirectory(),
+            };
+            // 从源码树跑（本项目常态）：向上找含 pet.csproj 的目录。
+            foreach (string start in roots.ToArray())
+            {
+                string walk = start;
+                for (int i = 0; i < 6 && !string.IsNullOrEmpty(walk); i++)
+                {
+                    if (File.Exists(Path.Combine(walk, "pet.csproj"))) { roots.Add(walk); break; }
+                    string up = Path.GetDirectoryName(walk.TrimEnd(Path.DirectorySeparatorChar));
+                    if (string.IsNullOrEmpty(up) || up == walk) break;
+                    walk = up;
+                }
+            }
+            foreach (string r in roots)
+                if (!string.IsNullOrEmpty(r) && File.Exists(Path.Combine(r, "Tray.cs"))) return r;
+            return null;
         }
 
         // ---------------- 场景驱动 ----------------
@@ -670,16 +1022,37 @@ namespace AzhuPet
                 checks.Add(new Dictionary<string, object> { ["name"] = name, ["ok"] = pass, ["detail"] = detail ?? "" });
             }
 
-            Console.WriteLine("llmtest —— 真调 " + times + " 次；台词上限 " + speaker.MaxChars
-                + " 字；通道 TraeChat(llm_utils_chat, 明文兼容分支)"
+            // ⚠⚠ 通道必须打印**实际用的那一条**（2026-09-29 修）：这里原先写死「TraeChat(llm_utils_chat…)」，
+            //   而用户一旦填了兼容端点，程序走的就是 OpenAI 通道 —— 打印与实际不符，
+            //   于是「换 API 到底有没有生效」在这条唯一的端到端入口上**看不出来**。
+            var chSrc = TraeChat.OpenAiSource != null ? TraeChat.OpenAiSource() : null;
+            bool chOa = TraeChat.ShouldUseOpenAi(chSrc);
+            string chModel = chOa && !string.IsNullOrEmpty(chSrc.Item3)
+                ? chSrc.Item3 : TraeChat.ResolveModel(o.LlmModel);
+            Console.WriteLine("llmtest —— 真调 " + times + " 次；台词上限 " + speaker.MaxChars + " 字（换行不计；多行已允许）；通道 "
+                + (chOa ? "OpenAI 兼容（" + chSrc.Item1 + "）" : "Trae 中转（llm_utils_chat，明文兼容分支）")
                 + (o.SpeakManual ? "；**手动触发那套提示**（不提秒数、不说「刚换了窗口」）" : ""));
+            if (!chOa)
+                Console.WriteLine("⚠ 走的是 Trae 通道 —— base 或 key 为空时就会这样（本机没装 Trae 时它必然失败）。"
+                    + "要测 GLM/DeepSeek：填好 base+key，或用 --openai-base / --openai-key / --openai-model 临时指定。");
             Console.WriteLine("⚠ 只发进程名与屏幕上的字，**绝不发窗口标题**（P0 视野纪律：A 档才准出本机）");
             // 判据自己报出用的是哪个模型 —— 否则「换模型」的对照实验无法归因。
-            Console.WriteLine("本轮模型 id = " + TraeChat.ResolveModel(o.LlmModel)
-                + (string.IsNullOrEmpty(TraeChat.ModelOverride) ? "（默认）" : "（--model 覆盖）"));
+            Console.WriteLine("本轮模型 id = " + chModel
+                + (string.IsNullOrEmpty(TraeChat.ModelOverride) ? "（默认）" : "（--llm-model 覆盖）")
+                + "；请求体 " + (TraeChat.SendThinkingDisabled
+                    ? "带 thinking=disabled（关思考）"
+                    : "**不带** thinking（负对照 --old-openai-body 已开）"));
+            // 说话频率也报一行 —— 改完「设置 → 说话与吐槽 → 触发节奏」想确认她到底多久说一句时，
+            // 这一行就是答案（读数来自**配置**，与 PetWindow 下发用的是同一个 SpeechFreq 换算）。
+            var freqCfg = PetConfig.Load();
+            double freqCd = SpeechFreq.CooldownSec(freqCfg);
+            Console.WriteLine("说话频率 = 每 " + (freqCd / 60).ToString("0.##") + " 分钟最多一句（间隔配置 "
+                + freqCfg.SpeechCooldownMin.ToString("0.##") + " 分钟）；安静时每 "
+                + (SpeechFreq.IdleNudgeSec(freqCfg, freqCd) / 60).ToString("0.##") + " 分钟冒一句保底；每天上限 "
+                + SpeechFreq.DailyCap(freqCfg) + " 句");
 
             var rows = new List<object>();
-            int responded = 0, spoke = 0, overlong = 0, multiline = 0, leakedCount = 0;
+            int responded = 0, spoke = 0, overlong = 0, multiline = 0, multiDropped = 0, leakedCount = 0;
             int notCarried = 0, related = 0;
 
             for (int i = 0; i < times; i++)
@@ -721,9 +1094,16 @@ namespace AzhuPet
                 sw.Stop();
 
                 if (v != null && (v.Speak || !string.IsNullOrEmpty(v.Text))) responded++;
-                if (v != null && v.Speak) spoke++;
+                if (v != null && v.Speak)
+                {
+                    spoke++;
+                    // ⚠ 2026-09-29 起多行会被**采用** ⇒ 这里统计的是「采用的有几条是分行的」。
+                    //   多行**丢弃**另有计数（只在负对照 --no-multiline 下才可能非零）——
+                    //   两个数分开，否则「多行」这个词会指两件相反的事。
+                    if (v.Text != null && v.Text.IndexOf('\n') >= 0) multiline++;
+                }
                 else if (v != null && (v.Why ?? "").IndexOf("超 ", StringComparison.Ordinal) >= 0) overlong++;
-                else if (v != null && (v.Why ?? "").IndexOf("多行", StringComparison.Ordinal) >= 0) multiline++;
+                else if (v != null && (v.Why ?? "").IndexOf("多行", StringComparison.Ordinal) >= 0) multiDropped++;
                 // 相关性：她的台词里有没有出现屏幕文字中的某个 ≥2 字片段。
                 // ⚠ 这只是**报告项**，不参与 ok 判定 —— 真模型的输出不确定，拿它当硬判据必然假红，
                 //   而假红会让人开始无视判据。接线那一半（原文有没有进提示）由 notCarried 硬验。
@@ -734,7 +1114,7 @@ namespace AzhuPet
                 Console.WriteLine("[" + (i + 1) + "/" + times + "] 喂给她：" + prompt + (leaked ? "   ⚠ 标题泄漏！" : ""));
                 Console.WriteLine("        " + sw.ElapsedMilliseconds + " ms → "
                     + (v != null && v.Speak
-                        ? "她说：「" + v.Text + "」（" + v.Text.Length + " 字）"
+                        ? "她说：「" + v.Text + "」（" + Shape(v.Text) + "）"
                           + (string.IsNullOrEmpty(o.ScreenText) ? ""
                              : rel ? "  ← 台词用上了屏幕上的字 ✅" : "  ← 台词与屏幕文字无关（模型的选择，不是接线坏了）")
                         : "（没说：" + (v == null ? "?" : v.Why) + "）"
@@ -760,7 +1140,8 @@ namespace AzhuPet
             //   llmPromptHasNoTitle 红 ⇒ 隐私边界破了（P0 只准 A 档应用级出本机）。
             Check("llmResponded", responded > 0,
                 responded > 0 ? ("拿到回复 " + responded + "/" + times + " 次")
-                              : "⚠ 一次都没拿到 —— 通道没通；先看凭据与网络，别动台词");
+                              : "⚠ 一次都没拿到 —— 先对照上面打印的**通道**：走 Trae ⇒ 多半是没配 base/key；"
+                                + "走 OpenAI 兼容 ⇒ 看状态码（401=key 不对，404=base 多写或少写了一段路径）。");
             Check("llmPromptHasNoTitle", leakedCount == 0,
                 leakedCount == 0 ? "喂模型的提示不含窗口标题（拿真标题试的）" : "⚠ 泄漏 " + leakedCount + " 次");
             // ⚠ 相关性判据的**可判定那一半**：给了 --screen-text 时，那段文字必须逐字出现在提示里。
@@ -771,13 +1152,41 @@ namespace AzhuPet
                     : notCarried == 0 ? "给了 " + times + " 次屏幕文字，每次都逐字进了提示"
                                       : "⚠ 有 " + notCarried + " 次屏幕文字**没**进提示（她当然说得不相关）");
 
+            // 退避是**静默**发生的（成功时不报任何错）—— 不主动说，用户就不知道它发生过。
+            if (!string.IsNullOrEmpty(TraeChat.LastThinkingNote))
+                Console.WriteLine("⚠ 本次运行发生过一次退避：" + TraeChat.LastThinkingNote);
+            // 限流处置同理（2026-09-29 加）：不说出来，用户就不知道「刚才其实被限流过、它自己缓过来了」——
+            // 而那种情况下他会以为一切正常，直到某天限流久到重试也没用。
+            if (!string.IsNullOrEmpty(TraeChat.LastRetryNote))
+                Console.WriteLine("⚠ 本次运行发生过限流处置：" + TraeChat.LastRetryNote);
+
+            // 备用通道有没有真的接上：这是端到端入口，用户看不到配置面板里那三个框在这个进程里生效了没。
+            var fbNow = TraeChat.FallbackSource != null ? TraeChat.FallbackSource() : null;
+            if (TraeChat.ShouldUseOpenAi(fbNow))
+                Console.WriteLine("备用通道已配置：" + fbNow.Item1 + "（模型 "
+                    + (string.IsNullOrEmpty(fbNow.Item3) ? "同主通道" : fbNow.Item3)
+                    + "）—— 主通道被限流时会自动改走它");
+
             Console.WriteLine();
             Console.WriteLine("llmtest 汇总 —— 拿到回复 " + responded + "/" + times + "，采用 " + spoke
-                + "，超长丢弃 " + overlong + "，多行丢弃 " + multiline
+                + "（其中分行 " + multiline + " 条）"
+                + "，超长丢弃 " + overlong
+                + (multiDropped > 0 ? "，多行丢弃 " + multiDropped + "（⚠ 只在 --no-multiline 下会非零）" : "")
                 + (string.IsNullOrEmpty(o.ScreenText) ? "" : "；台词用上屏幕文字 " + related + "/" + spoke + "（报告项）"));
 
             return Report(ok, checks, false,
                 "（真调模型：验 LlmSpeaker 的**网络那半段**；只答「她怎么说」，不答「何时说」）", "llmtest");
+        }
+
+        /// <summary>台词的「形状」：可见字数 ＋（分行时）行数。
+        /// ⚠ 不能直读 `Text.Length` —— 多行时会把换行符也数进去，看上去像「她话变多了」，其实没有。</summary>
+        private static string Shape(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "0 字";
+            int lines = 1;
+            for (int i = 0; i < s.Length; i++) if (s[i] == '\n') lines++;
+            int vis = LlmSpeaker.VisibleLength(s);
+            return lines > 1 ? vis + " 字·" + lines + " 行" : vis + " 字";
         }
 
         /// <summary>把多行原文压成一行便于打印（超长时截断）—— 只用于显示，不参与裁决。</summary>

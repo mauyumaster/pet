@@ -32,6 +32,12 @@ namespace AzhuPet
         // 写进 Obsidian 库 `40 Projects/阿助（桌宠）/她写的/YYYY-MM-DD.md`（按天一个文件、按小时分节）。
         public bool SummaryOn = true;
         public double SummaryIntervalMin = 60;
+        // ---- 说话频率的三个人可调数字（2026-09-29 用户要求：「十分钟一句」＋「频率在设置里可调」）----
+        // ⚠ 单位是**分钟**（与上面的 SummaryIntervalMin 同族，面板直接绑，不来回换算）。
+        //   秒数的换算与三个数字之间的**不变式**收在 `SpeechFreq.cs` 一处 —— 见那个文件头。
+        public double SpeechCooldownMin = 10;   // 两次开口之间的最小间隔
+        public double RoastIdleMin = 10;        // 长时间没开口时，多久冒一句保底
+        public int SpeechDailyCap = 200;        // 每天最多主动说几句
         // ⚠ 库路径写进**本机配置**（%LOCALAPPDATA%，不进同步目录）：她的落点是「给你看的产出」，
         //   走 `她写的/` 那个刻意分开的落点 —— 与内部状态（memory.jsonl）不同族。
         public string VaultPath = @"D:\Obsidian_SecondBrain\SecondBrain";
@@ -42,6 +48,13 @@ namespace AzhuPet
         // base 与 key **都有**才路由到兼容端点，否则回落 Trae 通道（原有行为一字不动）。
         public string OpenAiBase = "";
         public string OpenAiModel = "";
+        // ---- 备用通道（可选，2026-09-29 新增）----
+        // 主通道被**限流**（如智谱免费档的 HTTP 429 / code 1305「该模型当前访问量过大」）时改走它。
+        // ⚠ 只在限流时回落：key 错／地址错回落毫无意义，只会把一个真因换成另一个真因（更难查）。
+        // base 与 key 任一为空 ＝ 不用（行为与新增前完全一致）。
+        public string FallbackBase = "";
+        public string FallbackModel = "";
+        public string FallbackKey = "";
         public string BalanceUrl = "";              // 自定义余额接口（URL）；空 = 走 DeepSeek balance
         public string BalanceToken = "";            // 可选 Bearer token
         public string BalanceHeader = "";           // 可选自定义 header（如 "cookie: xxx"，含冒号整段）
@@ -94,6 +107,10 @@ namespace AzhuPet
                 c.RoastOn = Bool(s, "roastOn", c.RoastOn);
                 c.SummaryOn = Bool(s, "summaryOn", c.SummaryOn);
                 c.SummaryIntervalMin = Num(s, "summaryIntervalMin", c.SummaryIntervalMin);
+                // 说话频率：旧配置里没有这三个键 ⇒ 保持默认（= 10 分钟一句），用户不必改配置就生效。
+                c.SpeechCooldownMin = Num(s, "speechCooldownMin", c.SpeechCooldownMin);
+                c.RoastIdleMin = Num(s, "roastIdleMin", c.RoastIdleMin);
+                c.SpeechDailyCap = (int)Num(s, "speechDailyCap", c.SpeechDailyCap);
                 c.VaultPath = Raw(s, "vaultPath")?.Trim('"') ?? c.VaultPath;
                 // ⚠ 自愈：历史版本写坏的值（反斜杠膨胀）已不可还原 ⇒ 判为垃圾、回落默认。
                 //   放在 Load 里而不是只在 --fixconfig 里，是为了「打开面板」这条路也自愈：
@@ -102,6 +119,9 @@ namespace AzhuPet
                 c.DeepSeekKey = Raw(s, "deepSeekKey")?.Trim('"') ?? "";
                 c.OpenAiBase = Raw(s, "openAiBase")?.Trim('"') ?? "";
                 c.OpenAiModel = Raw(s, "openAiModel")?.Trim('"') ?? "";
+                c.FallbackBase = Raw(s, "fallbackBase")?.Trim('"') ?? "";
+                c.FallbackModel = Raw(s, "fallbackModel")?.Trim('"') ?? "";
+                c.FallbackKey = Raw(s, "fallbackKey")?.Trim('"') ?? "";
                 c.BalanceUrl = Raw(s, "balanceUrl")?.Trim('"') ?? "";
                 c.BalanceToken = Raw(s, "balanceToken")?.Trim('"') ?? "";
                 c.BalanceHeader = Raw(s, "balanceHeader")?.Trim('"') ?? "";
@@ -114,8 +134,33 @@ namespace AzhuPet
             return c;
         }
 
+        /// <summary>判据模式下**不许写用户的真配置**（2026-09-29 事故：跑一次 `--lifttest` 就把
+        /// `config.json` 覆盖成了判据自己构造的那份 —— `SpeechOn=false`、`deepSeekKey`/`openAiBase`
+        /// 全空，用户刚配好的 GLM key 就这么没了）。
+        ///
+        /// 机制：判据要「真窗口」，于是 7 类判据（lifttest／motiontest／dragtest／selftest／spintest／
+        /// topmosttest／agenttimertest）都 `new PetWindow(r, 自己构造的 cfg)`，而窗口摆位那条路
+        /// （<c>PlaceFeetOnFloor</c>／<c>SavePos</c>／<c>SetSize</c>）会 `Cfg.Save()` —— 直接落到真路径。
+        /// 之所以长期没被发现：用户正开着桌宠时，她内存里那份好配置会在下一次保存时把它盖回来。
+        ///
+        /// ⚠ 判据要写配置的，必须先把 <c>AZHU_CONFIG_DIR</c> 指到临时目录（<c>--configtest</c> 就是
+        /// 这么做的，所以它不受这条守卫影响）；显式操作用户配置的入口（<c>--fixconfig</c>／
+        /// <c>--settings</c>）由 <see cref="Program"/> 放行。</summary>
+        public static bool RealWriteAllowed = true;
+
+        /// <summary>被守卫挡下的写入次数（供判据/排查确认守卫真的在工作 —— 静默跳过是要不得的，
+        /// 但也不能让判据的输出被这些行刷屏，所以只记数）。</summary>
+        public static int BlockedSaves = 0;
+
         public void Save()
         {
+            // ⚠ 重定向过目录（AZHU_CONFIG_DIR）时照写 —— 那是判据自己的临时沙箱，不是用户的真配置。
+            if (!RealWriteAllowed
+                && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("AZHU_CONFIG_DIR")))
+            {
+                BlockedSaves++;
+                return;
+            }
             try
             {
                 Directory.CreateDirectory(Dir);
@@ -133,10 +178,16 @@ namespace AzhuPet
                 sb.Append("  \"roastOn\": ").Append(RoastOn ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"summaryOn\": ").Append(SummaryOn ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"summaryIntervalMin\": ").Append(SummaryIntervalMin.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\r\n");
+                sb.Append("  \"speechCooldownMin\": ").Append(SpeechCooldownMin.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\r\n");
+                sb.Append("  \"roastIdleMin\": ").Append(RoastIdleMin.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\r\n");
+                sb.Append("  \"speechDailyCap\": ").Append(SpeechDailyCap).Append(",\r\n");
                 sb.Append("  \"vaultPath\": \"").Append(Esc(VaultPath)).Append("\",\r\n");
                 sb.Append("  \"deepSeekKey\": \"").Append(Esc(DeepSeekKey)).Append("\",\r\n");
                 sb.Append("  \"openAiBase\": \"").Append(Esc(OpenAiBase)).Append("\",\r\n");
                 sb.Append("  \"openAiModel\": \"").Append(Esc(OpenAiModel)).Append("\",\r\n");
+                sb.Append("  \"fallbackBase\": \"").Append(Esc(FallbackBase)).Append("\",\r\n");
+                sb.Append("  \"fallbackModel\": \"").Append(Esc(FallbackModel)).Append("\",\r\n");
+                sb.Append("  \"fallbackKey\": \"").Append(Esc(FallbackKey)).Append("\",\r\n");
                 sb.Append("  \"balanceUrl\": \"").Append(Esc(BalanceUrl)).Append("\",\r\n");
                 sb.Append("  \"balanceToken\": \"").Append(Esc(BalanceToken)).Append("\",\r\n");
                 sb.Append("  \"balanceHeader\": \"").Append(Esc(BalanceHeader)).Append("\",\r\n");
@@ -455,8 +506,30 @@ namespace AzhuPet
         public string DeepSeekKey;              // 命令行传入的 DeepSeek key（会写入配置）
         public string OpenAiBase;               // 命令行传入的兼容端点 base（会写入配置）
         public string OpenAiModel;              // 命令行传入的兼容端点 model（会写入配置）
+        public string FallbackBase;             // 命令行传入的**备用通道** base（会写入配置）
+        public string FallbackModel;            // 命令行传入的备用通道 model（会写入配置）
+        public string FallbackKey;              // 命令行传入的备用通道 key（会写入配置）
+        /// <summary>--no-rate-retry：**负对照** —— 关掉「限流稍后再试」（<c>TraeChat.RateLimitRetries = 0</c>），
+        /// --speaktest 的重试判据必须变红。0 次重试也正是 2026-09-29 用户撞上 1305 时的行为。</summary>
+        public bool NoRateRetry;
+        /// <summary>--allow-config-write：**负对照** —— 解除「判据不许写用户真配置」的守卫
+        /// （见 <see cref="PetConfig.RealWriteAllowed"/>），--speaktest 那条判据必须因此变红。</summary>
+        public bool AllowConfigWrite;
         public string LlmModel;                 // --llm-model <id>：覆盖 Trae 通道的模型 id（空 = DeepSeek-V4-Flash）
                                                 // ⚠ 不能叫 --model：那个早被 3D 模型文件路径占用了（ModelPath）
+        /// <summary>--old-openai-body：**负对照** —— 兼容端点的请求体回到 2026-09-29 之前的样子
+        /// （不发 <c>"thinking":{"type":"disabled"}</c>）。现代混合推理模型默认开思考、思考又计入
+        /// max_tokens，于是正文被挤空 ⇒ --speaktest 的判据必须变红。</summary>
+        public bool OldOpenAiBody;
+        /// <summary>--no-multiline：**负对照** —— 回到「一句台词含换行就整句丢弃」的旧行为
+        /// （<c>LlmSpeaker.AllowMultiline = false</c>），--speaktest 的多行判据必须因此变红。</summary>
+        public bool NoMultiline;
+        /// <summary>--no-beat-cap：**负对照** —— 去掉 AgentTaskTimer 心跳兜底的两条上限
+        /// （静默窗口 ＋ 封顶判定），回到「心跳新鲜就一直算活着」，--agenttimertest 的 E4/E5 必须因此变红。</summary>
+        public bool NoBeatCap;
+        /// <summary>--no-freq-clamp：**负对照** —— 跳过 <c>SpeechFreq</c> 的两条钳制（保底间隔 ≥ 开口冷却、
+        /// 冷却不低到骚扰档），把配置里的分钟数原样当秒数用，--speaktest 的频率判据必须因此变红。</summary>
+        public bool NoFreqClamp;
         public string Chat;                     // --chat <文本>：无头自检 TraeChat(明文 llm_utils_chat)，结果写 %TEMP%
         public bool PersonaTest;                // --personatest：离线验人格前缀（读得到吗／干不干净／注入是否必然发生）
         public bool WatchTest;                  // --watchtest：离线验 P0 三环（感知／决策／记忆），不读真窗口、不联网
@@ -611,6 +684,12 @@ namespace AzhuPet
                     case "--openai-base": c.OpenAiBase = Nxt(a, ref i); break;
                     case "--openai-model": c.OpenAiModel = Nxt(a, ref i); break;
                     case "--openai-key": c.DeepSeekKey = Nxt(a, ref i); break;   // key 同一字段（注释见 PetConfig.OpenAiBase）
+                    // 备用通道（主通道被限流时改走它）—— 与 --openai-* 同形。
+                    case "--fallback-base": c.FallbackBase = Nxt(a, ref i); break;
+                    case "--fallback-model": c.FallbackModel = Nxt(a, ref i); break;
+                    case "--fallback-key": c.FallbackKey = Nxt(a, ref i); break;
+                    case "--no-rate-retry": c.NoRateRetry = true; break;
+                    case "--allow-config-write": c.AllowConfigWrite = true; break;
                     case "--chat": c.Chat = Nxt(a, ref i); break;
                     case "--personatest": c.PersonaTest = true; break;
                     case "--watchtest": c.WatchTest = true; break;
@@ -661,6 +740,10 @@ namespace AzhuPet
                     case "--no-tray": c.NoTray = true; break;
                     case "--model": c.ModelPath = Nxt(a, ref i); break;
                     case "--llm-model": c.LlmModel = Nxt(a, ref i); break;
+                    case "--old-openai-body": c.OldOpenAiBody = true; break;   // 负对照：见字段注释
+                    case "--no-multiline": c.NoMultiline = true; break;        // 负对照：见字段注释
+                    case "--no-beat-cap": c.NoBeatCap = true; break;           // 负对照：见字段注释
+                    case "--no-freq-clamp": c.NoFreqClamp = true; break;       // 负对照：见字段注释
                     case "--out": c.OutFile = Nxt(a, ref i); break;
                     case "--shot": c.ShotFile = Nxt(a, ref i); break;
                     case "--shot-crop": c.ShotCrop = Nxt(a, ref i); break;

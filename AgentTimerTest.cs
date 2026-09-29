@@ -56,6 +56,7 @@ namespace AzhuPet
             AgentTaskTimer.Enabled = true;
             AgentTaskTimer.OldCodex = o.OldCodex;
             AgentTaskTimer.NoWbBeat = o.NoWbBeat;
+            AgentTaskTimer.NoBeatCap = o.NoBeatCap;
             RunCodexSessions(rows, notes, o.OldCodex);
             RunWorkBuddyHeartbeat(rows, notes);
 
@@ -550,6 +551,48 @@ namespace AzhuPet
                 rows.Add(Row("agenttimer.E3.long_turn_prev_end_old",
                     "正在跑的一轮、上一轮 50 分钟前结束（日志新鲜、无心跳）⇒ 仍须报「进行中」＝ " + Show(h3),
                     h3 != null && h3.Contains("进行中")));
+
+                // ⚠⚠ 进 E4 之前必须把前几步的日志**拨旧**：`Header` 是**多行**的（所有活任务拼成一段），
+                //   留着 E3 那条「进行中」（它没有心跳文件，只靠日志新鲜）会让 E4/E5 的
+                //   `Contains("进行中")` 永远为真 ⇒ **假绿变假红**，判据失去区分度。
+                Touch(log, DateTime.UtcNow.AddMinutes(-60));
+
+                // ---- E4：心跳续命**有上限**（＝用户 2026-09-29 报的「一直显示进行中」）----
+                // ⚠ 现场：会话日志撞了 ~10 MiB 封顶后**永久**不再落新事件（连结束标记也没有了），
+                //   而心跳只要客户端开着就在跳 ⇒ 没有上限的兜底会把这条假读数一直挂着（实测挂满 StaleSec 的 2 小时）。
+                //   取 60 分钟：> WbBeatMaxSilenceSec(30) 且 < StaleSec(2h) ⇒ 它的消失**只能**由「上限」解释。
+                string sid4 = Guid.NewGuid().ToString("D");
+                string log4 = Path.Combine(conv, sid4 + ".log");
+                WriteLines(log4, new[]
+                {
+                    WbLine(DateTime.UtcNow.AddMinutes(-70), "TURN_COMPLETED"),
+                    WbLine(DateTime.UtcNow.AddMinutes(-60), "PROMPT_SENT"),
+                });
+                Touch(log4, DateTime.UtcNow.AddMinutes(-60));
+                string hb4 = Path.Combine(sessRoot, "400001.json");
+                WriteBeat(hb4, sid4, DateTime.UtcNow);       // 心跳新鲜（进程活着），但日志已静默 60 分钟
+                string h4 = settle();
+                rows.Add(Row("agenttimer.E4.beat_window_expires",
+                    "日志静默 60 分钟、心跳新鲜 ⇒ 不许再报「进行中」（心跳续命有 30 分钟上限）＝ " + Show(h4),
+                    h4 == null || !h4.Contains("进行中")));
+
+                // ---- E5：**封顶的大日志**不再靠心跳续命 ----
+                // ⚠ 与 E1 的**唯一差异是文件大小**（两边都是「静默 20 分钟上下 ＋ 心跳新鲜」）
+                //   ⇒ E1 天然就是这一条的反向对照：小日志必须报「进行中」，大日志必须不报。
+                string sid5 = Guid.NewGuid().ToString("D");
+                string log5 = Path.Combine(conv, sid5 + ".log");
+                WriteBigWbLog(log5, 8.5, new[]
+                {
+                    WbLine(DateTime.UtcNow.AddMinutes(-30), "TURN_COMPLETED"),
+                    WbLine(DateTime.UtcNow.AddMinutes(-20), "PROMPT_SENT"),
+                });
+                Touch(log5, DateTime.UtcNow.AddMinutes(-20));
+                string hb5 = Path.Combine(sessRoot, "500001.json");
+                WriteBeat(hb5, sid5, DateTime.UtcNow);
+                string h5 = settle();
+                rows.Add(Row("agenttimer.E5.capped_log_no_beat",
+                    "日志已 ≥8 MiB（会话日志封顶在 ~10 MiB）＋静默 20 分钟＋心跳新鲜 ⇒ 不许报「进行中」＝ " + Show(h5),
+                    h5 == null || !h5.Contains("进行中")));
             }
             catch (Exception ex)
             {
@@ -583,6 +626,20 @@ namespace AzhuPet
                 "{\n  \"pid\": 233860,\n  \"lastHeartbeat\": " + ms
                 + ",\n  \"sessionId\": \"" + sessionId + "\"\n}\n",
                 new UTF8Encoding(false));
+        }
+
+        /// <summary>造一个「已经封顶」的 WorkBuddy 会话日志：先把文件撑到 <paramref name="mb"/> MB 以上
+        /// （填充行**不含任何边界串**，否则会污染 Prime 的回扫），再把那对边界放到**尾部**
+        /// —— Prime 是从尾巴往回扫的，这样第一块就能命中。
+        /// ⚠ 真实封顶点实测 ≈ 10 MiB（见 AgentTaskTimer.WbLogBigBytes）；造 8.5 MB 足以越过「够大」的门槛。</summary>
+        private static void WriteBigWbLog(string path, double mb, string[] tailLines)
+        {
+            var sb = new StringBuilder();
+            string pad = "2026-01-01T00:00:00.000Z filler:noop {\"pad\":\"" + new string('x', 200) + "\"}\n";
+            long target = (long)(mb * 1024 * 1024);
+            while (sb.Length < target) sb.Append(pad);
+            foreach (string l in tailLines) sb.Append(l).Append('\n');
+            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
         }
 
         /// <summary>合成一个 rollout 文件名。⚠ 会话号必须是**带连字符的 UUID**：`AgentTaskTimer`

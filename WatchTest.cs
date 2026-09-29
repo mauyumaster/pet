@@ -243,6 +243,15 @@ namespace AzhuPet
                 + "8 秒基线永远够不到的短停留，在 busy 档下值得报）");
 
             // ================= F. 吐槽通道（变化优先＋定时保底）=================
+            // ⚠⚠ 判据的输入必须**自己钉死**（本仓纪律）：下面这些素材（「400 秒前」「601 秒」）
+            //   是按「吐槽冷却 200 秒、保底 600 秒」设计的。2026-09-29 起这两个值改成**跟着配置走**
+            //   （默认 620／600），不再等于素材的假设 —— 所以显式钉住、用完还原。
+            //   没有这一步，这几条判据的绿/红会取决于「同一次运行里谁先跑过、有没有下发过配置」，
+            //   哪天默认值一改，红的会是判据而不是实现（本仓踩过同族：判据与环境耦合）。
+            double oldRoastCd = Roast.CooldownSec, oldRoastIdle = Roast.IdleNudgeSec;
+            Roast.CooldownSec = 200; Roast.IdleNudgeSec = 600;
+            try
+            {
             var roastEvents = DriveRoast(
                 new[] { "A", "A", "A", "A", "A", "A", "A", "A", "A", "A", "A" },
                 new[] { "一", "一", "一", "一", "新标题", "一", "一", "一", "一", "又一标题", "一" },
@@ -284,6 +293,8 @@ namespace AzhuPet
             bool idleFired = idleEvents.Exists(x => x.Reason == "roast-idle");
             Check("roastIdleNudgeFires", idleFired,
                 "标题全程不变、她 601 秒没开口 → 定时保底触发 roast-idle（期望第 2 拍就到点）");
+            }
+            finally { Roast.CooldownSec = oldRoastCd; Roast.IdleNudgeSec = oldRoastIdle; }
 
             return Report(ok, checks, null);
         }

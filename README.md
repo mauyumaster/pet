@@ -178,17 +178,42 @@ D:\AzhuPet\
 
 ```bash
 pet.exe --settings        # 直接打开设置面板
-pet.exe --settingstest    # 离线验版式（13 项判据，不碰真配置）
+pet.exe --settingstest    # 离线验版式（16 项判据，不碰真配置）
 pet.exe --fixconfig       # 修复旧版本写膨胀的 config.json（见下「自检」）
 ```
 
-**配置 OpenAI 兼容通道**：设置面板的「模型通道」栏目填三项（接口地址 / 模型名 / API key）。例如 DeepSeek：`https://api.deepseek.com` ＋ `deepseek-chat` ＋ 你的 `sk-…`。本地 ollama：`http://localhost:11434` ＋ `qwen2.5` ＋ key 留 `ollama`。两项都填才走它，否则回落 Trae 通道。
+> ⚠ **版式的两条红线（2026-09-29 修「看不见『说话与吐槽』」＋「文字互相遮挡」时踩出来的）**：
+>
+> **① 行高/间距一律不许写死数字，要问框架。** 本机系统 DPI = 144（150%），`AutoScaleMode.Dpi`
+>    会把字体按比例放大，**但代码里写死的 `y`/`Height` 不会跟着长** ⇒ 行内两行字必然相叠
+>    （实测：拨动开关行标题压住副标题 **11px**、数字行标签压住输入框 **23×29px**）。
+>    正解是 `SettingsTheme.LineH(font)` —— 它拿一个 `AutoSize=true` 的探针 `Label` 去
+>    `PreferredHeight`，**要「框架排出来是多少」就问框架**。⚠ 另有两种**看起来对其实少几 px** 的
+>    量法：`Font.Height`（少 5px）、`TextRenderer.MeasureText("汉Ag", f)`（少 4px），
+>    拿它们当行距会留下 4–5px 的残余重叠。
+>    同理 `FitTextLabel` 定高不许用 `TextRenderer + NoPadding` 的 `Height`（每行矮约 4px ⇒
+>    **13 段说明的最后一行被裁**），要用 `SettingsTheme.TextBlockH(text, font, width)`。
+>
+> **② `Dock` 的处理顺序 = z-order 的反序，`Dock=Fill` 必须最后被处理。** 左栏里 `brand`（Top）与
+>    `host`（Fill）若按「先 Add 的在最前」摆，则 **Fill 先被处理、吃光整条左栏**，`Top` 只能叠在
+>    顶上把第 1、2 个栏目整块盖住 —— 现象就是「**设置面板里没有『说话与吐槽』**」。
+>    修法是 `host.BringToFront()`（只对那一个容器调）。左栏同样有先例：`_content.BringToFront()`。
+
+**配置 OpenAI 兼容通道**：设置面板的「模型通道」栏目填三项（接口地址 / 模型名 / API key）。例如 DeepSeek：`https://api.deepseek.com` ＋ `deepseek-chat` ＋ 你的 `sk-…`。本地 ollama：`http://localhost:11434/v1` ＋ `qwen2.5` ＋ key 留 `ollama`。base 与 key **两项都非空**才走它，否则回落 Trae 通道。
+
+⚠ 两个坑：
+- **ollama 那条要带 `/v1`** —— 程序只往后面补 `/chat/completions`，漏了 `/v1` 会打成 404。
+- **本地 ollama 也必须填个占位 key**（如 `ollama`）。不填就会**静默**回落 Trae 通道，现象只是「模型没换」—— 不报错，很难查。
+
+**请求体会自动带 `"thinking":{"type":"disabled"}`**（`--old-openai-body` 可关，那是负对照）。为什么默认要带：现代混合推理模型（智谱 GLM-4.7 及以上、DeepSeek V4 系列）**默认开思考**，而思考 token **计入 `max_tokens`**（本程序写死 600）—— 不关的话思考跑完正文就空了，报的是「模型没有返回内容」，**那句话指向不了真因**。少数模型（智谱 `GLM-5.3` / `5.3-FLASH`）**不接受**关闭思考，传了会直接 400 ⇒ 程序会自动去掉该参数重试一次，`--llmtest` 会把这次「退避」打出来。
 
 命令行等价：
 
 ```bash
 pet.exe --openai-base https://api.deepseek.com --openai-model deepseek-chat --openai-key sk-xxx
 ```
+
+**限流（HTTP 429）会自动重试，必要时改走备用通道。** 智谱的 429 分两种**性质完全不同**的情况：`1305`「该模型当前访问量过大」是**平台算力过载**（与你的 key、频率都无关，官方处置原文就是「稍后再试」），`1302` 是自己发太快 —— 这两条等一下就好；而 `1113` 欠费／`1308`·`1310`·`1316-1321` 配额／`1309` 套餐／`1311` 权限 等到明天也不会好。所以程序**按业务码分家**：前者自动重试（1.2 秒起步、逐次翻倍，共 2 次），后者一次就停 —— 对「该充值了」重试只会白花配额，还把真因拖成一个看不出原因的慢失败。重试仍不通、并且你在「模型通道」里填了**备用通道**时，才改走备用通道（于是免费档被挤爆时她也能照常答话；`--no-rate-retry` 是负对照）。另外桌宠自己的三路调用（打字聊天／台词／每小时小结）是**串行**的 —— 免费档的 RPM 很紧，自己把自己顶到限流是自伤。
 
 **读屏吐槽**要她「看得见」，需在设置里同时勾选：「台词用模型生成」＋「把读到的字放进提示」。只勾后者零效果（模板说话人不读屏幕文字）。
 
@@ -207,7 +232,8 @@ pet.exe --openai-base https://api.deepseek.com --openai-model deepseek-chat --op
 
 ```bash
 pet.exe --watchtest      # 感知状态机 35 项
-pet.exe --speaktest      # 表达链路 44 项
+pet.exe --speaktest      # 表达链路 64 项（含「请求体带 thinking=disabled」＋「限流按业务码分家」＋「--llmtest 的通道接线」＋「判据不许写真配置」＋「多行台词不再丢弃」＋「说话频率的三个旋钮」）
+pet.exe --llmtest        # 真调模型 1~N 次：**验网络那半段**。会打印实际走的通道与请求体形态
 pet.exe --summarytest    # 小时总结 14 项
 pet.exe --ocrtest        # OCR 隐私门 50 项
 pet.exe --fstest         # 全屏判定 10 项
@@ -216,8 +242,12 @@ pet.exe --eyetest        # 读屏口径 10 项
 pet.exe --calibertest    # 口径一致性 54 项（含三种响应结构：data.Packages / data.Accounts / data.Response.Data.Accounts）
 pet.exe --balanceconfigtest  # 凭据纯逻辑 142 项（含候选列表择优：同前缀多接口时该采纳哪一个）
 pet.exe --bubbletest     # 气泡渲染
-pet.exe --settingstest   # 设置面板版式 13 项
-pet.exe --configtest     # 主配置转义对称性 29 项
+pet.exe --settingstest   # 设置面板版式 16 项（含 navBrandAboveList / noSiblingOverlap / textNotClipped）
+                         #   ⚠ 三条「盯症状」的判据：左栏品牌区必须在栏目列表之**上**（正向关系，
+                         #     品牌被排成 0 高也算不合格）；同父容器的可见兄弟控件两两不许相交
+                         #     （同时覆盖 Dock 顺序排错与行内写死坐标撞字）；非 AutoSize 的 Label
+                         #     盒高不许矮于它那段文字（管「写死高度、换行后被裁」）
+pet.exe --configtest     # 主配置转义对称性 31 项（含说话频率三字段的往返与「旧配置缺键回落默认」）
 pet.exe --updatetest     # 自更新链路 115 项（版本比较 / feed 解析 / 载荷名单 / 替换回滚）
 pet.exe --spintest       # 拎起旋转 37 项（固定角加速度 / 角速度上限 / 左右半屏方向 / 跨半屏换向 / 壳侧接线）
 pet.exe --topmosttest    # 窗口置顶 31 项（真实位的读写 / 借走与归还 / 被抹掉后的自愈）
@@ -228,12 +258,16 @@ pet.exe --lifttest       # 「握住」vs「拎起」26 项（按住不动不转
                          #     与 `--no-lift-clear`（OnUp 不清 `_lifted`，D 红）。
                          #   ⚠ A/B/C 三段各检一次「按下有没有真的送达」（D 组复用 C 的松手、无独立按下）
                          #     —— 鼠标注入失败时那几组的绿没有信息量
+pet.exe --agenttimertest # 多 agent 任务计时 21 项（Codex 会话跨文件 / WorkBuddy 心跳兜底的两条上限 / 拖拽时读数不许断）
+                         #   ⚠ 三个负对照各守一条通路：`--old-codex`（Codex 状态退回按文件记，D 组红）、
+                         #     `--no-wb-beat`（关掉心跳兜底，E1 红）、`--no-beat-cap`（去掉心跳的两条上限，E4/E5 红）
 pet.exe --webtest        # 浏览器通道 3 项（运行时 / 原生加载器能否解析 / 加载器有没有随包分发）
 pet.exe --updatediag     # 自更新**联网**诊断：代理 / feed 可达 / 地址一致 / 资产存在
 pet.exe --shellprobe     # 真机窗口真值探针
 ```
 
-每套都带负对照（`--no-xxx`）：关掉被测机制，判据必须红——判据没被逼红过，它的绿就没有信息量。
+每套都带负对照：关掉被测机制，判据必须红——判据没被逼红过，它的绿就没有信息量。
+（前缀**并不统一**：`--old-frame-gate` / `--old-lift-gate` / `--no-lift-clear` / `--old-openai-body` 都属这一类，别按固定格式去记。）
 
 > ⚠ 上面这些条数**不是装饰**：`--updatetest` 从 111 涨到 115 是因为 v0.1.2 补了载荷名单的判据，
 > 而 README 里的数字曾经停在旧的上面。改判据时顺手改这里 —— 数字对不上，等于告诉读者
@@ -250,6 +284,57 @@ pet.exe --shellprobe     # 真机窗口真值探针
 > 另外解析器补齐了三种结构（`--calibertest` 的 ⑨ ⑩ 两组守着）。
 > **教训**：抓取模式是**子串匹配**时，「接口改名」会以「前缀命中」的形式静默发生 ——
 > 这类 bug 只能靠「候选 + 用真实解析器逐个试」防住，靠「猜接口名」防不住。
+>
+> ⚠ 2026-09-29 的两处（「换 API」这条线上的）：
+>   ① **请求体默认带 `thinking=disabled`**：现代混合推理模型（智谱 GLM-4.7 及以上、DeepSeek V4 系列）
+>      默认开思考，而思考 token **计入**写死的 `max_tokens=600` ⇒ 正文被挤空，报「模型没有返回内容」，
+>      那句错**指向不了真因**。不接受关思考的模型（`GLM-5.3`/`5.3-FLASH`，传了直接 400）由**自适应退避**兜住：
+>      只认 400/422 × 报错文本提到 thinking/reasoning/思考 才去掉该参数重试一次，其余错误照原样报出
+>      （把 401/404 的真因盖成「模型拒绝思考」比不重试更坏）。
+>      负对照 `--old-openai-body`（回到改前的请求体）⇒ `--speaktest` **精确红 1 条**，其余保持绿。
+>   ② **`--llmtest` 原先测的是 Trae 通道**：通道路由只接在 `RunNormal` 里，而 `--llmtest` 在 Switch
+>      更早处就 return ⇒ 用户填好 GLM/DeepSeek 的 base+key、跑它拿到绿色，而那条绿与新通道毫无关系
+>      （「**测错对象的绿**」，比红更难发现）。修法：接线抽成 `WireOpenAi` 并挪到 `Main` 早段，全局只有一处；
+>      另加**接线判据**守着（读 Program.cs：接线必须在 `--llmtest` 分支之前，且不许是被注释掉的那行）。
+>      它同时会打印**实际**走的通道与请求体形态 —— 否则「换 API 有没有生效」在这条唯一入口上看不出来。
+>
+> ⚠⚠ 2026-09-29 第三处，**判据把用户的真配置写坏了**（性质比上面两条更严重）：
+>   现场：跑一次 `--lifttest`，`%LOCALAPPDATA%\AzhuPet\config.json` 就被覆盖成判据自己构造的那份
+>   （`speechOn=false`、`deepSeekKey`/`openAiBase` 全空）—— 刚配好的 GLM key 就这么没了。
+>   机制：判据要「真窗口」，而窗口摆位那条路（`PlaceFeetOnFloor`／`SavePos`／`SetSize`）会 `Cfg.Save()`，
+>   直接落到真路径；7 类判据都有窗口（lifttest／motiontest／dragtest／selftest／spintest／topmosttest／
+>   agenttimertest）。**长期没被发现**，是因为用户正开着桌宠时，她内存里那份好配置会在下一次保存时把它盖回来。
+>   修法：`PetConfig.RealWriteAllowed` —— 判据模式下一律拒写（要写的必须先把 `AZHU_CONFIG_DIR` 指到
+>   临时目录，`--configtest` 就是这么做的）；显式操作用户配置的入口（`--fixconfig`／`--settings`）放行。
+>   守卫判据 `testModeRefusesRealConfigWrite`（真去调一次 `Save()`，看守卫有没有拦下它）。
+>   **教训**：判据跑在用户的环境里，「只读」不是口号，得有一条**机制**挡着 ——
+>   靠「大家都记得别写」等于没挡。跑任何判据前先备份 `config.json`，是当时的唯一自保动作。
+>
+> ⚠ 2026-09-29 第四处，**「多行台词」不再丢弃**（用户拍板「多行输出也可以」）：
+>   原先一句台词只要含换行就**整句丢弃**（`LlmSpeaker.Judge()` 里那条「一句台词不该分行」）。换成有性格的
+>   模型后，她主动搭话常写成「数字。⏎ 反问」两行 ⇒ 被丢 ⇒ 表现是「**她有时不开口**」（实测采用率在
+>   0–50% 之间抖，同一个模型先后量到 3/6 与 0/6，所以单批样本不足以定论）。
+>   而气泡流 <abbr>BubbleFeed</abbr> 本来就是 `TextWrapping=Wrap` ＋卡片高度自测量，两行放得下 ——
+>   「多行塞不进去」讲的是**早期的窗口内覆盖层**，那个实现早就废了。
+>   ⇒ 现在多行照说，且**字数只数可见字符**（换行不计）；否则「放开多行」会被「超 30 字」原地拦下，改动等于没做。
+>   负对照 `--no-multiline`（回到「含换行即丢弃」）⇒ `--speaktest` **红 2 条**
+>   （`llmAcceptsMultiline`、`llmMultilineCountsVisibleOnly`），其余保持绿。
+>   真链路复测：采用率 **0/6 → 6/6**（且 6 条全落在那 6 条有分行的上）。
+>
+> ⚠ 2026-09-29 第五处，**说话频率改成「十分钟一句」并可在设置里调**（用户拍板）：
+>   原先三处数字（开口冷却 180 秒／吐槽冷却 200 秒／保底 600 秒）**散在三个文件里写死**，
+>   设置面板只能把它们印成一段说明文字（「改动它们要三个数字配套调……需要时告诉我」）。
+>   ⇒ 现在收成设置 →「说话与吐槽」→「触发节奏」的三个旋钮：**两次开口至少隔**（默认 10 分钟）、
+>   **安静时多久冒一句**（默认 10 分钟）、**每天最多说**（默认 200 句），改完保存即生效、不用重启。
+>   ⚠ 三个数字之间有**不变式**，所以换算与钳制只在 `SpeechFreq.cs` 一处做：
+>   「保底 ≥ 开口冷却」（填反 ⇒ 保底触发被闸门**每一拍**拦下一次 ⇒ `memory.jsonl` 被 veto 记录灌爆）、
+>   「吐槽冷却 = 开口冷却 + 20 秒」（派生，不让用户填一个容易填反的数）。
+>   判据 `speechFreq*` 五条（默认值／下发／两条不变式／下限）＋ `speechFreqWiredToGate`（读源码：
+>   `StartBrain` 与 `ApplyConfig` 两处调用点都不许缺）；负对照 `--no-freq-clamp`（跳过钳制）
+>   ⇒ `--speaktest` **精确红 2 条**（`speechFreqIdleNotShorterThanCooldown`、`speechFreqFloorHolds`）。
+>   旧配置里没有这三个键 ⇒ **不改任何配置就是新默认**（用户机器上实测 `--llmtest` 打印「每 10 分钟最多一句」）。
+>   另：`--watchtest` 的吐槽判据原先**依赖**写死的 200/600 当素材假设，现在自己钉死输入
+>   （判据的输入必须自己钉死 —— 依赖默认值等于把判据和实现耦合在一起）。
 
 另有三套守卫不在 `pet.exe` 里（它们守的是「打包」和「配图」，跑起来需要 python / node）：
 
@@ -509,3 +594,6 @@ dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile
 
 - **代码**：[MIT](LICENSE)
 - **人格文本**（`persona.md`，她的自我认知与说话方式）：[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh) —— 非商业使用、署名、相同方式共享。这是「她是谁」的一部分，请像对待角色设定一样对待它。
+- **形象**（`model/chibi_maid_pet.glb`）：**不是本项目原创**。源自创作者**上善无形**的原创 OC「**溟月**」（2025-06）；2026-04 由 B 站用户 ZipZipPipe 加入 DeepSeek 元素形成「女仆鲸鱼娘」；Q 版模型由「这个刀子真甜」用 Updream 制作（2026-07-10）。原作者于 2026-08-02 声明以 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh) 授权。⇒ 使用与再分发时**必须署名原作者**、**不得商用**、**衍生作品须同协议共享**。
+
+> 版权链的完整记录与出处见库内 `40 Projects/阿助（桌宠）/她是谁.md` §9。

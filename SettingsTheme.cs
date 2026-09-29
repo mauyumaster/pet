@@ -12,6 +12,7 @@
 // 3. **间距用 4 的倍数**（4/8/12/16/20/24）—— 这是 `ardot-ui-design` 里那条
 //    「spacing must follow a consistent scale」；随手写的 7px、13px 正是旧面板看起来挤的原因。
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -134,6 +135,67 @@ namespace AzhuPet
         ///   异常后一刻又好了（我用 AZHU_REPRO_NOTE 探针在异常前后各量一次，两次都 OK）。
         ///   `--settingstest` 也照样全绿 —— 它只构造一次面板，触不到配额。
         ///   判据是「对象数」而不是「有没有抛」，所以修法只有一条：**字体一律共享，绝不 per-call 新建**。</summary>
+        private static readonly Dictionary<Font, int> _lineHs = new Dictionary<Font, int>();
+        private static readonly Dictionary<Font, int> _bareLineHs = new Dictionary<Font, int>();
+
+        /// <summary>一行文字在**当前 DPI 下真正占的高度**（＝一个 `AutoSize` 的 Label 排出来会有多高）。
+        /// 布局里凡是要给文字留位置的地方一律用它。结果按字体缓存。
+        ///
+        /// ⚠⚠ **必须用 `Label.PreferredHeight` 去量，不许自己算**。这一条我连错两次、浪费了一轮：
+        ///   | 量法 | 结果（9.5pt @150%） | 拿它当行距的后果 |
+        ///   |---|---|---|
+        ///   | `Font.Height` | 25 | 重叠 11 → **5px**（没归零） |
+        ///   | `TextRenderer.MeasureText("汉Ag", f)` | 26 | 重叠 11 → **4px**（还是没归零） |
+        ///   | `new Label{AutoSize=true}.PreferredHeight` | **30** | 重叠 **0** ✅ |
+        ///   原因是 Label 自己会给文字盒另加一点内边距，前两种量法都少算那几像素。
+        ///   ⇒ 教训：**要「框架排出来是多少」，就问框架**；自己按字体度量推，推得再合理也会差几像素，
+        ///     而版式上「差 4px」＝那两行字仍然贴在一起。
+        /// </summary>
+        public static int LineH(Font f)
+        {
+            if (f == null) return 0;
+            int v;
+            if (_lineHs.TryGetValue(f, out v)) return v;
+            try
+            {
+                using (var probe = new Label { Text = "汉Ag", AutoSize = true, Font = f })
+                    v = probe.PreferredHeight;
+            }
+            catch { v = 0; }
+            if (v <= 0) v = f.Height + 5;        // 兜底：至少不比 Font.Height 小
+            _lineHs[f] = v;
+            return v;
+        }
+
+        /// <summary>一段文字在给定宽度下**换行后**需要的高度（单行时＝<see cref="LineH"/>）。
+        ///
+        /// ⚠ 为什么要它：副标题的高度若写死一行，窗口拉到最窄时最长的说明会换到第二行，
+        ///   而第二行**被裁掉** —— 那是「文字被遮挡」的另一半（与「两行字叠在一起」同族）。
+        /// ⚠ 行数用「整段高 ÷ 单行高」推，再乘 <see cref="LineH"/>：`TextRenderer` 带 `NoPadding`
+        ///   量出来的单行高比 Label 实际占的矮 4px，直接采信会让多行文本的下沿被裁。
+        /// </summary>
+        public static int TextBlockH(string text, Font f, int width)
+        {
+            if (f == null) return 0;
+            if (string.IsNullOrEmpty(text)) return LineH(f);
+            if (width < 40) width = 40;
+            try
+            {
+                int one;
+                if (!_bareLineHs.TryGetValue(f, out one) || one <= 0)
+                {
+                    one = TextRenderer.MeasureText("汉Ag", f).Height;
+                    _bareLineHs[f] = one;
+                }
+                if (one <= 0) return LineH(f);
+                int all = TextRenderer.MeasureText(text, f, new Size(width, int.MaxValue),
+                    TextFormatFlags.WordBreak).Height;
+                int lines = Math.Max(1, (int)Math.Round((double)all / one));
+                return lines * LineH(f);
+            }
+            catch { return LineH(f); }
+        }
+
         public static void InitFonts()
         {
             if (Body != null) return;

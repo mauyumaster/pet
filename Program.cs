@@ -47,6 +47,30 @@ namespace AzhuPet
 
             // 模型覆盖必须在任何 ChatAsync 之前生效（四条通路共用这一个开关）。
             if (!string.IsNullOrEmpty(o.LlmModel)) TraeChat.ModelOverride = o.LlmModel;
+            // 「关思考」开关同理：必须在任何 ChatAsync 之前定下来。
+            // ⚠ `--old-openai-body` 是**负对照**：回到 2026-09-29 之前的请求体（不发 thinking），
+            //   好让 --speaktest 里那条判据能红。
+            TraeChat.SendThinkingDisabled = !o.OldOpenAiBody;
+            // 限流重试同理（2026-09-29 加）：`--no-rate-retry` 是**负对照** —— 关掉重试就是用户那天
+            // 撞上 1305 时的原始行为（一次都不重试，直接把 429 甩到聊天窗里）。判据必须因此变红。
+            if (o.NoRateRetry) TraeChat.RateLimitRetries = 0;
+            // 多行台词（2026-09-29 用户拍板「多行输出也可以」）：`--no-multiline` 是**负对照** ——
+            //   回到「含换行即整句丢弃」的旧行为，好让 --speaktest 里那条判据能红。
+            //   与上面两条同理：必须在任何 SayAsync 之前定下来。
+            if (o.NoMultiline) LlmSpeaker.AllowMultiline = false;
+            // 说话频率的两条钳制（2026-09-29）：`--no-freq-clamp` 是**负对照** —— 跳过
+            //   「保底间隔 ≥ 开口冷却」与冷却下限，把配置里的分钟数原样当秒数用，
+            //   好让 --speaktest 里那几条频率判据能红。
+            SpeechFreq.NoClamp = o.NoFreqClamp;
+            // ⚠⚠ 判据模式**不许写用户的真配置** —— 见 PetConfig.RealWriteAllowed 的事故记录
+            //   （跑一次 --lifttest 就把 config.json 覆盖成空的，用户的 GLM key 丢了）。
+            //   放行的三类：本来就操作用户配置的入口（--fixconfig／--settings），以及 --llmtest
+            //   （它的 --openai-* 参数按设计会落盘）；`--allow-config-write` 是负对照。
+            PetConfig.RealWriteAllowed = !o.AnyTest()
+                || o.AllowConfigWrite || o.FixConfig || o.Settings || o.BalanceSettings || o.LlmTest;
+            // 通道路由也必须在这里接上 —— 见 WireOpenAi 的注释：原先只挂在 RunNormal 里，
+            // 于是 `--llmtest` 测的是 Trae 通道（「测错对象的绿」）。
+            WireOpenAi(o, null);
             WpfPetRenderer.MatMode = o.Mat == "flat" ? 1 : o.Mat == "emissive" ? 2 : o.Mat == "uv" ? 3 : 0;
             Glb.VFlip = o.VFlip;
             PetWindow.ForceHitThrough = o.ForceThrough;
@@ -280,20 +304,10 @@ namespace AzhuPet
                 balChanged |= SetCfg(cfg, v => cfg.BalanceHeader = v, o.BalanceHeader, "AZHU_BALANCE_HEADER");
                 balChanged |= SetCfg(cfg, v => cfg.BalanceKey = v, o.BalanceKey, "AZHU_BALANCE_KEY");
                 balChanged |= SetCfg(cfg, v => cfg.BalanceUnit = v, o.BalanceUnit, "AZHU_BALANCE_UNIT");
-                // OpenAI 兼容通道：命令行 > 环境变量 > 已存配置（key 走 DeepSeekKey 字段，见 PetConfig 注释）
-                bool oaChanged = false;
-                oaChanged |= SetCfg(cfg, v => cfg.OpenAiBase = v, o.OpenAiBase, "AZHU_OPENAI_BASE");
-                oaChanged |= SetCfg(cfg, v => cfg.OpenAiModel = v, o.OpenAiModel, "AZHU_OPENAI_MODEL");
-                oaChanged |= SetCfg(cfg, v => cfg.DeepSeekKey = v, o.DeepSeekKey, "AZHU_DEEPSEEK_KEY");
-                if (oaChanged) cfg.Save();
-
-                // 通道路由接线：闭包每次现读配置 —— 配置窗／config.json 改完**即时生效**，不用重启。
-                // （config.json 只有几 KB，消息频率又是分钟级；正确性优先于这点 IO。）
-                TraeChat.OpenAiSource = () =>
-                {
-                    var c = PetConfig.Load();
-                    return Tuple.Create(c.OpenAiBase, c.DeepSeekKey, c.OpenAiModel);
-                };
+                // OpenAI 兼容通道 + 通道路由接线：**只有一处**（见 WireOpenAi 的注释）。
+                // 早段已经用 null 调过一次（为了让 --llmtest 也接上）；这里带上真正的 cfg 再走一遍，
+                // 好让下面 new PetWindow(..., cfg) 拿到的实例与落盘后的状态一致。
+                WireOpenAi(o, cfg);
 
                 GlbModel gm;
                 try { gm = Glb.Load(model); }
@@ -310,13 +324,51 @@ namespace AzhuPet
             }
         }
 
-        /// <summary>取「命令行 > 环境变量」的值写入配置；有值且与现配置不同则返回 true（该落盘）。</summary>
+        /// <summary>取「命令行 > 环境变量」的值写入配置。**有值就返回 true**（＝该落盘）——
+        /// ⚠ 注意它并不比较「与现配置是否不同」（注释以前这么写过，与实现不符，已改正）：
+        ///   也就是说命令行/环境变量一旦给了值，每次启动都会重写一次 config.json。代价可忽略，保留现行为。</summary>
         private static bool SetCfg(PetConfig cfg, Action<string> set, string cliValue, string envName)
         {
             string v = !string.IsNullOrEmpty(cliValue) ? cliValue : Environment.GetEnvironmentVariable(envName);
             if (string.IsNullOrEmpty(v)) return false;
             set(v);
             return true;
+        }
+
+        /// <summary>接上「和桌宠说话」的通道路由：命令行 &gt; 环境变量 &gt; 已存配置（新值落盘）。
+        /// ⚠⚠ 抽成一个方法、并且**在 Program.Main 的早段无差别调用**，理由是本轮挖出来的真 bug：
+        ///   原先这段只写在 <c>RunNormal</c> 里（第 292 行），而 <c>--llmtest</c> 在 Switch 更早处就 return 了
+        ///   ⇒ 那时 <c>TraeChat.OpenAiSource</c> 仍是 null，**--llmtest 测的是 Trae 中转通道**。
+        ///   后果极坏：用户按提示填好 GLM/DeepSeek 的 base+key，跑 --llmtest 得到一个绿色，
+        ///   而那条绿跟新通道毫无关系 —— 「测错对象的绿」（2026-09-29）。
+        ///   接线必须**只有一处**，运行期与判据同源。</summary>
+        private static void WireOpenAi(Cli o, PetConfig cfg)
+        {
+            cfg = cfg ?? PetConfig.Load();
+            bool changed = false;
+            // key 走 DeepSeekKey 字段（见 PetConfig.OpenAiBase 的注释）
+            changed |= SetCfg(cfg, v => cfg.OpenAiBase = v, o.OpenAiBase, "AZHU_OPENAI_BASE");
+            changed |= SetCfg(cfg, v => cfg.OpenAiModel = v, o.OpenAiModel, "AZHU_OPENAI_MODEL");
+            changed |= SetCfg(cfg, v => cfg.DeepSeekKey = v, o.DeepSeekKey, "AZHU_DEEPSEEK_KEY");
+            // 备用通道（可选）：仅当用户填了 base+key 才生效；不填 = 行为与新增前完全一致。
+            changed |= SetCfg(cfg, v => cfg.FallbackBase = v, o.FallbackBase, "AZHU_FALLBACK_BASE");
+            changed |= SetCfg(cfg, v => cfg.FallbackModel = v, o.FallbackModel, "AZHU_FALLBACK_MODEL");
+            changed |= SetCfg(cfg, v => cfg.FallbackKey = v, o.FallbackKey, "AZHU_FALLBACK_KEY");
+            if (changed) cfg.Save();
+
+            // 闭包每次现读配置 —— 配置窗／config.json 改完**即时生效**，不用重启。
+            // （config.json 只有几 KB，消息频率又是分钟级；正确性优先于这点 IO。）
+            TraeChat.OpenAiSource = () =>
+            {
+                var c = PetConfig.Load();
+                return Tuple.Create(c.OpenAiBase, c.DeepSeekKey, c.OpenAiModel);
+            };
+            // 备用通道用**同一个**「现读配置」模式：主通道被限流时才会被读到，空值即不用。
+            TraeChat.FallbackSource = () =>
+            {
+                var c = PetConfig.Load();
+                return Tuple.Create(c.FallbackBase, c.FallbackKey, c.FallbackModel);
+            };
         }
     }
 }
