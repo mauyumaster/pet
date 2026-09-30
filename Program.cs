@@ -111,6 +111,8 @@ namespace AzhuPet
             if (o.OcrVis) return OcrTest.VisRun(o);
             if (o.StatusTest) return StatusTest.Run(o);
             if (o.CaliberTest) return CaliberTest.Run(o);
+            if (o.TraeExtTest) return TraeExtTest.Run(o);
+            if (o.TraeExtInstall) return TraeExtInstaller.InstallRun();
             if (o.BubbleTest) return BubbleTest.Run(o);
             if (o.BalanceConfigTest) return BalanceConfigTest.Run();
             if (o.WebTest) return WebTest.Run();

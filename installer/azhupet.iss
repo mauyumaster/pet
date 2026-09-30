@@ -139,7 +139,7 @@ Name: "autostart"; Description: "开机时自动启动阿助（之后可在设�
 
 
 [Files]
-; 四文件，与 pack-release.cmd 打 zip 的内容**必须一致**。
+; 六文件，与 pack-release.cmd 打 zip 的内容**必须一致**。
 ; ⚠ 逐条列出而不用 *.* 通配：缺文件时 Inno 在**编译期**就报错，而不是打出一个
 ;   「装完能开、但没有模型/不是她」的包 —— 那种包每一处检查都是绿的。
 Source: "{#PubDir}\{#AppExe}";                DestDir: "{app}";       Flags: ignoreversion
@@ -150,6 +150,13 @@ Source: "{#PubDir}\model\chibi_maid_pet.glb"; DestDir: "{app}\model"; Flags: ign
 ;   开发机上一直没暴露，是因为本机 PATH 上恰好有一份（Windows Performance Toolkit 自带的）。
 ;   实测方式：把 PATH 收窄到 System32，再跑 pet.exe --webtest。
 Source: "{#PubDir}\WebView2Loader.dll";       DestDir: "{app}";       Flags: ignoreversion
+; ⚠ Trae 令牌同步扩展（2026-09-30 加）—— 桌宠在「余额配置 → 安装同步扩展」时把它拷进
+;   Trae 的扩展目录（~/.trae-cn/extensions），此后 Trae 每次启动都会把新令牌写进阿助的
+;   凭据文件，用户不必再手工粘贴（Trae 的令牌 14 天过期）。
+;   缺了这两个文件 ⇒ 按钮报「桌宠缺少扩展文件」，而其它每一处检查仍然是绿的。
+;   目录名 trae-ext 与 TraeExtInstaller.SourceDirName / pet.csproj / pack-release.cmd 同名。
+Source: "{#PubDir}\trae-ext\extension.js";    DestDir: "{app}\trae-ext"; Flags: ignoreversion
+Source: "{#PubDir}\trae-ext\package.json";    DestDir: "{app}\trae-ext"; Flags: ignoreversion
 
 
 [Icons]

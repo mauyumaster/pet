@@ -1,0 +1,27 @@
+{
+  "name": "trae-token-sync",
+  "displayName": "AzhuPet Trae Token Sync",
+  "description": "把 Trae 当前会话的令牌同步进阿助桌宠的凭据文件，免去手工粘贴。",
+  "publisher": "azhupet",
+  "license": "MIT",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.107.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "*",
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "azhupet.syncTraeToken",
+        "title": "阿助：立即同步 Trae 令牌"
+      }
+    ]
+  }
+}

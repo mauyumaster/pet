@@ -97,6 +97,23 @@ if errorlevel 1 goto :hookfail
 del /q "%TEMP%\azhu_hook_check.js" >nul 2>nul
 :afterhook
 
+rem ---- [2d/8] traeext check: the Trae token-sync extension ships INSIDE the payload.
+rem pet.csproj copies trae-ext/ into the output (see the Content item there); at runtime
+rem TraeExtInstaller deploys it into Trae's extensions dir so the user's Trae hands the
+rem pet a fresh token every time it starts. Two failure modes are invisible otherwise:
+rem   * the folder missing from the payload -> the button reports "missing extension
+rem     file", while every other check in this script stays green;
+rem   * package.json engines.vscode set to "*" -> Trae refuses the manifest ("version
+rem     not specific enough"), the extension is registered in the profile but NEVER
+rem     activated, and it writes no log line at all. That one cost a whole session on
+rem     2026-09-30; built-in extensions get away with "*" because they are exempt.
+rem --traeexttest asserts the manifest, the credential skeleton and the real
+rem patch/insert behaviour of extension.js (via node). It prints SKIP, never PASS,
+rem when node is absent -- a gate that disappears quietly is worse than no gate.
+echo [2d/8] traeext: verifying the shipped Trae token-sync extension...
+"%PUBDIR%\pet.exe" --traeexttest
+if errorlevel 1 goto :traeextfail
+
 rem Read the version from the BUILT EXE, never from a hardcoded string.
 rem WHY: the version lives in exactly one place (pet.csproj <Version>). If this
 rem script kept its own copy, a release could ship an exe that says 0.2.0 while
@@ -123,10 +140,15 @@ if not exist "%PUBDIR%\model" mkdir "%PUBDIR%\model"
 copy /y "..\model\chibi_maid_pet.glb" "%PUBDIR%\model\chibi_maid_pet.glb" >nul
 if errorlevel 1 goto :failed
 
-echo [5/8] guard: the release must contain ALL FOUR files...
+echo [5/8] guard: the release must contain ALL SIX files...
 if not exist "%PUBDIR%\persona.md" goto :nopersona
 if not exist "%PUBDIR%\model\chibi_maid_pet.glb" goto :nomodel
 if not exist "%PUBDIR%\WebView2Loader.dll" goto :noloader
+rem WHY these two: the installer and the zip list them explicitly, so a missing file
+rem would fail the Inno build -- but the ZIP would sail through without them and the
+rem feature would only die on the user's machine, at the moment they click the button.
+if not exist "%PUBDIR%\trae-ext\extension.js" goto :notraeext
+if not exist "%PUBDIR%\trae-ext\package.json" goto :notraeext
 
 echo [6/8] zip...
 rem Tar is present on Windows 10 1803+ and zips without extra tooling -- but we
@@ -146,7 +168,11 @@ rem fine here only because Windows Performance Toolkit puts a stray copy on
 rem PATH -- found by re-running --webtest with PATH narrowed to System32.
 rem The zip is also the self-update payload, so it needs this file too.
 if exist "%ZIP%" del /q "%ZIP%"
-"%TAR%" -a -c -f "%ZIP%" -C "%PUBDIR%" pet.exe persona.md model/chibi_maid_pet.glb WebView2Loader.dll
+rem WHY trae-ext/ is in this list: the zip is ALSO the self-update payload. An update
+rem that drops these two files would leave the extension in Trae's folder (it is not
+rem deleted) but remove our ability to redeploy it -- and the next PC that installs
+rem from this zip would have no way to get Trae credit at all.
+"%TAR%" -a -c -f "%ZIP%" -C "%PUBDIR%" pet.exe persona.md model/chibi_maid_pet.glb WebView2Loader.dll trae-ext/extension.js trae-ext/package.json
 if errorlevel 1 goto :failed
 
 rem Format gate: what we just wrote has to be a REAL zip, and the tell is size --
@@ -314,6 +340,28 @@ echo [x] The injected JS hook FAILED its check (see the FAIL lines above).
 echo     The browser window would still open -- it just would not capture anything,
 echo     so the user would see the same "no request captured yet" as if the site had
 echo     never made the call. Fix the hook (CredentialCapture.cs) before shipping.
+pause
+exit /b 1
+
+:traeextfail
+echo.
+echo [x] pet.exe --traeexttest FAILED on the published binary.
+echo     Read the FAIL lines above. Usual suspects:
+echo       * package.json engines.vscode is "*" -- Trae rejects the manifest and the
+echo         extension never activates (no log line, feature silently dead);
+echo       * publisher.name / version in package.json no longer match
+echo         TraeExtInstaller.PubId / .Version;
+echo       * the credential skeleton no longer parses through StatusProbe.BuildTraeRequest.
+echo     Fix trae-ext/ (or TraeExtInstaller.cs) before shipping.
+pause
+exit /b 1
+
+:notraeext
+echo.
+echo [x] trae-ext\ is missing from the publish folder.
+echo     pet.csproj copies it via:  Content Include="trae-ext\**\*"
+echo     Without it the "install token-sync extension" button reports a missing
+echo     extension file, and no user can get their Trae credit read automatically.
 pause
 exit /b 1
 

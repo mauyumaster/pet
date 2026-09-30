@@ -17,6 +17,9 @@ namespace AzhuPet
         private static readonly Brush Bg = B(24, 26, 36), Panel = B(32, 35, 47), Panel2 = B(39, 43, 57);
         private static readonly Brush Muted = B(166, 174, 194), Accent = B(88, 132, 235);
         private static readonly Brush Good = B(82, 196, 132), Bad = B(238, 111, 111), Border = B(61, 66, 84);
+        /// <summary>第三档：**现在能用、但会过期**（如 Trae 凭据在、自动续期扩展没装）。
+        /// ⚠ 加它是因为二值色（绿/灰）会把「14 天后必然坏」画成「一切正常」（2026-09-30）。</summary>
+        private static readonly Brush Warn = B(232, 176, 84);
 
         private readonly Action _reload;
         private readonly List<BalanceSource> _items;
@@ -60,10 +63,17 @@ namespace AzhuPet
             builtins.Children.Add(SectionTitle("内置平台", "凭据过期时：点「浏览器登录获取」重新登一次即可；也可手工粘贴。旧内容不回显。"));
             _traeState = new TextBlock();
             _workbuddyState = new TextBlock();
-            builtins.Children.Add(BuiltinCard("Trae 积分", "读取可用积分（总额 − 已用）", _traeState,
-                () => OpenCredential("Trae", StatusProbe.TraeSecretFile, "authorization")));
-            // ⚠ Trae 没有浏览器通道：它的凭据是 **IDE 的**（29 个头，含 X-Medusa / X-Neptune / x-lscbd-*
-            //   等客户端签名头），网页登录拿不到同一份 —— 给它一个「浏览器登录」按钮只会让用户白试一趟。
+            builtins.Children.Add(BuiltinCard("Trae 积分", "读取可用积分（总额 − 已用）｜到期自动续期需装扩展", _traeState,
+                () => OpenCredential("Trae", StatusProbe.TraeSecretFile, "authorization"),
+                null, () => InstallTraeExt()));
+            // ⚠ Trae **没有**「浏览器登录获取」这条路，理由两条，都不是猜的：
+            //   ① 它的凭据是 **IDE 现签的** `Cloud-IDE-JWT`，而桌宠那一发只发 cookie
+            //      （`BrowserReading.BuildFetchScript` 原文：`fetch(url,{credentials:'include'})`，
+            //      一个自定义头都不设）；发那个请求的页面是 `vscode-file://` 自定义协议，
+            //      实测 `document.cookie` 长度 0 —— 连 cookie 罐都不存在。
+            //   ② 实测那个接口**只认 `authorization` 一个头**（29 个头删到 1 个照样读到真数），
+            //      所以「复现 29 个签名头」这个曾经以为的难点其实不存在。
+            //   ⇒ 正确入口是「装一个扩展让 Trae 自己把令牌交出来」（见 TraeExtInstaller.cs）。
             builtins.Children.Add(BuiltinCard("WorkBuddy 积分", "读取界面同口径的 type=1 可用额度", _workbuddyState,
                 () => OpenCredential("WorkBuddy", StatusProbe.WorkBuddySecretFile, "cookie", "x-user-id"),
                 () => OpenBrowserLogin()));
@@ -127,7 +137,8 @@ namespace AzhuPet
             return p;
         }
 
-        private Border BuiltinCard(string name, string sub, TextBlock state, Action edit, Action browser = null)
+        private Border BuiltinCard(string name, string sub, TextBlock state, Action edit, Action browser = null,
+                                   Action install = null, string installText = "安装同步扩展", string editText = null)
         {
             var g = new Grid();
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -136,12 +147,31 @@ namespace AzhuPet
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var text = new StackPanel { Margin = new Thickness(12, 9, 8, 9) };
             text.Children.Add(new TextBlock { Text = name, FontSize = 14, FontWeight = FontWeights.Medium });
-            text.Children.Add(new TextBlock { Text = sub, Foreground = Muted, FontSize = 11.5, Margin = new Thickness(0, 2, 0, 0) });
+            // ⚠ 副标题必须能被裁成「…」：这一列是星号列，右边的按钮是 Auto 列 ——
+            //   文案一长，星号列先被压缩，而不设 TextTrimming 时是**硬裁**：字被切一半、
+            //   没有任何提示，看起来像渲染坏了。ToolTip 兜住被裁掉的那部分。
+            var subText = new TextBlock
+            {
+                Text = sub, Foreground = Muted, FontSize = 11.5, Margin = new Thickness(0, 2, 0, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = sub
+            };
+            text.Children.Add(subText);
             g.Children.Add(text);
             state.Margin = new Thickness(8); state.VerticalAlignment = VerticalAlignment.Center;
             state.FontSize = 12; state.FontWeight = FontWeights.SemiBold;
             Grid.SetColumn(state, 1); g.Children.Add(state);
-            if (browser != null)
+            if (install != null)
+            {
+                // 「装扩展」是主路（一次点击换来永久自动续期），手工粘贴退成备选 ——
+                // 跟浏览器通道那边同一个道理：主路解决的是「用户不必理解请求头」。
+                var ib = SmallButton(installText, (s, e) => install(), true);
+                ib.VerticalAlignment = VerticalAlignment.Center; ib.Margin = new Thickness(4, 0, 0, 0);
+                Grid.SetColumn(ib, 2); g.Children.Add(ib);
+                var eb2 = SmallButton(editText ?? "手工粘贴", (s, e) => edit(), false);
+                eb2.VerticalAlignment = VerticalAlignment.Center; eb2.Margin = new Thickness(4, 0, 10, 0);
+                Grid.SetColumn(eb2, 3); g.Children.Add(eb2);
+            }
+            else if (browser != null)
             {
                 // 有浏览器通道时，它才是「主路」（不用理解请求头、不用开 DevTools）；
                 // 手工粘贴退成备选 —— 但它必须留着：终端用户可能没装 WebView2 运行时。
@@ -177,11 +207,52 @@ namespace AzhuPet
         private void RefreshBuiltins()
         {
             var slots = StatusProbe.SecretSlots();
-            SetState(_traeState, slots[0].exists ? "● 已配置" : "○ 未配置", slots[0].exists);
+            var ext = TraeExtInstaller.Inspect();
+            string label = TraeExtInstaller.ShortLabel(ext);
+            // 三档色：① 凭据在 且 续期已装 = 绿（真的不用管了）
+            //          ② 凭据在 但 续期没装 = 琥珀（现在读数正常，14 天后会坏 —— 最该被看见的一格）
+            //          ③ 没凭据           = 灰
+            Brush fg = !slots[0].exists ? Muted
+                : (ext.State == TraeExtInstaller.State.Installed ? Good : Warn);
+            SetState(_traeState, (slots[0].exists ? "● 已配置" : "○ 未配置") + " · " + label, fg);
             SetState(_workbuddyState, slots[1].exists ? "● 已配置" : "○ 未配置", slots[1].exists);
-            _traeState.ToolTip = slots[0].path; _workbuddyState.ToolTip = slots[1].path;
+            _traeState.ToolTip = slots[0].path + "\n" + ext.Detail;
+            _workbuddyState.ToolTip = slots[1].path;
         }
         private static void SetState(TextBlock t, string text, bool ok) { t.Text = text; t.Foreground = ok ? Good : Muted; }
+        private static void SetState(TextBlock t, string text, Brush fg) { t.Text = text; t.Foreground = fg; }
+
+        /// <summary>把「Trae 令牌同步扩展」投放到 Trae 的扩展目录（契约见 trae-ext/README.md）。
+        /// ⚠ 往**别的应用**的目录里写东西必须由用户点一下 —— 不静默发生。</summary>
+        private void InstallTraeExt()
+        {
+            var st = TraeExtInstaller.Inspect();
+            if (st.State == TraeExtInstaller.State.NoSource)
+            { _notice.Text = "桌宠缺少扩展文件：" + st.Detail; _notice.Foreground = Bad; return; }
+            if (!st.HasTrae)
+            { _notice.Text = "没找到 Trae 的扩展目录 —— 先启动一次 Trae 并登录，再点这里。"; _notice.Foreground = Bad; return; }
+            if (st.State == TraeExtInstaller.State.Installed)
+            { _notice.Text = "扩展已是最新（" + TraeExtInstaller.FolderName + "），无需重装。"; _notice.Foreground = Good; RefreshBuiltins(); return; }
+
+            string ask = (st.State == TraeExtInstaller.State.Outdated
+                    ? "Trae 里已有一份同步扩展，将替换为 " + TraeExtInstaller.Version + " 版。\n\n"
+                    : "将把「Trae 令牌同步扩展」装进：\n" + Path.Combine(st.ExtDir, TraeExtInstaller.FolderName) + "\n\n")
+                + "它做且只做一件事：每次 Trae 启动时把当前令牌写进阿助的凭据文件，"
+                + "让积分在 14 天到期后自动续上，不必再手工粘贴。\n"
+                + "不抓包、不联网、不读进程内存；只改 authorization 一行，改前留 .bak-autosync。\n\n"
+                + "若凭据文件本来不存在，会先准备一份骨架（那一行仍由扩展来填）。\n\n"
+                + TraeExtInstaller.RestartHint + "\n\n确定继续吗？";
+            if (MessageBox.Show(this, ask, "安装 Trae 同步扩展", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+
+            string credPath, credNote;
+            TraeExtInstaller.EnsureCredentialSkeleton(out credPath, out credNote);
+
+            string detail;
+            string err = TraeExtInstaller.Install(out detail);
+            if (err != null) { _notice.Text = err; _notice.Foreground = Bad; }
+            else { _notice.Text = "已安装 Trae 同步扩展。" + credNote + "。" + TraeExtInstaller.RestartHint; _notice.Foreground = Good; }
+            RefreshBuiltins();
+        }
 
         private void RefreshList(Dictionary<string, BalanceCell> tested = null)
         {

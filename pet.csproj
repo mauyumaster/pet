@@ -50,6 +50,15 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
   </ItemGroup>
 
+  <!-- 随包分发的 Trae 扩展（见 trae-ext/README.md）。
+       ⚠ 目录名 `trae-ext` 与 TraeExtInstaller.SourceDirName、pack-release.cmd、installer/azhupet.iss
+         **四处同名** —— 改名要一起改，否则桌面版报「桌宠缺少扩展文件」而每一步构建都是绿的。
+       ⚠ README.md 是仓库里的说明，不进产物：产物里只有真正要投放的两个文件，
+         免得日后有人以为「少拷了」。 -->
+  <ItemGroup>
+    <Content Include="trae-ext\**\*" Exclude="trae-ext\README.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!-- 构建闸：输出目录里绝不允许出现凭据文件。
        凭据只该放 %LOCALAPPDATA%\AzhuPet\（不进 Obsidian 库 ⇒ 不进坚果云）。
        为什么要在构建期拦：bin/ 也在库内，一旦有人把凭据丢进 bin/ 让它「好用」，

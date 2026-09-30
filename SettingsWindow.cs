@@ -962,7 +962,8 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
                 + "    pet.exe --ocrtest        本机读字\n"
                 + "    pet.exe --personatest    人格前缀\n"
                 + "    pet.exe --fstest         全屏隐退判定\n"
-                + "    pet.exe --webtest        内嵌浏览器依赖链（WebView2 装了没）\n\n"
+                + "    pet.exe --webtest        内嵌浏览器依赖链（WebView2 装了没）\n"
+                + "    pet.exe --traeexttest   随包分发的 Trae 同步扩展（清单／骨架／落点；有 node 时真跑扩展本体）\n\n"
                 + "全部通过会打印 N/N。这些都不联网、不花钱（--llmtest／--statustest 例外）。",
                 SettingsTheme.Pal.Faint));
             FinishCard(c3);
