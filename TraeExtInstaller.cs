@@ -23,10 +23,20 @@ namespace AzhuPet
     {
         /// <summary>扩展标识（= package.json 里的 publisher.name）。</summary>
         public const string PubId = "azhupet.trae-token-sync";
-        /// <summary>扩展版本。改扩展代码时要**一起改这里** —— 目录名带版本，这是 VSCode 的约定。</summary>
-        public const string Version = "0.1.0";
-        /// <summary>扩展在 Trae 扩展目录里的文件夹名（VSCode 约定：&lt;publisher&gt;.&lt;name&gt;-&lt;version&gt;）。</summary>
-        public const string FolderName = PubId + "-" + Version;
+        /// <summary>扩展版本。改扩展代码时要**一起改这里**（和 `trae-ext/package.json` 的 version）。</summary>
+        public const string Version = "0.1.2";
+        /// <summary>扩展在 Trae 扩展目录里的文件夹名 —— **固定，不带版本号**。
+        /// ⚠⚠ 这里**故意违反** VSCode 的 `&lt;publisher&gt;.&lt;name&gt;-&lt;version&gt;` 惯例，因为带版本号的名字
+        ///   会制造「同一个 id 同时存在两个目录」的瞬间，而**那一瞬间正是 Trae 不激活的原因**：
+        ///   Trae 的扩展目录 watcher 把短时间内的变更合并成一批，**同一批里同一个 id 出现多次变更
+        ///   （新建新目录 + 扫到/删掉旧目录）时，它只把扩展加进 profile、不执行 `activate`**
+        ///   —— 2026-09-30 实测：一批里 3 次变更（建 `-0.1.1` / 扫 `-0.1.0-b` / 删 `-0.1.0`）
+        ///   ⇒ 日志只有 `Added extensions to default profile from external source`，
+        ///   整个会话搜不到 `_doActivateExtension`；而**只新建一个目录**时 30 ms 内就激活。
+        ///   固定名字 ⇒ 升级变成**就地覆盖**，永远只有一个目录、批次里只有文件变更 ⇒ 不再有这个问题。
+        ///   代价：升级不在运行中的会话里生效（VSCode 对同 id 换版本本就要重启），
+        ///   下次启动 Trae 时加载新代码 —— 已写进 `RestartHint`。</summary>
+        public const string FolderName = PubId;
 
         /// <summary>随包分发的扩展源码目录名（**与 pet.csproj / pack-release.cmd / azhupet.iss 三处同名**）。
         /// ⚠ 改名要四处一起改：那三处按名字打包含，本文件按名字找源。</summary>
@@ -40,11 +50,13 @@ namespace AzhuPet
         public const string EntitlementUrl = "https://api.trae.cn/trae/api/v2/pay/user_current_entitlement_list";
 
         /// <summary>投放到 Trae 之后，用户还要做的一件事。
-        /// ⚠ 两种情形不一样，**实测过**：**全新安装**时 Trae 运行中会立刻加载并执行；
-        ///   **同一个 id 换版本**时它只更新登记、不会重新 activate —— 2026-09-30 把 0.0.1 换成 0.1.0，
-        ///   sharedprocess.log 记了 "Added extensions to default profile"，而扩展一行日志都没打。
-        ///   ⇒ 更新后必须重启一次 Trae。用一句「会自动加载」概括两种情形是错的。</summary>
-        public const string RestartHint = "首次安装时 Trae 运行中就会加载；若是从旧版本更新，需重启一次 Trae 才会换装。";
+        /// ⚠ 两种情形不一样，**都实测过**：**全新安装**（该批次里只有这一个变更）时，Trae 运行中
+        ///   几十毫秒内就加载并执行；**同 id 的就地升级**不会在运行中的会话里生效，下次启动才换装。
+        ///   ⚠ 第二条**不是**"因为同一个 id" —— 而是 VSCode 本就不对同 id 的版本变更重新 `activate`。
+        ///   真正的病（同一批次里同 id 出现两个变更 ⇒ 只登记、永不激活、重启也救不回来）已经用
+        ///   **固定目录名 + 投放里不删东西**治掉了，见 `FolderName` 的注释。
+        ///   ⇒ 用一句「会自动加载」概括两种情形是错的。</summary>
+        public const string RestartHint = "首次安装时若 Trae 正在运行，扩展会当场加载；之后升级是就地覆盖，下次启动 Trae 时生效。";
 
         // ============================ 状态 ============================
 
@@ -183,7 +195,18 @@ namespace AzhuPet
 
         // ============================ 投放 ============================
 
-        /// <summary>把扩展投放到 Trae（旧版本目录一并清掉，避免两个同名命令注册冲突）。
+        /// <summary>投放步骤的**顺序**。抽成纯函数只为让判据能钉住两条不变式：
+        /// ① 先拷、后校验、最后等绑定；② **整个投放过程没有任何删除动作**。
+        /// ⚠⚠ ②才是关键：2026-09-30 让扩展在 Trae 里卡了一整轮的两个病因，都是「删除」引起的 ——
+        ///   - 先删旧目录、紧接着拷新目录（相隔几毫秒）⇒ id 被绑到已删除的旧路径上，永不 activate；
+        ///   - 拷完再删 ⇒ 建/删落进同一批 ⇒ Trae 只登记、不激活。
+        ///   ⇒ 结论不是「把顺序排对」，而是**别在投放里删东西**：目录名固定（见 `FolderName`），
+        ///     升级就地覆盖，于是根本没有需要删的旧目录。判据里那条 `!Contains("remove-old")`
+        ///     就是替这条结论站岗的 —— 谁再把删除加回来，判据当场变红。</summary>
+        public static string[] DeployPlan()
+            => new[] { "copy-new", "verify", "wait-bind" };
+
+        /// <summary>把扩展投放到 Trae。
         /// 返回 null = 成功；否则是给用户看的失败原因。</summary>
         public static string Install(out string detail)
         {
@@ -195,32 +218,67 @@ namespace AzhuPet
 
             try
             {
-                // ① 清掉历史版本目录（含不同版本号的那些）—— 两个副本 = 同名命令注册冲突
-                foreach (var old in Directory.GetDirectories(st.ExtDir, PubId + "-*"))
-                {
-                    try { Directory.Delete(old, true); } catch { /* 被 Trae 占用就留着，不影响新的那个 */ }
-                }
-
-                // ② 投放
                 string dst = Path.Combine(st.ExtDir, FolderName);
+                bool fresh = !Directory.Exists(dst);   // 目录是这次新建的吗？只有新建才谈得上「当场加载」
+
+                // ① 拷 / 就地覆盖 —— ⚠ 这一步**不做任何删除**（理由见 DeployPlan）
                 Directory.CreateDirectory(dst);
                 File.Copy(Path.Combine(SourceDir(), JsFile), Path.Combine(dst, JsFile), true);
                 File.Copy(Path.Combine(SourceDir(), ManifestFile), Path.Combine(dst, ManifestFile), true);
 
-                // ③ 生成即验（本项目纪律：产出物必须当场读回来证明它是对的）
+                // ② 生成即验（本项目纪律：产出物必须当场读回来证明它是对的）
                 if (!SameFile(Path.Combine(SourceDir(), JsFile), Path.Combine(dst, JsFile))
                     || !SameFile(Path.Combine(SourceDir(), ManifestFile), Path.Combine(dst, ManifestFile)))
                 {
-                    try { Directory.Delete(dst, true); } catch { }
-                    return "投放后校验失败（拷贝出来的文件与源不一致），已回滚。";
+                    // ⚠ 只在**这次新建**的目录上回滚。已存在的目录里可能躺着一份能用的旧副本，
+                    //   把它删掉会让用户从「旧版可用」掉到「完全没有」—— 宁可留着并如实报错。
+                    if (fresh) { try { Directory.Delete(dst, true); } catch { } }
+                    return "投放后校验失败（拷贝出来的文件与源不一致）" + (fresh ? "，已回滚。" : "；未动原有副本。");
                 }
-                detail = "已投放到 " + dst;
+
+                // ③ 只有新建目录才等绑定 —— 覆盖升级时目录名早在注册表里，Trae 本就不会重新 activate
+                bool bound = fresh && WaitBound(st.ExtDir, FolderName, 6000);
+
+                detail = "已投放到 " + dst
+                       + (fresh
+                          ? (bound ? "（Trae 已当场加载）" : "（Trae 未响应，下次启动 Trae 时生效）")
+                          : "（就地覆盖；下次启动 Trae 时生效）");
                 return null;
             }
             catch (Exception ex)
             {
                 return "投放失败：" + ex.Message;
             }
+        }
+
+        /// <summary>等 Trae 把 `extensions.json` 里的 relativeLocation 指到目标目录。
+        /// ⚠ 只在 Trae 正在运行时才有意义；**超时不算失败**（首次安装时 Trae 常常没在跑，
+        ///   那种情况下扩展会在下次启动 Trae 时被加载）。
+        /// ⚠ 用字符串匹配而不是 JSON 解析：这里的值就是目录名、形状稳定；为一个「只想看一眼」
+        ///   的动作引入解析依赖不划算。Trae 正在写这个文件时会抛 IO 异常，重试即可。</summary>
+        private static bool WaitBound(string extDir, string folder, int timeoutMs)
+        {
+            string file = Path.Combine(extDir, "extensions.json");
+            string[] needles =
+            {
+                "\"relativeLocation\":\"" + folder + "\"",
+                "\"relativeLocation\": \"" + folder + "\"",
+            };
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                try
+                {
+                    if (File.Exists(file))
+                    {
+                        string t = File.ReadAllText(file, Encoding.UTF8);
+                        foreach (var n in needles) if (t.Contains(n)) return true;
+                    }
+                }
+                catch { }
+                System.Threading.Thread.Sleep(200);
+            }
+            return false;
         }
 
         /// <summary>按需写出凭据**骨架**（只在文件不存在时创建）。

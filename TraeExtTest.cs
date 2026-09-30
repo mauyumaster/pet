@@ -108,6 +108,44 @@ namespace AzhuPet
                        "得到 " + got, ref pass, ref fail);
                 Report(TraeExtInstaller.PickExtensionsDir(cands, p => false) == null,
                        "PickExtensionsDir 都不存在时返回 null", "", ref pass, ref fail);
+
+                // 投放计划：① 三步顺序 ② **不许有删除动作**。
+                // 2026-09-30 让扩展在 Trae 里卡了一整轮的病因全都是「删除」：
+                // 先删后拷 ⇒ id 绑到已删路径；拷完就删 ⇒ 建/删落进同一批 ⇒ 只登记不激活。
+                // 所以正解不是「把顺序排对」，而是「投放里根本不删」—— 目录名固定、升级就地覆盖。
+                var plan = TraeExtInstaller.DeployPlan();
+                string planStr = string.Join(" → ", plan);
+                int iCopy = Array.IndexOf(plan, "copy-new");
+                int iVerify = Array.IndexOf(plan, "verify");
+                int iBind = Array.IndexOf(plan, "wait-bind");
+                Report(iCopy >= 0 && iVerify >= 0 && iBind >= 0,
+                       "投放计划三步齐全", planStr, ref pass, ref fail);
+                Report(iCopy < iVerify && iVerify < iBind,
+                       "投放计划严格递增：拷新 → 校验 → 等绑定", planStr, ref pass, ref fail);
+                // ⚠⚠ 负对照实测过（2026-09-30，把 `remove-old` 塞回计划跑一遍）：
+                //   ① 闭合名单那条**会红** ✅（有资格）；
+                //   ② 原先还写着 `!planStr.Contains("rmtree") && !planStr.Contains("Delete")` —— 它**照样绿**
+                //      （黑名单里的词与实际步骤名根本不重叠）⇒ 是**装饰品**，已换掉。
+                //   换成「动词子串」黑名单：闭合名单拦不住将来新加的名字（`prune-legacy` / `purge-old`），
+                //   子串能。**两条 DNA 分开写**：一条点已知名字（失败信息可读），一条拦未知名字（面向未来）。
+                string[] destructive = { "remove-old", "remove-legacy", "delete-obsolete", "cleanup" };
+                bool clean = true;
+                foreach (var d in destructive) if (Array.IndexOf(plan, d) >= 0) clean = false;
+                Report(clean, "投放计划里没有任何删除动作（固定目录名就地覆盖）", planStr, ref pass, ref fail);
+                string[] verbs = { "remove", "delete", "prune", "purge", "clean", "unlink", "trash", "wipe", "drop", "erase" };
+                string verbHit = null;
+                foreach (var s in plan)
+                    foreach (var v in verbs)
+                        if (s.IndexOf(v, StringComparison.OrdinalIgnoreCase) >= 0) verbHit = s + " ~ " + v;
+                Report(verbHit == null, "投放计划里没有任何「删除类动词」步骤名",
+                       verbHit == null ? planStr : verbHit, ref pass, ref fail);
+                // 目录名固定、不带版本号：这是「永远只有一个目录」的前提
+                Report(!TraeExtInstaller.FolderName.Contains(TraeExtInstaller.Version),
+                       "扩展目录名不带版本号（避免同 id 双目录）",
+                       "FolderName=" + TraeExtInstaller.FolderName, ref pass, ref fail);
+                Report(TraeExtInstaller.FolderName == TraeExtInstaller.PubId,
+                       "扩展目录名 == PubId（固定落点）",
+                       "FolderName=" + TraeExtInstaller.FolderName, ref pass, ref fail);
             }
 
             // 本机落点（只报，不判红 —— 换台机器可能真没装 Trae）
