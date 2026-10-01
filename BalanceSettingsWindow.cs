@@ -231,13 +231,14 @@ namespace AzhuPet
             { _notice.Text = "桌宠缺少扩展文件：" + st.Detail; _notice.Foreground = Bad; return; }
             if (!st.HasTrae)
             { _notice.Text = "没找到 Trae 的扩展目录 —— 先启动一次 Trae 并登录，再点这里。"; _notice.Foreground = Bad; return; }
-            if (st.State == TraeExtInstaller.State.Installed)
-            { _notice.Text = "扩展已是最新（" + TraeExtInstaller.FolderName + "），无需重装。"; _notice.Foreground = Good; RefreshBuiltins(); return; }
-
+            // ⚠ 这里**故意没有**「已经是最新就不装」的短路 —— 每次投放都是一份**新目录名**的副本，
+            //   而"投放一个新目录"正是让 Trae 当场加载它的唯一办法（Trae SOLO CN 启动时不扫用户扩展目录）。
+            //   那个短路曾把"重启后已失效"的扩展显示成"已启用"，用户点了没反应还以为一切正常。
             string ask = (st.State == TraeExtInstaller.State.Outdated
-                    ? "Trae 里已有一份同步扩展，将替换为 " + TraeExtInstaller.Version + " 版。\n\n"
-                    : "将把「Trae 令牌同步扩展」装进：\n" + Path.Combine(st.ExtDir, TraeExtInstaller.FolderName) + "\n\n")
-                + "它做且只做一件事：每次 Trae 启动时把当前令牌写进阿助的凭据文件，"
+                    ? "Trae 里已有 " + TraeExtInstaller.OurFolders(st.ExtDir).Count + " 份同步扩展副本，"
+                      + "这次会再投放一份新的（" + TraeExtInstaller.Version + " 版）。\n\n"
+                    : "将把「Trae 令牌同步扩展」装进：\n" + st.ExtDir + "\n\n")
+                + "它做且只做一件事：**Trae 运行中**被加载时，把当前令牌写进阿助的凭据文件，"
                 + "让积分在 14 天到期后自动续上，不必再手工粘贴。\n"
                 + "不抓包、不联网、不读进程内存；只改 authorization 一行，改前留 .bak-autosync。\n\n"
                 + "若凭据文件本来不存在，会先准备一份骨架（那一行仍由扩展来填）。\n\n"
@@ -250,7 +251,7 @@ namespace AzhuPet
             string detail;
             string err = TraeExtInstaller.Install(out detail);
             if (err != null) { _notice.Text = err; _notice.Foreground = Bad; }
-            else { _notice.Text = "已安装 Trae 同步扩展。" + credNote + "。" + TraeExtInstaller.RestartHint; _notice.Foreground = Good; }
+            else { _notice.Text = credNote + " " + detail; _notice.Foreground = Good; }
             RefreshBuiltins();
         }
 

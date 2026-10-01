@@ -109,43 +109,47 @@ namespace AzhuPet
                 Report(TraeExtInstaller.PickExtensionsDir(cands, p => false) == null,
                        "PickExtensionsDir 都不存在时返回 null", "", ref pass, ref fail);
 
-                // 投放计划：① 三步顺序 ② **不许有删除动作**。
-                // 2026-09-30 让扩展在 Trae 里卡了一整轮的病因全都是「删除」：
-                // 先删后拷 ⇒ id 绑到已删路径；拷完就删 ⇒ 建/删落进同一批 ⇒ 只登记不激活。
-                // 所以正解不是「把顺序排对」，而是「投放里根本不删」—— 目录名固定、升级就地覆盖。
+                // 投放计划：① 四步顺序 ② **不许有删除动作** ③ 目录名必须每次不同。
+                // 2026-10-01 六次现场实验定案（**推翻**了 2026-09-30 那套"同一批次两个变更互相抵消"的解释）：
+                //   Trae SOLO CN 是 solo-lite 构建，**启动时不扫用户扩展目录**（代码里直接 `return []`）；
+                //   唯一入口是 watcher 对「**新增**一个它没见过的目录」的反应；而且
+                //   **同一个 id 在一个 Trae 会话里只会激活一次**（再出现只登记、不激活）。
+                //   ⇒ 让它在某次会话里跑起来的唯一动作，就是投放一个**新的目录名**。
+                //   2026-09-30 定的"固定目录名 + 就地覆盖"恰好把这条唯一通道掐死了。
                 var plan = TraeExtInstaller.DeployPlan();
                 string planStr = string.Join(" → ", plan);
+                int iName = Array.IndexOf(plan, "pick-new-name");
                 int iCopy = Array.IndexOf(plan, "copy-new");
                 int iVerify = Array.IndexOf(plan, "verify");
-                int iBind = Array.IndexOf(plan, "wait-bind");
-                Report(iCopy >= 0 && iVerify >= 0 && iBind >= 0,
-                       "投放计划三步齐全", planStr, ref pass, ref fail);
-                Report(iCopy < iVerify && iVerify < iBind,
-                       "投放计划严格递增：拷新 → 校验 → 等绑定", planStr, ref pass, ref fail);
-                // ⚠⚠ 负对照实测过（2026-09-30，把 `remove-old` 塞回计划跑一遍）：
-                //   ① 闭合名单那条**会红** ✅（有资格）；
-                //   ② 原先还写着 `!planStr.Contains("rmtree") && !planStr.Contains("Delete")` —— 它**照样绿**
-                //      （黑名单里的词与实际步骤名根本不重叠）⇒ 是**装饰品**，已换掉。
-                //   换成「动词子串」黑名单：闭合名单拦不住将来新加的名字（`prune-legacy` / `purge-old`），
-                //   子串能。**两条 DNA 分开写**：一条点已知名字（失败信息可读），一条拦未知名字（面向未来）。
-                string[] destructive = { "remove-old", "remove-legacy", "delete-obsolete", "cleanup" };
-                bool clean = true;
-                foreach (var d in destructive) if (Array.IndexOf(plan, d) >= 0) clean = false;
-                Report(clean, "投放计划里没有任何删除动作（固定目录名就地覆盖）", planStr, ref pass, ref fail);
-                string[] verbs = { "remove", "delete", "prune", "purge", "clean", "unlink", "trash", "wipe", "drop", "erase" };
+                int iWait = Array.IndexOf(plan, "wait-activated");
+                Report(iName >= 0 && iCopy >= 0 && iVerify >= 0 && iWait >= 0,
+                       "投放计划四步齐全", planStr, ref pass, ref fail);
+                Report(iName < iCopy && iCopy < iVerify && iVerify < iWait,
+                       "投放计划严格递增：取名 → 拷新 → 校验 → 等它真跑起来", planStr, ref pass, ref fail);
+                // ⚠⚠ 负对照实测过（2026-09-30 把 `remove-old` 塞回计划跑一遍）：下面这条**会红** ✅。
+                //   用「动词子串」而不是闭合名单：闭合名单拦不住将来新加的名字（`prune-legacy` / `purge-old`）。
+                //   删除换不回激活（2026-10-01 实测：删掉旧副本再投新目录，新目录照样只登记不激活），
+                //   却会往 Trae 的 `.obsolete` 里写字 ⇒ 这条判据替"别删"这个结论站岗。
+                string[] verbs = { "remove", "delete", "prune", "purge", "clean", "unlink", "trash", "wipe", "drop", "erase", "rmdir" };
                 string verbHit = null;
                 foreach (var s in plan)
                     foreach (var v in verbs)
                         if (s.IndexOf(v, StringComparison.OrdinalIgnoreCase) >= 0) verbHit = s + " ~ " + v;
-                Report(verbHit == null, "投放计划里没有任何「删除类动词」步骤名",
+                Report(verbHit == null, "投放计划里没有任何「删除类动词」步骤名（删旧换不回激活）",
                        verbHit == null ? planStr : verbHit, ref pass, ref fail);
-                // 目录名固定、不带版本号：这是「永远只有一个目录」的前提
-                Report(!TraeExtInstaller.FolderName.Contains(TraeExtInstaller.Version),
-                       "扩展目录名不带版本号（避免同 id 双目录）",
-                       "FolderName=" + TraeExtInstaller.FolderName, ref pass, ref fail);
-                Report(TraeExtInstaller.FolderName == TraeExtInstaller.PubId,
-                       "扩展目录名 == PubId（固定落点）",
-                       "FolderName=" + TraeExtInstaller.FolderName, ref pass, ref fail);
+
+                // 目录名：必须**随投放时刻变化** —— 这是「watcher 会看见一个新目录」的唯一保证。
+                var t0 = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
+                string n1 = TraeExtInstaller.FolderNameAt(t0);
+                string n2 = TraeExtInstaller.FolderNameAt(t0.AddSeconds(1));
+                Report(n1 != n2, "目录名随投放时刻变化（相隔 1 秒即不同）", n1 + "  /  " + n2, ref pass, ref fail);
+                Report(n1.StartsWith(TraeExtInstaller.PubId + "-" + TraeExtInstaller.Version + "-"),
+                       "目录名 = <PubId>-<版本>-<时间戳>", n1, ref pass, ref fail);
+                // ⚠ 一正一负两条：得**认出自家**，也得**拒绝开发期遗留的 `-diag` 变体** ——
+                //   否则 Inspect 会把它算成自家副本，状态永远显示成「已装旧版本」而好不了。
+                Report(TraeExtInstaller.IsOurFolderName(n1), "自家目录名被判为自家", n1, ref pass, ref fail);
+                Report(!TraeExtInstaller.IsOurFolderName(TraeExtInstaller.PubId + "-diag-0.1.0"),
+                       "开发期的 -diag 变体不被当成自家", TraeExtInstaller.PubId + "-diag-0.1.0", ref pass, ref fail);
             }
 
             // 本机落点（只报，不判红 —— 换台机器可能真没装 Trae）

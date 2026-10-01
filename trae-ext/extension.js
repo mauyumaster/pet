@@ -11,9 +11,14 @@
 // **令牌本身从不落日志**（只记长度与 iat/exp）。
 //
 // ⚠ 这个文件是**随桌宠分发**的（桌宠「余额配置 → 安装同步扩展」把它拷进
-//   ~/.trae-cn/extensions/）。开发期的真身同时躺在
-//   pet/trae-ext/（仓库）与 ~/.trae-cn/extensions/azhupet.trae-token-sync-0.1.0/（生效副本）。
-//   改这里之后要重新「安装同步扩展」才会生效 —— 磁盘上那份不会被自动覆盖。
+//   ~/.trae-cn/extensions/）。真身在 pet/trae-ext/（仓库）。
+//
+// ⚠⚠ 投放口径（2026-10-01 六次现场实验定案）：Trae SOLO CN 是 `solo-lite` 构建，
+//   **启动时根本不扫用户扩展目录**，唯一入口是它的目录 watcher 对「**新增目录**」的反应；
+//   而且**同一个 id 在一个 Trae 会话里只会激活一次**。⇒ 桌宠每次投放都用一个新的目录名
+//   （azhupet.trae-token-sync-<版本>-<UTC 时间戳>），所以扩展目录里会积累多份副本 —— 那是
+//   **设计使然**，不是垃圾（删掉换不回激活，只会往 Trae 的 .obsolete 里写字）。
+//   ⇒ 推论：**Trae 重启后本扩展不会自己回来**，要再点一次「安装同步扩展」。
 
 const fs = require('fs');
 const os = require('os');

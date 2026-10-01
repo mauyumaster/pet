@@ -4,7 +4,7 @@
   "description": "把 Trae 当前会话的令牌同步进阿助桌宠的凭据文件，免去手工粘贴。",
   "publisher": "azhupet",
   "license": "MIT",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "engines": {
     "vscode": "^1.107.0"
   },
