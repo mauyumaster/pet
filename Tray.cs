@@ -170,7 +170,7 @@ namespace AzhuPet
             BalanceSettingsWindow panel = null;
             try
             {
-                panel = new BalanceSettingsWindow(_w.ReloadBalanceSources);
+                panel = new BalanceSettingsWindow(_w.ReloadBalanceSources, _w.Cfg);
                 panel.Closed += (s, e) => hold.Dispose();
                 panel.Show();
                 panel.Activate();

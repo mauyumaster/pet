@@ -1285,7 +1285,8 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
 
         private void OpenBalance()
         {
-            var panel = new BalanceSettingsWindow(_w.ReloadBalanceSources);
+            // 传桌宠**正在用的** `Cfg`：自动补投开关要写进同一个实例才对下一拍生效。
+            var panel = new BalanceSettingsWindow(_w.ReloadBalanceSources, _w.Cfg);
             panel.Show();
         }
 

@@ -60,6 +60,12 @@ namespace AzhuPet
         public string BalanceHeader = "";           // 可选自定义 header（如 "cookie: xxx"，含冒号整段）
         public string BalanceKey = "total_balance"; // JSON 数值字段名，取余额
         public string BalanceUnit = "";             // 显示单位（自定义接口用；空则 DeepSeek 走 ¥/token）
+        // ⚠⚠ Trae 重启后**自动补投**同步扩展（2026-10-01 用户拍板，见 TraeExtAuto.cs）。默认开。
+        //   为什么需要它：Trae SOLO CN 启动时不扫用户扩展目录 ⇒ 每次重启后"令牌自动续期"都是哑的，
+        //   而令牌 14 天到期 ⇒ 靠人记得点按钮就等于没有。
+        //   ⚠ 它**只**在「用户装过一次（目录里已有副本）」时才动 Trae 的目录 —— 没装过就永远不写。
+        //   ⚠ 关掉它就等于回到"手点按钮"（按钮仍然在余额配置里）。
+        public bool TraeExtAuto = true;
         public double X = double.NaN, Y = double.NaN;   // 记住位置（物理像素）
 
         // 三档尺寸。宽高比固定 0.8：再窄就会因为「横向留白不足」把角色缩得比预期小。
@@ -98,6 +104,7 @@ namespace AzhuPet
                 if (c.SizeIndex < 0 || c.SizeIndex > 2) c.SizeIndex = 1;
                 c.Topmost = Bool(s, "topmost", c.Topmost);
                 c.NightDim = Bool(s, "nightDim", c.NightDim);
+                c.TraeExtAuto = Bool(s, "traeExtAuto", c.TraeExtAuto);
                 c.ShowTray = Bool(s, "showTray", c.ShowTray);
                 c.SpeechOn = Bool(s, "speechOn", c.SpeechOn);
                 c.SpeechLlm = Bool(s, "speechLlm", c.SpeechLlm);
@@ -169,6 +176,7 @@ namespace AzhuPet
                 sb.Append("  \"size\": ").Append(SizeIndex).Append(",\r\n");
                 sb.Append("  \"topmost\": ").Append(Topmost ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"nightDim\": ").Append(NightDim ? "true" : "false").Append(",\r\n");
+                sb.Append("  \"traeExtAuto\": ").Append(TraeExtAuto ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"showTray\": ").Append(ShowTray ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"speechOn\": ").Append(SpeechOn ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"speechLlm\": ").Append(SpeechLlm ? "true" : "false").Append(",\r\n");
@@ -437,6 +445,7 @@ namespace AzhuPet
         public bool CaliberTest;                // --calibertest：离线验积分口径（合成响应，不联网/不读凭据）
         public bool TraeExtTest;                // --traeexttest：离线验「随包分发的 Trae 同步扩展」（源文件/清单/骨架/落点，有 node 时真跑扩展本体）
         public bool TraeExtInstall;             // --traeextinstall：真把扩展投放到 Trae（与卡片按钮同一条代码路径；会写 Trae 的目录，故须显式敲）
+        public bool TraeExtAutoDiag;            // --traeextauto：**只读**打印「Trae 重启后自动补投」的三份现场读数与判定（排障用，不写盘）
         public bool BubbleTest;                 // --bubbletest：像素验「气泡浮在宠物之外、不遮模型」
         public bool BalanceSettings;            // --balance-settings：独立打开余额配置中心（无需先找到托盘菜单）
         public bool Settings;                   // --settings：独立打开设置主面板（便于 UI 验收与截图）
@@ -656,6 +665,7 @@ namespace AzhuPet
                     case "--calibertest": c.CaliberTest = true; break;
                     case "--traeexttest": c.TraeExtTest = true; break;
                     case "--traeextinstall": c.TraeExtInstall = true; break;
+                    case "--traeextauto": c.TraeExtAutoDiag = true; break;
                     case "--bubbletest": c.BubbleTest = true; break;
                     case "--balance-settings": c.BalanceSettings = true; break;
                     case "--settings": c.Settings = true; break;

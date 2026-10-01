@@ -26,11 +26,17 @@ namespace AzhuPet
         private readonly ListBox _list;
         private readonly TextBlock _traeState, _workbuddyState, _notice;
         private readonly Button _saveButton, _testButton;
+        private CheckBox _cAuto;
         private bool _dirty, _loadOk;
+        /// <summary>桌宠**正在用的那份**配置（不是重新 Load 的一份）。开关必须写进同一个实例，
+        /// 否则「关掉了但下一拍又自动补投」——同一份事实两个落点。null ＝ 这个窗口没有配置可写
+        /// （那条路径下勾选框会置灰，而不是假装能改）。</summary>
+        private readonly PetConfig _cfg;
 
-        public BalanceSettingsWindow(Action reload)
+        public BalanceSettingsWindow(Action reload, PetConfig cfg = null)
         {
             _reload = reload;
+            _cfg = cfg;
             List<BalanceSource> loaded;
             string loadError;
             _loadOk = BalanceSources.TryLoad(out loaded, out loadError);
@@ -77,6 +83,25 @@ namespace AzhuPet
             builtins.Children.Add(BuiltinCard("WorkBuddy 积分", "读取界面同口径的 type=1 可用额度", _workbuddyState,
                 () => OpenCredential("WorkBuddy", StatusProbe.WorkBuddySecretFile, "cookie", "x-user-id"),
                 () => OpenBrowserLogin()));
+
+            // ---- 「Trae 重启后自动补投」（2026-10-01 用户拍板；契约见 TraeExtAuto.cs）----
+            // 为什么这条开关放在余额配置而不是主设置窗口：整个 Trae 令牌的故事（凭据 + 装扩展）都在这张页上。
+            _cAuto = new CheckBox
+            {
+                Content = "Trae 重启后自动补投同步扩展",
+                IsChecked = _cfg == null || _cfg.TraeExtAuto,
+                IsEnabled = _cfg != null,
+                Foreground = Muted, FontSize = 12.5,
+                Cursor = Cursors.Hand, Margin = new Thickness(2, 4, 0, 0),
+                ToolTip = "Trae SOLO CN 启动时**不加载**用户扩展 ⇒ 每次重启后「自动续期」都会失效。\n"
+                        + "勾着：桌宠每两分钟自检一次，发现「Trae 在跑 且 本会话还没跑过」就补投一份新副本（当场生效）。\n"
+                        + "关掉：Trae 重启后要你自己点一次「安装同步扩展」。\n\n"
+                        + "⚠ 只在「已经装过一次」时才会动 Trae 的目录；从没装过就永远不写。\n"
+                        + "⚠ 每个 Trae 会话最多补投一次（同一个扩展一个会话只会被加载一次）。",
+            };
+            _cAuto.Checked += (s, e) => SetAuto(true);
+            _cAuto.Unchecked += (s, e) => SetAuto(false);
+            builtins.Children.Add(_cAuto);
             Grid.SetRow(builtins, 1); root.Children.Add(builtins);
 
             var customHead = new Grid { Margin = new Thickness(0, 16, 0, 8) };
@@ -127,6 +152,12 @@ namespace AzhuPet
                     e.Cancel = true;
             };
         }
+
+        /// <summary>给判据用（**只读**）：勾选框现在的状态。存在只为一件事 —— 断言它的**初值真的绑到了配置上**。
+        /// 「控件写了但没绑 / 绑反了」肉眼看不出来，而它恰好是"用户勾了没生效"那类故障的源头。</summary>
+        internal bool AutoDeployChecked { get { return _cAuto != null && _cAuto.IsChecked == true; } }
+        /// <summary>给判据用（**只读**）：勾选框是否可操作（没接配置时应当置灰，而不是假装能改）。</summary>
+        internal bool AutoDeployEnabled { get { return _cAuto != null && _cAuto.IsEnabled; } }
 
         private static Brush B(byte r, byte g, byte b) => new SolidColorBrush(Color.FromRgb(r, g, b));
         private FrameworkElement SectionTitle(string title, string sub)
@@ -209,18 +240,51 @@ namespace AzhuPet
             var slots = StatusProbe.SecretSlots();
             var ext = TraeExtInstaller.Inspect();
             string label = TraeExtInstaller.ShortLabel(ext);
-            // 三档色：① 凭据在 且 续期已装 = 绿（真的不用管了）
-            //          ② 凭据在 但 续期没装 = 琥珀（现在读数正常，14 天后会坏 —— 最该被看见的一格）
-            //          ③ 没凭据           = 灰
+            // ⚠⚠ 「磁盘上装得好好的」≠「现在真的在生效」（2026-10-01 实测补上的一档）：
+            //   Trae 启动时不加载用户扩展，所以**每次 Trae 重启后**磁盘上的副本都是哑的 ——
+            //   此时若还显示"自动续期已启用"（绿点），用户会一直不去看它，直到 14 天后 401 才发现。
+            //   判据是扩展自己那份日志的 mtime 有没有晚于 Trae 的启动时刻（登记 ≠ 激活）。
+            bool? live = TraeExtInstaller.SessionLive();
+            bool needRefill = ext.State == TraeExtInstaller.State.Installed && live == false;
+            if (needRefill)
+            {
+                bool auto = _cfg != null && _cfg.TraeExtAuto;
+                // ⚠ 两种情形必须分开说：勾了自动而这里还显示它 ⇒ 「拍子还没到 / Trae 刚起来」，
+                //   不勾 ⇒ 真要人去点。混成一句会让"我明明勾了自动怎么还没好"无从判断。
+                label = auto ? "Trae 重启过，等桌宠自动补投" : "Trae 重启过，需点「安装同步扩展」";
+            }
+            // 四档色：① 凭据在 且 续期已装且**本会话已生效** = 绿（真的不用管了）
+            //          ② 凭据在 但 续期没装 / Trae 重启后还没补投 = 琥珀（现在读数正常，将来会坏 —— 最该被看见的那格）
+            //          ③ 没凭据 = 灰
             Brush fg = !slots[0].exists ? Muted
-                : (ext.State == TraeExtInstaller.State.Installed ? Good : Warn);
+                : (ext.State == TraeExtInstaller.State.Installed && !needRefill ? Good : Warn);
             SetState(_traeState, (slots[0].exists ? "● 已配置" : "○ 未配置") + " · " + label, fg);
             SetState(_workbuddyState, slots[1].exists ? "● 已配置" : "○ 未配置", slots[1].exists);
-            _traeState.ToolTip = slots[0].path + "\n" + ext.Detail;
+            _traeState.ToolTip = slots[0].path + "\n" + ext.Detail
+                + (ext.State == TraeExtInstaller.State.Installed
+                   ? "\n本会话：" + (live == true ? "已生效" : live == false ? "还没跑过" : "判不了（Trae 可能没在运行）")
+                     + "\n自动补投：" + (_cfg == null ? "（本窗口没接配置）" : _cfg.TraeExtAuto ? "开" : "关")
+                   : "")
+                + "\n最近一次自检：" + (TraeExtAuto.LastNote ?? "（还没跑过）");
             _workbuddyState.ToolTip = slots[1].path;
         }
         private static void SetState(TextBlock t, string text, bool ok) { t.Text = text; t.Foreground = ok ? Good : Muted; }
         private static void SetState(TextBlock t, string text, Brush fg) { t.Text = text; t.Foreground = fg; }
+
+        /// <summary>切换「Trae 重启后自动补投」。**立刻落盘**，且写进桌宠**正在用的那份** `Cfg`
+        /// ⇒ 不必重启桌宠，下一拍自检就按新值走。
+        /// ⚠ 关掉时要把「会怎样」说清楚：它等于回到手点按钮，而不是"功能没了"（按钮一直在）。</summary>
+        private void SetAuto(bool on)
+        {
+            if (_cfg == null) { _notice.Text = "这个窗口没有接上桌宠配置，改不了这一项。"; _notice.Foreground = Warn; return; }
+            _cfg.TraeExtAuto = on;
+            _cfg.Save();
+            _notice.Text = on
+                ? "已开启：Trae 每次重启后，桌宠会自动补投一份新副本（不必你再点按钮）。"
+                : "已关闭：Trae 重启后需要你点一次「安装同步扩展」才会恢复自动续期。";
+            _notice.Foreground = Muted;
+            RefreshBuiltins();
+        }
 
         /// <summary>把「Trae 令牌同步扩展」投放到 Trae 的扩展目录（契约见 trae-ext/README.md）。
         /// ⚠ 往**别的应用**的目录里写东西必须由用户点一下 —— 不静默发生。</summary>

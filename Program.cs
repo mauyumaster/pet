@@ -113,6 +113,7 @@ namespace AzhuPet
             if (o.CaliberTest) return CaliberTest.Run(o);
             if (o.TraeExtTest) return TraeExtTest.Run(o);
             if (o.TraeExtInstall) return TraeExtInstaller.InstallRun();
+            if (o.TraeExtAutoDiag) return TraeExtAuto.DiagRun();
             if (o.BubbleTest) return BubbleTest.Run(o);
             if (o.BalanceConfigTest) return BalanceConfigTest.Run();
             if (o.WebTest) return WebTest.Run();
@@ -221,7 +222,10 @@ namespace AzhuPet
         {
             var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
             // 独立配置进程可能与正在置顶的桌宠同时存在；保持在它上面，避免操作按钮被挡住。
-            var w = new BalanceSettingsWindow(null) { Topmost = true };
+            // ⚠ 这条路径**没有**运行中的桌宠，所以「自动补投」开关写的是磁盘上的那份配置
+            //   （PetConfig.Load() → Save()）。正在跑的桌宠要等下次启动才读到新值 ——
+            //   从托盘/设置窗口打开的那条路（传的是它在用的 `Cfg`）才是当场生效的。
+            var w = new BalanceSettingsWindow(null, PetConfig.Load()) { Topmost = true };
             app.MainWindow = w;
             w.Show();
             return app.Run();

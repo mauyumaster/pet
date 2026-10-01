@@ -758,6 +758,31 @@ namespace AzhuPet
                         : "TraeChat.ChatAsync 里找不到对 HeadersFromSecretText 的调用（它那处手写解析又回来了？）",
                         ref pass, ref fail);
                 }
+
+                // ---- 余额配置窗口：构造冒烟 ＋「自动补投」勾选框的初值绑定（2026-10-01 加这一项时补）----
+                // ⚠⚠ 为什么值得单独测：这个窗口的构造期会走 `RefreshBuiltins()`，而它现在要
+                //   ① 读 Trae 的扩展目录 ② **枚举几百个进程**（判"本会话到底生效没有"）。
+                //   那里抛一次的症状是「用户点开余额配置就崩」，而**所有离线判据照样全绿** ——
+                //   因为它们都不建窗口。这就是本条存在的全部理由。
+                // ⚠ 只**构造**、不 Show：不创建可见窗口、不进消息循环。
+                // ⚠ 传自己造的 `PetConfig`：勾选框的回调会 `Save()`，绝不能落到用户真配置上
+                //   （`--balanceconfigtest` 已在 `AnyTest()` 里 ⇒ `RealWriteAllowed=false`，再加一道保险）。
+                try
+                {
+                    var wOff = new BalanceSettingsWindow(null, new PetConfig { TraeExtAuto = false });
+                    Check(!wOff.AutoDeployChecked,
+                          "自动补投勾选框：配置为关时未勾（防把初值写死成 true）", ref pass, ref fail);
+                    var wOn = new BalanceSettingsWindow(null, new PetConfig { TraeExtAuto = true });
+                    Check(wOn.AutoDeployChecked,
+                          "自动补投勾选框：配置为开时已勾（防把初值写死成 false）", ref pass, ref fail);
+                    var wNone = new BalanceSettingsWindow(null, null);
+                    Check(!wNone.AutoDeployEnabled,
+                          "没接配置时勾选框置灰（不假装能改）", ref pass, ref fail);
+                }
+                catch (Exception ex)
+                {
+                    Check(false, "余额配置窗口能构造出来（含自动补投勾选框）：" + ex.Message, ref pass, ref fail);
+                }
             }
             catch (Exception ex)
             {

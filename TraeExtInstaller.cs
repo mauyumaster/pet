@@ -225,6 +225,111 @@ namespace AzhuPet
             return list;
         }
 
+        // ==================== 「Trae 重启后要不要补投」的判定 ====================
+        //
+        // 为什么需要它：Trae SOLO CN 启动时**不扫**用户扩展目录（`solo-lite`，见 `FolderNameAt`），
+        // 所以每次 Trae 重启之后，装在 `~/.trae-cn/extensions/` 里的东西都是哑的 —— 而"令牌自动续期"
+        // 要长期成立，就得在**每一个** Trae 会话里重新投放一个新目录名。用户 2026-10-01 拍板：
+        // 这件事由桌宠自己盯（自检 + 自动补投），不必让人记着点按钮。
+        //
+        // ⚠ 判定必须抽成**纯函数**：它要读进程启动时刻、日志 mtime、目录 mtime 三份现场，
+        //   而"这三份现场组合出来的四种结论"只有喂合成值才验得动（真现场不可复现：
+        //   要造出"Trae 刚重启且扩展还没跑"那个瞬间，就得先重启 Trae）。
+        //   ——同 `DataDirCandidates` / `DeployPlan` 那条纪律：能抽出来的必须抽出来。
+
+        /// <summary>一次自检的结论。<see cref="Why"/> **无论投不投都要填** —— 它是唯一的现场记录，
+        /// 界面、日志、判据都读它（谁也别重算一遍"为什么"，那会变成同一份事实的第二个落点）。</summary>
+        public sealed class AutoDecision
+        {
+            public bool Should;
+            public string Why;
+        }
+
+        /// <summary>纯函数：现在该不该补投一份？（全部输入都是值 ⇒ 可离线喂合成现场证伪）
+        /// ⚠⚠ 三条"不投"的理由**不许合并成一句** —— 它们对应的现场完全不同，排障时读错一条就会查错地方：
+        ///   ① 从没装过   ⇒ 用户没同意过，桌宠**不擅自**往别的应用目录里写；
+        ///   ② Trae 没在跑 ⇒ 投了也不会被加载（watcher 只对**运行中**出现的新目录有反应），白留一份副本；
+        ///   ③ 本会话已经跑过 / 已经投过 ⇒ 再投也不会激活（一个 id 一个会话只激活一次），纯堆垃圾。
+        /// ⚠ 第 ③ 条分两半是有意的：**跑过**看扩展自己那份日志（真证据），**投过**看目录 mtime
+        ///   （防止"投了但因为别的原因没激活"时每两分钟又投一份，把目录堆满）。</summary>
+        /// <param name="copies">扩展目录里本扩展的副本数（0 = 用户从没装过）</param>
+        /// <param name="traeStart">本次 Trae 的启动时刻（UTC）；null = Trae 没在跑或读不到</param>
+        /// <param name="lastRun">扩展**自己那份诊断日志**的最后写入时刻（UTC）＝"真的跑过"的唯一证据</param>
+        /// <param name="lastDeploy">最近一份副本的落盘时刻（UTC）</param>
+        public static AutoDecision DecideAuto(int copies, DateTime? traeStart, DateTime? lastRun, DateTime? lastDeploy)
+        {
+            var d = new AutoDecision();
+            if (copies <= 0)
+            { d.Why = "从没装过（扩展目录里没有本扩展的副本）—— 桌宠不擅自往别的应用目录里写"; return d; }
+            if (!traeStart.HasValue)
+            { d.Why = "Trae 不在运行（或读不到它的启动时刻）—— 现在投了也不会被加载"; return d; }
+
+            DateTime start = traeStart.Value;
+            if (lastRun.HasValue && lastRun.Value >= start)
+            { d.Why = "本会话已经跑过（扩展日志 " + Fmt(lastRun.Value) + " 晚于 Trae 启动 " + Fmt(start) + "）"; return d; }
+            if (lastDeploy.HasValue && lastDeploy.Value >= start)
+            { d.Why = "本会话已经补投过一次（" + Fmt(lastDeploy.Value) + "）—— 一个 Trae 会话只加载一次，等下次启动"; return d; }
+
+            d.Should = true;
+            d.Why = "Trae 于 " + Fmt(start) + " 启动，而扩展最后一次运行是 "
+                  + (lastRun.HasValue ? Fmt(lastRun.Value) : "（没有任何记录）")
+                  + " ⇒ 补投一份新副本，让它当场加载并同步令牌";
+            return d;
+        }
+
+        /// <summary>UTC → 本地"月-日 时:分:秒"。给上面那句人话用（现场读数一律存 UTC，只在**说给人和判据看**时转）。</summary>
+        private static string Fmt(DateTime utc) => utc.ToLocalTime().ToString("MM-dd HH:mm:ss");
+
+        /// <summary>本次 Trae 的启动时刻（UTC）；没在跑 = null。
+        /// ⚠ 取**最早**那个 trae 进程：一个 Trae 会起十几个进程（主/渲染/扩展宿主…）相差几秒，
+        ///   而"这个会话什么时候开始的"问的是最早那个。
+        /// ⚠ 按"名字里含 trae"筛，不写死 `TRAE SOLO CN` —— 进程名跟安装渠道走
+        ///   （同 `DataDirCandidates` 不硬编码 `.trae-cn` 的理由）。
+        /// ⚠⚠ `Process.StartTime` 是**本地时间**，而本仓其余时间戳（日志 mtime、目录 mtime）都是 UTC ——
+        ///   这里统一转 UTC 再比。不转的话在东八区会差 8 小时，"永远判成已经跑过"或"永远要补投"。
+        /// ⚠ 枚举进程 + 读 StartTime 都要权限，别的用户的进程会抛 ⇒ 逐个 try，抛了就跳过。</summary>
+        public static DateTime? TraeStartUtc()
+        {
+            DateTime? best = null;
+            try
+            {
+                foreach (var p in System.Diagnostics.Process.GetProcesses())
+                {
+                    try
+                    {
+                        if (p.ProcessName.IndexOf("trae", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        DateTime t = p.StartTime.ToUniversalTime();
+                        if (!best.HasValue || t < best.Value) best = t;
+                    }
+                    catch { }
+                    finally { try { p.Dispose(); } catch { } }
+                }
+            }
+            catch { }
+            return best;
+        }
+
+        /// <summary>把三份现场读数拼起来判一次。**只读，不动任何文件**（动文件的是 `TraeExtAuto`）。</summary>
+        public static AutoDecision DecideAutoNow()
+        {
+            var ours = OurFolders(ResolveExtensionsDir());
+            DateTime? deploy = null;
+            try { if (ours.Count > 0) deploy = Directory.GetLastWriteTimeUtc(ours[0]); } catch { }
+            return DecideAuto(ours.Count, TraeStartUtc(), LogTime(), deploy);
+        }
+
+        /// <summary>本会话扩展到底跑了没有。null = 判不了（Trae 没在跑 / 读不到启动时刻，或从没跑过），
+        /// true = 跑过，false = **Trae 重启过了、这次还没跑**（＝需要补投的那个状态，界面要显出来）。
+        /// ⚠ 判据是"诊断日志晚于 Trae 启动"，不是"日志最近写过" —— 后者会把上一次会话的成绩算到这次头上。</summary>
+        public static bool? SessionLive(DateTime? traeStart, DateTime? lastRun)
+        {
+            if (!traeStart.HasValue || !lastRun.HasValue) return null;
+            return lastRun.Value >= traeStart.Value;
+        }
+
+        /// <summary>同上的查盘版（读进程 + 读日志）。</summary>
+        public static bool? SessionLive() => SessionLive(TraeStartUtc(), LogTime());
+
         /// <summary>给界面用的一句话（短）。</summary>
         public static string ShortLabel(ExtStatus st)
         {
@@ -308,7 +413,7 @@ namespace AzhuPet
         /// ⚠ 为什么不用 Trae 的 `extensions.json` 当证据：那只说明"**登记**了"。
         ///   2026-10-01 实测到好几次 `Added extensions to default profile from external source` 写着我们，
         ///   而扩展一行日志都没打（登记 ≠ 激活）。要证明"真的跑了"，只能看它自己写的东西。</summary>
-        private static DateTime? LogTime()
+        public static DateTime? LogTime()
         {
             try
             {

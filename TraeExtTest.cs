@@ -150,6 +150,78 @@ namespace AzhuPet
                 Report(TraeExtInstaller.IsOurFolderName(n1), "自家目录名被判为自家", n1, ref pass, ref fail);
                 Report(!TraeExtInstaller.IsOurFolderName(TraeExtInstaller.PubId + "-diag-0.1.0"),
                        "开发期的 -diag 变体不被当成自家", TraeExtInstaller.PubId + "-diag-0.1.0", ref pass, ref fail);
+
+                // ---- 「Trae 重启后自动补投」的判定（2026-10-01 新增；见 TraeExtInstaller.DecideAuto）----
+                // ⚠⚠ 这组判据**自带负对照**，刻意不另设 `--old-*` 那种开关：下面每一对"只差一个字段"
+                //   的行，期望值相反 ⇒ 少判任何一个字段，必有一行变红。第二组"区分对"再把这四对单独
+                //   点出来 —— 矩阵行的失败信息读起来是一个整体，而"到底哪个字段没判"要逐对看才清楚。
+                //   （本项目对负对照的要求是"有区分度"，不是"必须有开关"。）
+                var S = new DateTime(2026, 10, 1, 9, 26, 0, DateTimeKind.Utc);   // Trae 本次启动
+                var rBefore = S.AddMinutes(-15);   // 扩展上一次会话跑过（早于本次启动）
+                var rAfter = S.AddSeconds(21);     // 扩展**本**会话跑过
+                var dBefore = S.AddMinutes(-9);    // 上一次会话投的副本
+                var dAfter = S.AddSeconds(30);     // **本**会话投的副本
+
+                var cases = new (int copies, DateTime? start, DateTime? run, DateTime? deploy, bool want, string name)[]
+                {
+                    (0, S,        rBefore, dBefore, false, "从没装过 ⇒ 不写（不擅自往别的应用目录里写）"),
+                    (2, null,     rBefore, dBefore, false, "Trae 没在跑 ⇒ 不投（投了也不会被加载）"),
+                    (2, S,        rAfter,  dBefore, false, "本会话已经跑过 ⇒ 不投"),
+                    (2, S,        rBefore, dAfter,  false, "本会话已经投过 ⇒ 不投（一个会话只加载一次）"),
+                    (2, S,        rBefore, dBefore, true,  "Trae 重启过且本会话还没跑 ⇒ 投"),
+                    (2, S,        null,    null,    true,  "从来没有运行记录 ⇒ 投"),
+                };
+                var noReasons = new List<string>();
+                foreach (var cs in cases)
+                {
+                    var dec = TraeExtInstaller.DecideAuto(cs.copies, cs.start, cs.run, cs.deploy);
+                    Report(dec.Should == cs.want, "自动补投判定：" + cs.name,
+                           (dec.Should ? "投" : "不投") + " · " + dec.Why, ref pass, ref fail);
+                    if (!dec.Should) noReasons.Add(dec.Why);
+                }
+                // 四条"不投"的理由必须**各不相同**：它们对应四个完全不同的现场，
+                // 合成一句会让排障时读错方向（"Trae 没在跑"和"本会话已经跑过"要做的事正好相反）。
+                int uniq = 0;
+                for (int i = 0; i < noReasons.Count; i++)
+                {
+                    bool dup = false;
+                    for (int j = 0; j < i; j++) if (noReasons[j] == noReasons[i]) dup = true;
+                    if (!dup) uniq++;
+                }
+                Report(noReasons.Count == 4 && uniq == 4,
+                       "四条「不投」的理由各不相同（不是同一句话复读）",
+                       noReasons.Count + " 条 / " + uniq + " 种", ref pass, ref fail);
+
+                // 区分对：每对只差**一个**字段，期望相反。
+                var yesRef = TraeExtInstaller.DecideAuto(2, S, rBefore, dBefore);   // 基准：该投
+                Report(TraeExtInstaller.DecideAuto(2, S, rAfter, dBefore).Should == false && yesRef.Should,
+                       "区分对·lastRun：本会话跑过(不投) vs 上一会话跑过(投)",
+                       TraeExtInstaller.DecideAuto(2, S, rAfter, dBefore).Should + " / " + yesRef.Should,
+                       ref pass, ref fail);
+                Report(TraeExtInstaller.DecideAuto(2, S, rBefore, dAfter).Should == false && yesRef.Should,
+                       "区分对·lastDeploy：本会话投过(不投) vs 上一会话投过(投)",
+                       TraeExtInstaller.DecideAuto(2, S, rBefore, dAfter).Should + " / " + yesRef.Should,
+                       ref pass, ref fail);
+                Report(TraeExtInstaller.DecideAuto(0, S, rBefore, dBefore).Should == false && yesRef.Should,
+                       "区分对·copies：从没装过(不投) vs 装过(投)",
+                       TraeExtInstaller.DecideAuto(0, S, rBefore, dBefore).Should + " / " + yesRef.Should,
+                       ref pass, ref fail);
+                Report(TraeExtInstaller.DecideAuto(2, null, rBefore, dBefore).Should == false && yesRef.Should,
+                       "区分对·traeStart：Trae 没在跑(不投) vs 在跑(投)",
+                       TraeExtInstaller.DecideAuto(2, null, rBefore, dBefore).Should + " / " + yesRef.Should,
+                       ref pass, ref fail);
+
+                // `SessionLive`：界面那一格"本会话到底生效没有"的口径（null=判不了，不许当成"没跑"）。
+                Report(TraeExtInstaller.SessionLive(S, rAfter) == true
+                    && TraeExtInstaller.SessionLive(S, rBefore) == false,
+                       "SessionLive：日志晚于启动=true、早于启动=false",
+                       TraeExtInstaller.SessionLive(S, rAfter) + " / " + TraeExtInstaller.SessionLive(S, rBefore),
+                       ref pass, ref fail);
+                Report(TraeExtInstaller.SessionLive(null, rBefore) == null
+                    && TraeExtInstaller.SessionLive(S, null) == null,
+                       "SessionLive：缺任一侧读数时是 null（判不了，不当成「没跑」）",
+                       TraeExtInstaller.SessionLive(null, rBefore) + " / " + TraeExtInstaller.SessionLive(S, null),
+                       ref pass, ref fail);
             }
 
             // 本机落点（只报，不判红 —— 换台机器可能真没装 Trae）

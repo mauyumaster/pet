@@ -779,6 +779,29 @@ namespace AzhuPet
             catch (Exception ex) { Trace_("agenttimer: " + ex.Message); }
         }
 
+        /// <summary>「Trae 重启后自动补投」的一拍。判定与动作都在 `TraeExtAuto`（它内部节流到两分钟），
+        /// 这里只做三件事：过开关、写日志、把**真发生过的事**说给用户听。
+        ///
+        /// ⚠⚠ `!SelfTestMode` 这道闸不能省：判据窗口跑在**用户真机上**，而用户真有一个 Trae
+        ///   ⇒ 少了它，跑一次 `--speaktest` 就会往用户 Trae 的扩展目录里塞一份副本。
+        ///   （同「判据不许写生产日志」那条纪律：判据碰真数据的症状不是"脏"，是**假现场**。）
+        /// ⚠ 开关关掉就**早退**，不进 `Poll` —— 这样 `TraeExtAuto.LastNote` 不会留下误导性的读数。
+        /// ⚠ 补投成功要说一句：往**别的应用**目录里写东西，用户有权当场知道（不静默发生）。
+        ///   ⚠ 用**状态**气泡而不是台词：这是读数不是她的话，而且状态气泡不会被台词顶掉。
+        /// </summary>
+        private void StepTraeExtAuto()
+        {
+            if (SelfTestMode || !Cfg.TraeExtAuto) return;
+            try
+            {
+                string note = TraeExtAuto.Poll(_clock.Elapsed.TotalSeconds);
+                if (note == null) return;
+                Trace_("traeext: " + note);
+                if (_feed != null) _feed.Push(FeedKind.Status, note, 8, 0.25, _clock.Elapsed.TotalSeconds);
+            }
+            catch (Exception ex) { Trace_("traeext: " + ex.Message); }
+        }
+
         /// <summary>
         /// 托盘「她看见了什么…」：**在本机**读一遍「她该看的那个窗口」上写着的字，把结果放进状态气泡。
         ///
@@ -1007,6 +1030,10 @@ namespace AzhuPet
 
             // 多 agent 任务计时读数（每拍都走，秒数才会平滑地跳）
             StepAgentTimer();
+
+            // Trae 重启后自动补投同步扩展（2026-10-01 用户拍板，见 TraeExtAuto.cs）。
+            // ⚠ 它自己节流到两分钟一次，所以挂在 120ms 的拍子上不烧电。
+            StepTraeExtAuto();
 
             // ---- 表达环采样（P0 第四环）----
             // ⚠ 放在最后：它只读前台，与姿态／调光互不相干；万一它抛异常也不该影响上面那些。
