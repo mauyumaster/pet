@@ -196,6 +196,81 @@ namespace AzhuPet
             catch { return LineH(f); }
         }
 
+        /// <summary>一段**单行**文字要多宽。⚠ 一律走 `TextRenderer`（GDI），不用 GDI+ 的
+        /// `Graphics.MeasureString` —— 同线程有 WPF 渲染器时那条路会**间歇性**抛
+        /// `ExternalException: GDI+`（成因在框架内部，详见 <see cref="TextLabel"/>）。
+        /// 对含换行的多行文本，它返回的是「全拼成一行」的宽度，调用方一律要用 `Math.Min(可用宽, …)`
+        /// 夹一次（<see cref="FitLabel"/> 就是这么做的）。量不出来就按字符数估，绝不把异常放出去。</summary>
+        public static int MeasureW(string text, Font f)
+        {
+            if (string.IsNullOrEmpty(text) || f == null) return 0;
+            try
+            {
+                using (var bmp = new Bitmap(1, 1))
+                using (var g = Graphics.FromImage(bmp))
+                    return TextRenderer.MeasureText(g, text, f, new Size(int.MaxValue, int.MaxValue),
+                        TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
+            }
+            catch { return text.Length * (f.Height / 2 + 1); }
+        }
+
+        /// <summary>造一个「自己量好尺寸」的文字盒（`AutoSize = false`，尺寸由 <see cref="FitLabel"/> 定）。
+        ///
+        /// ⚠⚠ **不要**改用 `AutoSize = true` + `MaximumSize`（真实事故，2026-09-20，查了很久）：
+        ///   那条路（`Label.AdjustSize` → `GetPreferredSizeCore` → GDI+ `MeasureString`）会
+        ///   **间歇性**抛 `ExternalException: A generic error occurred in GDI+.`，
+        ///   在 `--settings` 里表现为**启动即崩**（先起了 WPF 渲染器再构造面板时撞上），
+        ///   而 `--settingstest` 却一直是绿的 —— 因为它只构造一次，撞不上那个窗口。
+        ///   已排除的解释：GDI 句柄配额（异常时全进程只有 38 个）、特定文本/字符、MaximumSize 取值、
+        ///   派生字体、重复运行计数（约 1/10 失败）。⇒ 结论：这是框架内部对「同线程已有 WPF 渲染器」
+        ///   的脆弱依赖，**纪律是「别再走这条路径」** —— 自己量一次、给死尺寸；
+        ///   量不准最坏是少一行字，而不是整个窗口起不来。</summary>
+        public static Label TextLabel(string text, Color color, Font font)
+        {
+            return new Label
+            {
+                Text = text ?? "",
+                AutoSize = false,
+                ForeColor = color,
+                Font = font,
+                BackColor = Color.Transparent,
+            };
+        }
+
+        /// <summary>把一个 <see cref="TextLabel"/> 的宽高定下来（必须在**它已有可用宽度**之后调）。
+        /// 宽度取「需要多少就多少、但不超过可用宽度」；高度按换行后的真实行数给 ——
+        /// 用 <see cref="TextBlockH"/>，**不采信** GDI+ 那个（带 NoPadding、每行矮约 4px 的）返回值，
+        /// 否则多行说明的**最后一行会被裁掉**（2026-09-29 一次性量出 13 段说明全中）。</summary>
+        public static void FitLabel(Label l, int width)
+        {
+            if (l == null) return;
+            if (width < 40) width = 40;
+            l.Width = Math.Min(width, Math.Max(20, MeasureW(l.Text, l.Font)));
+            l.Height = TextBlockH(l.Text, l.Font, l.Width);
+        }
+
+        /// <summary>对话框（`BalanceEditorForms.cs` 那两个弹窗）页脚的标准按钮。
+        /// 宽度按文字量算，顺带断言了 `MeasureW` 在按钮文案上的可用性。
+        /// ⚠ 必须在 <see cref="InitFonts"/> 之后调用（字体是静态字段，没初始化时宽度会算成 0）。</summary>
+        public static Button FormButton(string text, bool primary)
+        {
+            var pal = Pal;
+            var f = primary ? BodyBold : Body;
+            var b = new Button
+            {
+                Text = text,
+                Height = 32,
+                Width = Math.Max(84, MeasureW(text, f) + 28),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = primary ? pal.Accent : pal.Field,
+                ForeColor = primary ? Color.White : pal.Text,
+                Font = f,
+            };
+            b.FlatAppearance.BorderSize = primary ? 0 : 1;
+            if (!primary) b.FlatAppearance.BorderColor = pal.Line;
+            return b;
+        }
+
         public static void InitFonts()
         {
             if (Body != null) return;

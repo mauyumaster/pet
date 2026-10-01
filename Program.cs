@@ -79,16 +79,18 @@ namespace AzhuPet
             // 跑判据的人往往正开着 TRAE/WorkBuddy，只要那边有任务在跑，判据窗口里就会凭空多出常驻读数行，
             // 把气泡流的宽／高判据整个带偏。
             AgentTaskTimer.Enabled = !o.AnyTest();
-            // apphost 的副本命名为 pet-settings.exe 时可无参数直达配置中心，便于桌面快捷方式与 UI 验收。
-            // ⚠⚠ 必须带 `!o.Settings` 守卫 —— 否则 `pet.exe --settings` 会被这一条**抢走**，
-            //   落到旧的 RunBalanceSettings（那张简陋的单页表），命令行开关形同虚设。
+            // apphost 的副本命名为 pet-settings.exe 时可无参数直达设置面板，便于桌面快捷方式与 UI 验收。
+            // ⚠⚠ 必须带 `!o.Settings && !o.BalanceSettings` 守卫 —— 否则 `pet.exe --settings` 会被这一条
+            //   **抢走**，落到另一条分支上，命令行开关形同虚设。
             //   判据 `settingstest` 只测 SettingsWindow 这个类，测不到「入口被抢走」，
             //   所以这个顺序问题只能靠视觉验收发现 —— 第一轮就是这么栽的。
-            if (o.Settings == false
+            // ⚠ 2026-10-01 起余额不再是独立窗口：这条兜底也直接开设置面板（并停在余额那一栏）。
+            if (o.Settings == false && o.BalanceSettings == false
                 && (System.IO.Path.GetFileNameWithoutExtension(Environment.ProcessPath) ?? "")
                 .IndexOf("settings", StringComparison.OrdinalIgnoreCase) >= 0)
-                return RunBalanceSettings();
+                return RunSettings(o, SettingsWindow.BalancePageTitle);
             if (o.ProbeFile != null) return Probe.Run(o);
+            if (o.ScreenCapPath != null) return Shot(o.ScreenCapPath, o.ScreenCapCrop);
             if (o.PixDir != null) return PixelReport.Run(o);
             if (o.SelfTest) return SelfTest.Run(o);
             if (o.ClickTest) return ClickTest.Run(o);
@@ -130,7 +132,7 @@ namespace AzhuPet
             if (o.SummaryTest) return SummaryTest.Run(o);
             if (o.SummaryNow) return SummaryTest.NowRun(o);      // 真调模型一次，总结「现在往前 60 分钟」
             if (!string.IsNullOrEmpty(o.InstallBalanceTemplate)) return BalanceTemplateInstaller.Run(o.InstallBalanceTemplate);
-            if (o.BalanceSettings) return RunBalanceSettings();
+            if (o.BalanceSettings) return RunSettings(o, SettingsWindow.BalancePageTitle);
             if (o.SettingsTest) return SettingsTest.Run(o);
             if (o.TopmostTest) return TopmostTest.Run();
             if (o.MotionTest) return MotionTest.Run(o);
@@ -218,25 +220,68 @@ namespace AzhuPet
             return r.Ok ? 0 : 1;
         }
 
-        private static int RunBalanceSettings()
-        {
-            var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
-            // 独立配置进程可能与正在置顶的桌宠同时存在；保持在它上面，避免操作按钮被挡住。
-            // ⚠ 这条路径**没有**运行中的桌宠，所以「自动补投」开关写的是磁盘上的那份配置
-            //   （PetConfig.Load() → Save()）。正在跑的桌宠要等下次启动才读到新值 ——
-            //   从托盘/设置窗口打开的那条路（传的是它在用的 `Cfg`）才是当场生效的。
-            var w = new BalanceSettingsWindow(null, PetConfig.Load()) { Topmost = true };
-            app.MainWindow = w;
-            w.Show();
-            return app.Run();
-        }
-
         /// <summary>--settings：独立打开设置主面板。
         /// 为什么要它：设置面板平时只能从托盘进 —— 而托盘菜单在截屏／自动化里够不着，
         /// 「面板长什么样」就变成只能靠人眼验收的东西。这条入口把它变成可复现的一步。
         /// ⚠ 面板需要一个 PetWindow 才能读写 Cfg 并调 ApplyConfig；这里按 RunNormal 的同一方式
-        ///   造一个**不显示的**宿主窗口（同一个渲染器类型、同一份 PetConfig 真值，不产生第二份配置）。</summary>
-        private static int RunSettings(Cli o)
+        ///   造一个**不显示的**宿主窗口（同一个渲染器类型、同一份 PetConfig 真值，不产生第二份配置）。
+        /// ⚠ `page`：打开后直接停在某一栏（按**标题**，不是下标 —— 见 ShowPageByTitle）。
+        ///   `--balance-settings` 与 `pet-settings.exe` 都靠它直达余额那一栏；
+        ///   2026-10-01 之前它们是「另开一个 WPF 余额窗」，现在只是同一条路的两个入口。</summary>
+        /// <summary>--screencap &lt;路径&gt;：把整个虚拟屏抓成 PNG。
+        ///
+        /// 为什么要有它：设置面板／气泡这类东西**只有人眼能验收** —— `--settings` 解决了
+        ///   "怎么把面板调出来"，这一条解决"怎么把它拍下来"。两件配齐，UI 改动才有一条
+        ///   可复现的证据链，而不是只能靠"我刚打开看了一眼，没问题"。
+        /// ⚠ 名字不是 `--shot`：那个已被 `--selftest` 占用（它抓的是**桌宠窗口**那一块，
+        ///   见 SelfTest 里 `--shot-crop` 的用法）。两个是不同的东西，名字也必须不同。
+        /// ⚠ 典型用法是**两个进程**：先 `pet.exe --balance-settings` 把面板起起来，
+        ///   隔几秒再 `pet.exe --screencap out.png` —— 拍到的就是真实那个面板。
+        /// ⚠ 抓的是整屏（含其它窗口），所以拍之前先把目标置于最前。
+        ///   要「只画某个窗口、天然不含遮挡物」该用 `PrintWindow`（见 ScreenEye.cs），那是另一件事：
+        ///   它画不到某些合成方式渲染的窗口，而 CopyFromScreen 画得到、但会连遮挡一起拍。
+        /// ⚠ 用 `VirtualScreen` 而不是 `PrimaryScreen`：面板被拖到副屏时主屏截图是**空白**的，
+        ///   而那种失败看起来像"窗口没起来"，会把人带偏。
+        /// ⚠ `crop`（`--screencap-crop x,y,w,h`）：一张 2560×1440 的整屏图缩到能看的尺寸之后，
+        ///   面板里那几行字就看不清了 —— 而"看不清"正是我加这个开关要解决的问题。裁剪矩形会先
+        ///   与位图求交（越界不抛，只是变小）；坐标是**虚拟屏左上角为原点**。</summary>
+        private static int Shot(string path, int[] crop)
+        {
+            try
+            {
+                var b = System.Windows.Forms.SystemInformation.VirtualScreen;
+                using (var bmp = new System.Drawing.Bitmap(b.Width, b.Height))
+                {
+                    using (var g = System.Drawing.Graphics.FromImage(bmp))
+                        g.CopyFromScreen(b.Left, b.Top, 0, 0, new System.Drawing.Size(b.Width, b.Height));
+
+                    if (crop != null && crop.Length == 4)
+                    {
+                        var r = new System.Drawing.Rectangle(crop[0], crop[1], crop[2], crop[3]);
+                        r.Intersect(new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height));
+                        if (r.Width > 0 && r.Height > 0)
+                        {
+                            using (var c = bmp.Clone(r, bmp.PixelFormat))
+                                c.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                            Console.WriteLine("screencap -> " + path + "（裁 " + r.X + "," + r.Y + " " + r.Width + "×" + r.Height + "）");
+                            return 0;
+                        }
+                        Console.WriteLine("screencap：裁剪矩形与屏幕不相交（" + crop[0] + "," + crop[1] + " " + crop[2] + "×" + crop[3]
+                            + "），按整屏保存");
+                    }
+                    bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                Console.WriteLine("screencap -> " + path + "（" + b.Width + "×" + b.Height + "）");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("screencap 失败：" + ex.Message);
+                return 1;
+            }
+        }
+
+        private static int RunSettings(Cli o, string page = null)
         {
             string model = Cli.ResolveModel(o.ModelPath);
             if (model == null) { MessageBox.Show("找不到 model/chibi_maid_pet.glb", "阿助桌宠"); return 2; }
@@ -254,13 +299,16 @@ namespace AzhuPet
             //   正确做法：WinForms 窗体就用 **WinForms 的消息循环**（`System.Windows.Forms.Application.Run`）。
             //   不需要 WPF Application 实例 —— WpfPetRenderer 只是被 PetWindow 持有着，
             //   面板只用到它的 `Cfg` 与 `ApplyConfig()`，不依赖 Dispatcher 在转。
+            // ⚠ 这一条**没有**运行中的桌宠，所以那边「自动补投」的勾选框写的是磁盘上的那份配置
+            //   （`PetConfig.Load()` 这一份）。正在跑的桌宠要等下次启动才读到新值 ——
+            //   从托盘打开的那条路（传的是**它在用的** `Cfg`）才是当场生效的。
             var r = new WpfPetRenderer(gm);
             var host = new PetWindow(r, PetConfig.Load());
             host.Show();
             host.Hide();                    // 只要它的 Cfg 与 ApplyConfig，不要它出现在桌面上
             GC.KeepAlive(r);
 
-            var w = new SettingsWindow(host);
+            var w = new SettingsWindow(host, page);
             System.Windows.Forms.Application.Run(w);
             return 0;
         }

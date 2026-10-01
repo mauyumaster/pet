@@ -447,7 +447,9 @@ namespace AzhuPet
         public bool TraeExtInstall;             // --traeextinstall：真把扩展投放到 Trae（与卡片按钮同一条代码路径；会写 Trae 的目录，故须显式敲）
         public bool TraeExtAutoDiag;            // --traeextauto：**只读**打印「Trae 重启后自动补投」的三份现场读数与判定（排障用，不写盘）
         public bool BubbleTest;                 // --bubbletest：像素验「气泡浮在宠物之外、不遮模型」
-        public bool BalanceSettings;            // --balance-settings：独立打开余额配置中心（无需先找到托盘菜单）
+        public bool BalanceSettings;            // --balance-settings：打开设置面板并停在「余额与凭据」栏（2026-10-01 前是独立余额窗）
+        public string ScreenCapPath;            // --screencap <路径>：整屏抓成 PNG（UI 验收用；`--shot` 已被自检占用，它是抓桌宠窗口）
+        public int[] ScreenCapCrop;             // --screencap-crop x,y,w,h：整屏抓完之后只留这一块（面板很小，整屏图看不清）
         public bool Settings;                   // --settings：独立打开设置主面板（便于 UI 验收与截图）
         public bool SettingsTest;               // --settingstest：离线验设置面板版式（裁剪／重叠／跟随缩放）
         public bool TopmostTest;                // --topmosttest：验置顶那一格状态（借出计数／归还取配置／真实位真拨过去了吗）
@@ -668,6 +670,8 @@ namespace AzhuPet
                     case "--traeextauto": c.TraeExtAutoDiag = true; break;
                     case "--bubbletest": c.BubbleTest = true; break;
                     case "--balance-settings": c.BalanceSettings = true; break;
+                    case "--screencap": c.ScreenCapPath = Nxt(a, ref i); break;
+                    case "--screencap-crop": c.ScreenCapCrop = Ints(Nxt(a, ref i)); break;
                     case "--settings": c.Settings = true; break;
                     case "--settingstest": c.SettingsTest = true; break;
                     case "--topmosttest": c.TopmostTest = true; break;

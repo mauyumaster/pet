@@ -45,9 +45,10 @@ namespace AzhuPet
             _menu.Items.Add(new ToolStripMenuItem("她看见了什么…", null, (s, e) => _w.ShowScreenRead()));
             _menu.Items.Add(new ToolStripMenuItem("和桌宠说话…", null, (s, e) => OpenChat()));
             _menu.Items.Add(new ToolStripMenuItem("让她说一句", null, (s, e) => _w.ForceSpeak()));
-            _menu.Items.Add(new ToolStripMenuItem("余额…", null, (s, e) =>
-                _w.Dispatcher.InvokeAsync(OpenBalanceSettings)));
-            // ⚠ 一切**配置**收在这一个入口（说话／模型通道／读屏／产出／外观），
+            // ⚠ 2026-10-01：原来这里还有一个「余额…」项，它开的是**另一个** WPF 窗。
+            //   余额已经是设置面板里的一栏（且托盘项被用户判为累赘）⇒ 整个入口收进「设置…」，
+            //   不再有第二个窗口、也不再有两套观感（那个窗是写死深色的，浅色系统下会突然跳黑）。
+            // ⚠ 一切**配置**收在这一个入口（说话／模型通道／读屏／产出／外观／余额与凭据），
             //   见 SettingsWindow.cs 文件头三条纪律。
             _menu.Items.Add(new ToolStripMenuItem("设置…", null, (s, e) =>
                 _w.Dispatcher.InvokeAsync(OpenSettings)));
@@ -156,35 +157,7 @@ namespace AzhuPet
             if (!ok) MessageBox.Show("写入开机自启失败（注册表被拒）", "阿助桌宠");
         }
 
-        private void OpenBalanceSettings()
-        {            // 桌宠通常置顶；设置窗若是普通窗口，会被宠物盖住右下角按钮。
-            // ⚠⚠ 借走置顶这件事必须**成对**，而且归还时的值一律**取配置**（`PetWindow.ResumeTopmost`），
-            //   绝不写回「借走前的值」—— 面板里的「保存」可能刚把配置改成新值，写回旧值会把它
-            //   抹掉，而配置里明明写着 true（2026-09-25 真故障：她自认置顶、系统不认，
-            //   实测 `GWL_EXSTYLE=0x08080080` 里没有 0x8）。详见 TopmostGuard 顶部注释。
-            // ⚠ 归还**不能**靠 `using`：`panel.Show()` 是**非模态**的、立刻返回，
-            //   那样刚打开就归还了，面板又会被她盖住 ⇒ 必须挂到 `Closed` 上。
-            // ⚠ 借出凭据用**计数**而不是布尔：面板连开两次时，谁先关谁后关是不确定的，
-            //   布尔会被先关的那个提前归还（旧写法就是这么把置顶永久弄丢的）。
-            IDisposable hold = _w.SuspendTopmost();
-            BalanceSettingsWindow panel = null;
-            try
-            {
-                panel = new BalanceSettingsWindow(_w.ReloadBalanceSources, _w.Cfg);
-                panel.Closed += (s, e) => hold.Dispose();
-                panel.Show();
-                panel.Activate();
-            }
-            catch
-            {
-                // ⚠ 窗没开成也必须归还：否则置顶永远回不来，现象是「她再也压不住窗口了」
-                //   而看不出任何报错。归还凭据是幂等的（内部置空后重复 Dispose 无副作用）。
-                hold.Dispose();
-                throw;
-            }
-        }
-
-        /// <summary>设置主面板 —— 一切配置的唯一入口（说话／模型通道／读屏／产出／外观）。</summary>
+        /// <summary>设置主面板 —— 一切配置的唯一入口（说话／模型通道／读屏／产出／外观／余额与凭据）。</summary>
         private void OpenSettings()
         {
             // 桌宠通常置顶；设置窗若是普通窗口会被宠物盖住右下角按钮（同余额窗的处理）。

@@ -206,8 +206,13 @@ namespace AzhuPet
                         form.Update();
                     }
 
-                    Check("noSiblingOverlap", sibOv == 0 && checkedPages >= 6,
-                        checkedPages < 6 ? "只找到 " + checkedPages + " 栏（必须逐栏验；少于 6 栏 ⇒ 有栏没被排过版）"
+                    // ⚠⚠ 这个下限**必须跟着栏数走**：它是「每一栏都真的被验过」的护栏，
+                    //   而不是一个装饰数字 —— 少于它，说明有栏从没被排过版、所有断言在它身上恒真。
+                    //   2026-10-01 余额并进设置面板 ⇒ 6 栏变 **7** 栏，这里同步提到 7。
+                    //   （加栏却忘了改这里，新栏就会成为唯一一块没人验的地方 —— 正是本期最想防的假绿。）
+                    const int expectedPages = 7;
+                    Check("noSiblingOverlap", sibOv == 0 && checkedPages >= expectedPages,
+                        checkedPages < expectedPages ? "只找到 " + checkedPages + " 栏（必须逐栏验；少于 " + expectedPages + " 栏 ⇒ 有栏没被排过版）"
                         : (sibOv == 0 ? "逐栏验过 " + checkedPages + " 栏，所有同级控件都不互相盖住"
                                       : sibOv + " 处重叠（分布：" + string.Join("、", perPage.ToArray()) + "）："
                                         + string.Join("；", found.ToArray())));
@@ -606,12 +611,12 @@ namespace AzhuPet
             return n;
         }
 
-        /// <summary>找出 6 个「页面容器」（承载卡片流的那几个 Panel）。
+        /// <summary>找出全部「页面容器」（承载卡片流的那几个 Panel；2026-10-01 起 7 个）。
         ///
         /// ⚠⚠ **不要**写成「凡是 AutoScroll 的 Panel 就算一页」—— 内容区自己也是 `AutoScroll`，
         ///   于是它会被当成「第 0 页」、后面每一栏**整体错位一格**：逐栏验时「显示出来的页」
         ///   与「量到的那棵树」不是同一个 ⇒ 有 5 栏量到的是空树，读数恒 0。
-        ///   危险之处在于**总项数照样是 6**、`>= 6` 的断言照样过，看起来像验完了。
+        ///   危险之处在于**总项数照样对**、`>= N` 的断言照样过，看起来像验完了。
         ///   （2026-09-29 实测：修正前逐栏只报 6 处重叠，修正后同一份代码报 15 处。）
         ///   正确口径：页面 = **内容区（窗体上 `Dock=Fill` 的那个 Panel）的直接子控件**。</summary>
         private static List<Panel> FindPages(Form form)

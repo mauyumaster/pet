@@ -34,9 +34,13 @@
   <text x="56" y="320" fill="#1c202a" font-size="12px">外观与启动</text>
   <text x="56" y="336" fill="#969dac" font-size="10px">尺寸、置顶、开机</text>
 
-  <text x="36" y="377" fill="#687082" font-size="12px">ⓘ</text>
-  <text x="56" y="376" fill="#1c202a" font-size="12px">关于与位置</text>
-  <text x="56" y="392" fill="#969dac" font-size="10px">配置在哪、怎么自检</text>
+  <text x="36" y="377" fill="#687082" font-size="12px">◪</text>
+  <text x="56" y="376" fill="#1c202a" font-size="12px">余额与凭据</text>
+  <text x="56" y="392" fill="#969dac" font-size="10px">积分与凭据在哪</text>
+
+  <text x="36" y="433" fill="#687082" font-size="12px">ⓘ</text>
+  <text x="56" y="432" fill="#1c202a" font-size="12px">关于与位置</text>
+  <text x="56" y="448" fill="#969dac" font-size="10px">配置在哪、怎么自检</text>
 
   <line x1="20" y1="486" x2="192" y2="486" stroke="#e4e7ee" stroke-width="1"/>
   <text x="24" y="506" fill="#969dac" font-size="10px">托盘右键 →「设置…」</text>

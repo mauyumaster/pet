@@ -29,6 +29,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace AzhuPet
@@ -69,6 +71,28 @@ namespace AzhuPet
         private ComboBox _cSize;
         private Toggle _tSpeech, _tLlm, _tRoast, _tSummary, _tOcr, _tOcrSend, _tEye, _tTopmost, _tNight, _tAutostart;
 
+        // ---- 第 6 栏「余额与凭据」（2026-10-01 由独立的 WPF 余额窗合并进来）----
+        // ⚠⚠ 这一栏的数据**不走**本窗的 `Save()` / `_dirty` 那一套，这是**有意的**：
+        //   余额源写 `balances.json`、有自己的字段校验与「敏感头必须进凭据框」检查、
+        //   还有自己的重载回调（`_w.ReloadBalanceSources`）。把它塞进 PetConfig 的保存流程
+        //   ＝ 同一件事两个落点（本仓老毛病）。所以它在栏内自带「保存余额配置」按钮，
+        //   底部那条全局的「保存并生效」**不管它**，界面上也照实写清楚。
+        private ListBox _balList;
+        private Label _balStatus, _balTraeState, _balWbState, _balTraeSub, _balWbSub;
+        private Button _balTestBtn, _balSaveBtn;
+        private Toggle _balAuto;
+        private Panel _balTraeRow, _balWbRow;
+        /// <summary>一个窗只留一个 ToolTip 实例（每次 new 一份会攒着不放，见它自身的 Dispose 语义）。</summary>
+        private readonly ToolTip _balTip = new ToolTip();
+        private List<BalanceSource> _balItems;
+        private bool _balLoadOk, _balDirty;
+        private string _balLoadError;
+        private Dictionary<string, BalanceCell> _balTested;
+
+        /// <summary>这一栏在左栏里的标题 —— 「关于与位置」里那颗跳转按钮靠它找到目标栏，
+        /// 不写死下标（下标正是会漂的那个量）。</summary>
+        internal const string BalancePageTitle = "余额与凭据";
+
         // ---- 版式骨架 ----
         private Panel _nav, _content;
         private readonly List<NavItem> _navItems = new List<NavItem>();
@@ -90,11 +114,23 @@ namespace AzhuPet
         internal const string NavBrandName = "navBrand";
         internal const string NavListName = "navList";
 
-        public SettingsWindow(ISettingsHost w)
+        /// <param name="initialPage">打开后停在哪一栏（按**标题**匹配，见 <see cref="ShowPageByTitle"/>）。
+        /// 传 null ＝ 第 1 栏。`--balance-settings` / `pet-settings.exe` 用它直达余额那一栏。</param>
+        public SettingsWindow(ISettingsHost w, string initialPage = null)
         {
             _w = w;
             SettingsTheme.InitFonts();
             var pal = SettingsTheme.Pal;
+
+            // 余额源在这里**一次性**读进来（不是每栏都读）：`_balLoadOk=false` 时那一栏会
+            // 明确拒绝保存，而不是把读不出来的原配置覆盖掉 —— 与旧余额窗同一条纪律。
+            {
+                List<BalanceSource> loaded;
+                string loadError;
+                _balLoadOk = BalanceSources.TryLoad(out loaded, out loadError);
+                _balItems = loaded ?? new List<BalanceSource>();
+                _balLoadError = loadError;
+            }
 
             Text = "阿助设置";
             // ⚠⚠ 这一行不是可选项（第一版就栽在这里）：
@@ -155,6 +191,9 @@ namespace AzhuPet
             _content.BringToFront();
 
             ShowPage(0);
+            // ⚠ 定位那一栏的调用必须排在 `ShowPage(0)` **之后**：`ShowPageByTitle` 找不到目标时
+            //   什么都不做，于是自然回落到第 1 栏 —— 不会出现「整窗空白」那种最难查的状态。
+            if (initialPage != null) ShowPageByTitle(initialPage);
             CheckChanged(null, EventArgs.Empty);
 
             // ⚠ 窗体可缩放 ⇒ 宽度链必须在每次 Resize 后重排一次。
@@ -210,6 +249,10 @@ namespace AzhuPet
             AddNav(host, "◉", "她能看见什么", "读屏范围与隐私");
             AddNav(host, "▤", "每小时小结", "她替你写的日记");
             AddNav(host, "◧", "外观与启动", "尺寸、置顶、开机");
+            // 顺序：余额排在「关于」前面 —— 「关于与位置」永远是最后一栏（它是只读的兜底页）。
+            // ⚠ 副标题控制在 ~7 个字以内：左栏 210px 宽，减掉图标位与内边距只剩 ~120px，
+            //   超过就会被 `NavItem` 硬裁（没有省略号，看起来像渲染坏了）。判据测不到这一条。
+            AddNav(host, "◎", BalancePageTitle, "积分与凭据在哪");
             AddNav(host, "ⓘ", "关于与位置", "配置在哪、怎么自检");
         }
 
@@ -246,7 +289,9 @@ namespace AzhuPet
         // ==================================================================================
         private void BuildPages()
         {
-BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPageAppearance();BuildPageAbout();        }
+            BuildPageSpeech(); BuildPageModel(); BuildPagePrivacy(); BuildPageSummary();
+            BuildPageAppearance(); BuildPageBalance(); BuildPageAbout();
+        }
 
         /// <summary>开一页并返回「卡片流」宿主。
         /// ⚠ 版式要点（第一版就在这里翻过车）：
@@ -493,7 +538,7 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
                 r.Top = y;
                 // ⚠ 说明段（Note/NoteBox）是「自己量好尺寸」的：宽度取卡片的可用宽度，
                 //   高度按换行后的真实行数。必须在**卡片有宽度之后**量，所以摆在这一步。
-                if (r is Label lbl && !lbl.AutoSize) FitTextLabel(lbl, card.Width - CardPad * 2 - pad);
+                if (r is Label lbl && !lbl.AutoSize) SettingsTheme.FitLabel(lbl, card.Width - CardPad * 2 - pad);
                 int h = RowHeight(r);
                 r.Height = Math.Max(h, r.Height > 0 ? Math.Min(h, r.Height) : h);
                 if (r is Panel p) p.PerformLayout();
@@ -754,17 +799,21 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             //   那是下一版的事；现在保持「点一下才查」这种可预期的行为。
         }
 
-        /// <summary>统一的小按钮样式（与「打开余额配置」那一颗同款）。</summary>
-        private Button SmallButton(string text, int width)
+        /// <summary>统一的小按钮样式（更新卡片、余额那一栏的工具条与行内按钮都用它）。
+        /// `primary` 那个变体是余额栏要的：同一行里「主路」（安装扩展／浏览器登录）与
+        /// 「备选」（手工粘贴）必须一眼分得出来 —— 否则终端用户会把备选当主路走。</summary>
+        private Button SmallButton(string text, int width, bool primary = false)
         {
+            var pal = SettingsTheme.Pal;
             var b = new Button
             {
                 Text = text, Location = new Point(0, 2), Width = width, Height = 30,
                 FlatStyle = FlatStyle.Flat,
-                BackColor = SettingsTheme.Pal.Field,
-                ForeColor = SettingsTheme.Pal.Text,
+                BackColor = primary ? pal.Accent : pal.Field,
+                ForeColor = primary ? Color.White : pal.Text,
             };
-            b.FlatAppearance.BorderColor = SettingsTheme.Pal.Line;
+            b.FlatAppearance.BorderSize = primary ? 0 : 1;
+            if (!primary) b.FlatAppearance.BorderColor = pal.Line;
             return b;
         }
 
@@ -926,6 +975,630 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             catch { }
         }
 
+        // ==================================================================================
+        // 第 6 栏：余额与凭据（原独立的 WPF 余额窗，2026-10-01 合并进来）
+        // ==================================================================================
+        // 为什么合并：托盘里「余额…」与「设置…」两个窗口装的是同一类东西（配置），
+        //   而旧余额窗是**写死深色**的 WPF 窗、本窗跟着系统深浅走 —— 浅色系统下两个窗的观感是断的。
+        //   合并后只剩一个入口、一套样式、一条滚动方式。
+        //
+        // ⚠ 三条与其它栏**不同**的纪律（改这一栏前先读）：
+        // 1. **保存是栏内独立的**（写 balances.json，不进 PetConfig）——见字段区注释。
+        //    底部那条全局的「保存并生效」不管它，界面上也照实写清楚，免得用户以为存过了。
+        // 2. 自动补投那个勾选框**即时落盘**（勾完下一拍自检就按新值走），
+        //    所以它被 `WireDirty()` 显式排除 —— 它是"已生效"，不是"待保存"。
+        // 3. 凭据一律不回显；粘贴框留空＝保留原值（沿用旧余额窗与第 2 栏的先例）。
+        private void BuildPageBalance()
+        {
+            var pal = SettingsTheme.Pal;
+            var flow = BeginPage(BalancePageTitle,
+                "状态气泡里的数字从哪来。凭据只存在本机（%LOCALAPPDATA%），不会进 Obsidian 库。");
+
+            // ---------------- 卡片 1：内置平台 ----------------
+            var c1 = BeginCard(flow, "内置平台",
+                _balLoadOk ? "两个开箱即用的来源；其它平台用下面的「自定义接口」加。"
+                           : "⚠ 自定义接口的配置文件读不出来，这一栏不会把它覆盖掉。");
+
+            AddRow(c1, Note("凭据过期时优先用右边的按钮重新取一次；「手工粘贴」是备选（终端用户可能没装 WebView2 运行时）。"
+                          + "旧内容不回显，粘贴框留空即保留原值。", pal.Muted));
+
+            _balTraeRow = BuiltinRow("Trae 积分",
+                "读取可用积分（总额 − 已用）｜ 令牌 14 天到期，靠同步扩展自动续期",
+                out _balTraeState, out _balTraeSub,
+                "安装同步扩展", () => InstallTraeExt(),
+                "手工粘贴", () => OpenBalanceCredential("Trae", StatusProbe.TraeSecretFile, "authorization"));
+            AddRow(c1, _balTraeRow);
+            // ⚠ Trae **没有**「浏览器登录获取」这条路，理由两条，都不是猜的：
+            //   ① 它的凭据是 **IDE 现签的** `Cloud-IDE-JWT`，而桌宠那一发只发 cookie
+            //      （`BrowserReading.BuildFetchScript` 原文：`fetch(url,{credentials:'include'})`，
+            //      一个自定义头都不设）；发那个请求的页面是 `vscode-file://` 自定义协议，
+            //      实测 `document.cookie` 长度 0 —— 连 cookie 罐都不存在。
+            //   ② 实测那个接口**只认 `authorization` 一个头**（29 个头删到 1 个照样读到真数），
+            //      所以「复现 29 个签名头」这个曾经以为的难点其实不存在。
+            //   ⇒ 正确入口是「装一个扩展让 Trae 自己把令牌交出来」（见 TraeExtInstaller.cs）。
+
+            _balWbRow = BuiltinRow("WorkBuddy 积分",
+                "读取界面同口径的 type=1 可用额度",
+                out _balWbState, out _balWbSub,
+                "浏览器登录获取", () => OpenBrowserLogin(),
+                "手工粘贴", () => OpenBalanceCredential("WorkBuddy", StatusProbe.WorkBuddySecretFile, "cookie", "x-user-id"));
+            AddRow(c1, _balWbRow);
+
+            // ---- Trae 重启后自动补投（2026-10-01 用户拍板；契约见 TraeExtAuto.cs）----
+            // ⚠ 它放在余额这一栏而不是「外观与启动」：整个 Trae 令牌的故事（凭据 + 装扩展）都在这张页上。
+            var autoRow = ToggleRow("Trae 重启后自动补投同步扩展",
+                "Trae 启动时不加载用户扩展 ⇒ 每次重启后自动续期都会失效。"
+                + "勾着：桌宠每两分钟自检，发现「Trae 在跑 且 本会话还没跑过」就补投一份新副本；"
+                + "关掉：重启后要你自己点一次「安装同步扩展」。⚠ 只在「已经装过一次」时才动 Trae 的目录。",
+                out _balAuto, out _, _w.Cfg == null || _w.Cfg.TraeExtAuto);
+            _balAuto.CheckedChanged += (s, e) => BalSetAuto(_balAuto.Checked);
+            AddRow(c1, autoRow);
+            FinishCard(c1);
+
+            // ---------------- 卡片 2：自定义接口 ----------------
+            var c2 = BeginCard(flow, "自定义接口",
+                "一个来源对应状态气泡里的一行。双击列表项可编辑。");
+
+            AddRow(c2, Note("字段路径支持三种写法：普通路径（data.remain）· 数组求和（accounts[type=1].remain）· "
+                          + "相减（sub:data.total;data.used）。", pal.Muted));
+
+            var bar = new Panel { Height = 36, BackColor = pal.Card };
+            {
+                int x = 0;
+                Button Bar(string text, bool primary, Action act)
+                {
+                    var b = SmallButtonAt(text, x, primary);
+                    b.Click += (s, e) => act();
+                    x = b.Right + SettingsTheme.GapXs;
+                    bar.Controls.Add(b);
+                    return b;
+                }
+                Bar("＋ 新增", true, () => BalAddEdit(null));
+                Bar("编辑", false, () => BalAddEdit(BalSelected()));
+                Bar("复制", false, () => BalDuplicate());
+                Bar("启用 / 停用", false, () => BalToggle());
+                Bar("删除", false, () => BalDelete());
+            }
+            AddRow(c2, bar);
+
+            int itemH = SettingsTheme.LineH(SettingsTheme.BodyBold) + SettingsTheme.LineH(SettingsTheme.Small)
+                        + SettingsTheme.GapXs * 2;
+            _balList = new ListBox
+            {
+                // ⚠ 高度按「几行」算，不写死像素 —— 150% 缩放下字体大一圈，写死的那个数会少显示一行。
+                Height = itemH * 7,
+                ItemHeight = itemH,
+                IntegralHeight = false,
+                DrawMode = DrawMode.OwnerDrawFixed,
+                BackColor = pal.Field, ForeColor = pal.Text, BorderStyle = BorderStyle.FixedSingle,
+            };
+            _balList.DrawItem += BalListDrawItem;
+            _balList.MouseDoubleClick += (s, e) => { var sel = BalSelected(); if (sel != null) BalAddEdit(sel); };
+            _balList.KeyDown += (s, e) => { if (e.KeyCode == Keys.Delete) BalDelete(); };
+            AddRow(c2, _balList);
+
+            var act = new Panel { Height = 36, BackColor = pal.Card };
+            _balTestBtn = SmallButtonAt("测试全部", 0);
+            _balTestBtn.Click += (s, e) => BalTestAll();
+            act.Controls.Add(_balTestBtn);
+            _balSaveBtn = SmallButtonAt("保存余额配置", _balTestBtn.Right + SettingsTheme.GapSm, true);
+            _balSaveBtn.Click += (s, e) => BalSave();
+            act.Controls.Add(_balSaveBtn);
+            AddRow(c2, act);
+
+            _balStatus = Note(_balLoadError != null ? "⚠ " + _balLoadError
+                : "改完先「测试全部」再「保存余额配置」——它是独立保存的，底部那条「保存并生效」不管这一栏。",
+                _balLoadError != null ? pal.Bad : pal.Faint);
+            AddRow(c2, _balStatus);
+            FinishCard(c2);
+            _balSaveBtn.Enabled = _balLoadOk;
+
+            // ---------------- 卡片 3：凭据放在哪 ----------------
+            var c3 = BeginCard(flow, "凭据放在哪");
+            AddRow(c3, NoteBox("凭据目录：" + BalanceSources.StorageDir() + "\n"
+                + "来源列表：" + BalanceSources.ConfigPath() + "\n\n"
+                + "⚠ 这两个位置都在 %LOCALAPPDATA%，**不在**你的 Obsidian 库里 —— 所以不会被同步到云上。\n"
+                + "   cookie / authorization 这类敏感头只会写进独立凭据文件，不进 balances.json。",
+                pal.Faint));
+            FinishCard(c3);
+
+            RefreshBalanceBuiltins();
+            RefreshBalanceList();
+        }
+
+
+        /// <summary>内置平台那一行的内部构件（宽度链重排要用到，见 <see cref="LayoutBuiltinRow"/>）。</summary>
+        private sealed class BuiltinRowCtx
+        {
+            public Label Sub, State;
+            public Button Primary, Secondary;
+        }
+
+        /// <summary>「名称＋副标题」在左、状态在中右、最右两颗按钮的一整行 —— 内置平台那两个来源共用。
+        /// ⚠ 宽度链只在这个 Panel 的 Resize 里算（并且在 <see cref="RefreshBalanceBuiltins"/>
+        ///   改了文字之后再调一次）—— 按钮宽度跟字体（DPI）走，构造期拿到的可能不是最终值；
+        ///   只算一次的话窄窗下状态文字会压到名称上，而 `noSiblingOverlap` 会把它抓出来。</summary>
+        private Panel BuiltinRow(string name, string sub, out Label state, out Label subLabel,
+                                 string primaryText, Action primary,
+                                 string secondaryText, Action secondary)
+        {
+            var pal = SettingsTheme.Pal;
+            int h1 = SettingsTheme.LineH(SettingsTheme.BodyBold);
+            int h2 = SettingsTheme.LineH(SettingsTheme.Small);
+            var p = new Panel { Height = h1 + h2 + SettingsTheme.GapSm, BackColor = pal.Card };
+
+            var title = new Label
+            {
+                Text = name, AutoSize = true, ForeColor = pal.Text, Font = SettingsTheme.BodyBold,
+                Location = new Point(0, 0),
+            };
+            subLabel = new Label
+            {
+                Text = sub, AutoSize = false, ForeColor = pal.Faint, Font = SettingsTheme.Small,
+                Left = 0, Top = h1 + SettingsTheme.GapXs, Height = h2,
+            };
+            state = new Label
+            {
+                Text = "…", AutoSize = false, ForeColor = pal.Muted, Font = SettingsTheme.Small,
+                Height = h2, TextAlign = ContentAlignment.MiddleRight,
+            };
+            var b1 = SmallButtonAt(primaryText, 0, true);
+            b1.Click += (s, e) => primary();
+            var b2 = SmallButtonAt(secondaryText, 0);
+            b2.Click += (s, e) => secondary();
+
+            p.Controls.Add(title); p.Controls.Add(subLabel); p.Controls.Add(state);
+            p.Controls.Add(b1); p.Controls.Add(b2);
+            p.Tag = new BuiltinRowCtx { Sub = subLabel, State = state, Primary = b1, Secondary = b2 };
+            p.Resize += (s, e) => LayoutBuiltinRow(p);
+            LayoutBuiltinRow(p);
+            return p;
+        }
+
+        private void LayoutBuiltinRow(Panel p)
+        {
+            var ctx = p.Tag as BuiltinRowCtx;
+            if (ctx == null) return;
+            int h2 = SettingsTheme.LineH(SettingsTheme.Small);
+            int h1 = SettingsTheme.LineH(SettingsTheme.BodyBold);
+
+            // 从右往左排：次按钮 → 主按钮 → 状态文字 → （剩下的才是名称/副标题的）。
+            int right = p.Width;
+            ctx.Secondary.Left = Math.Max(0, right - ctx.Secondary.Width);
+            right = ctx.Secondary.Left - SettingsTheme.GapSm;
+            ctx.Primary.Left = Math.Max(0, right - ctx.Primary.Width);
+            right = ctx.Primary.Left - SettingsTheme.GapMd;
+
+            // ⚠⚠ 状态文字右对齐到按钮左边，但它**占掉的横向空间**是它自己那段文字 ——
+            //   副标题的可用宽度必须按「到状态文字的**视觉**左边界」算，**不能**按 `leftLimit`
+            //   （那只是名称的右边界）。第一版就是拿 `leftLimit` 当右边界，副标题被挤成一条
+            //   5 个字一行的竖排窄条：整行被撑到 8 行高，还把下一行（WorkBuddy）挤出了卡片 ——
+            //   而 `--settingstest` 当时是**全绿**的（行只是变高，既没重叠也没被裁）。
+            //   ⇒ 判据测不到「丑」，这一条只能靠真截图发现（`--screencap` 就是为此加的）。
+            int nameW = 0;
+            foreach (Control k in p.Controls)
+                if (k is Label l && !ReferenceEquals(l, ctx.State) && !ReferenceEquals(l, ctx.Sub))
+                    nameW = Math.Max(nameW, l.Width);
+            int leftLimit = Math.Min(right, nameW + SettingsTheme.GapMd);
+            // ⚠⚠ 盒子要比「紧量出来的字宽」再宽 `GapSm`：`MeasureW` 走 `NoPadding | SingleLine`
+            //   （量的是字身），而 Label 渲染时两侧各留几像素 ⇒ 盒子**正好等于**字宽时
+            //   「● 已配置」会**折成两行**（截图里成了「● 已配／置」）。
+            //   这正是「判据测不到丑」的又一例：折行既不重叠也不裁字，`--settingstest` 全绿。
+            int stateTextW = SettingsTheme.MeasureW(ctx.State.Text, SettingsTheme.Small) + SettingsTheme.GapSm;
+            int stateVisualLeft = Math.Max(leftLimit, right - stateTextW);
+
+            // ⚠⚠ 状态标签是 `TextAlign=MiddleRight` ⇒ **盒子也收到 `[stateVisualLeft, right]`**，
+            //   不能图省事写成 `Left=leftLimit, Width=right-leftLimit`。两种写法**画出来一模一样**
+            //   （文字都右对齐到 `right`），但矩形不同：后者那条「铺满但不画东西」的空档横跨在副标题
+            //   上方 ⇒ `noSiblingOverlap` 量到 120×27 的重叠判红（2026-10-01 实测）。
+            //   ⇒ 这条也是那条判据的边界：它量**矩形**、不量像素，「空盒子」照样算压住。
+            ctx.State.Left = stateVisualLeft;
+            ctx.State.Width = Math.Max(40, right - stateVisualLeft);
+            if (ctx.State.Right > right) ctx.State.Left = Math.Max(0, right - ctx.State.Width);
+            ctx.State.Height = Math.Max(h2, SettingsTheme.TextBlockH(ctx.State.Text, SettingsTheme.Small, ctx.State.Width));
+
+            // ⚠ 副标题右边界**由状态盒子的实际左沿反推**（不再重算一遍 `stateVisualLeft`）——
+            //   这样「两盒不相交（副标题.Right ≤ 状态.Left − GapMd）」是**结构保证**的，
+            //   不依赖上面那条 `Right > right` 的 clamp 走不走。（去掉原来的 80px 下限：它只是
+            //   防退化的写法，却会让极窄窗下副标题反过来压住状态。）
+            int avail = Math.Max(0, ctx.State.Left - SettingsTheme.GapMd);
+            if (ctx.Sub.Width != avail) ctx.Sub.Width = avail;
+            // ⚠ 副标题按**实际可用宽度**量换行高度（与 ToggleRow 同一条纪律）：
+            //   窗口拉到最窄时最长的说明会换行，高度写死一行 ⇒ 第二行被裁（`textNotClipped` 会判红）。
+            ctx.Sub.Height = Math.Max(h2, SettingsTheme.TextBlockH(ctx.Sub.Text, SettingsTheme.Small, avail));
+            ctx.Sub.Top = h1 + SettingsTheme.GapXs;
+
+            // 行高取「名称＋副标题」那一列与状态文字**两者较高**的那个。
+            int need = Math.Max(h1 + SettingsTheme.GapXs + ctx.Sub.Height, ctx.State.Height) + SettingsTheme.GapSm;
+            if (p.Height != need) p.Height = need;          // ⚠ 判等再写，避免 Resize 自递归
+
+            ctx.State.Top = Math.Max(0, (p.Height - ctx.State.Height) / 2);
+            ctx.Primary.Top = Math.Max(0, (p.Height - ctx.Primary.Height) / 2);
+            ctx.Secondary.Top = ctx.Primary.Top;
+        }
+
+        /// <summary>一行内的小按钮，宽度按文字量算（不写死 —— 见 <see cref="SettingsTheme.MeasureW"/> 的理由）。</summary>
+        private Button SmallButtonAt(string text, int left, bool primary = false)
+        {
+            var b = SmallButton(text, Math.Max(64, SettingsTheme.MeasureW(text, SettingsTheme.Body) + 24), primary);
+            b.Left = left;
+            return b;
+        }
+
+        /// <summary>刷新两个内置平台的卡片状态。四档色的口径与旧余额窗一致（理由见那里的长注释）：
+        /// ① 凭据在 且 续期已装且**本会话已生效** = 绿（真的不用管了）
+        /// ② 凭据在 但 续期没装 / Trae 重启后还没补投 = 琥珀（现在读数正常，将来会坏 —— 最该被看见的那格）
+        /// ③ 没凭据 = 灰
+        /// ⚠ 关键是第 ② 档：**「磁盘上装得好好的」≠「现在真的在生效」**。Trae 启动时不加载用户扩展，
+        ///   所以每次 Trae 重启后磁盘上的副本都是哑的；若还显示"已启用"，用户会一直不去看它，
+        ///   直到 14 天后 401 才发现。判据是扩展自己那份日志的 mtime 有没有晚于 Trae 的启动时刻。</summary>
+        private void RefreshBalanceBuiltins()
+        {
+            if (_balTraeState == null) return;
+            var pal = SettingsTheme.Pal;
+            var slots = StatusProbe.SecretSlots();
+            var ext = TraeExtInstaller.Inspect();
+            bool? live = TraeExtInstaller.SessionLive();
+            bool needRefill = ext.State == TraeExtInstaller.State.Installed && live == false;
+            bool auto = _w.Cfg != null && _w.Cfg.TraeExtAuto;
+            // 副标题 ＝ 固定说明 ＋ 一句**短**后缀（只有异常档才加）。
+            // ⚠⚠ 后缀必须短：这一行的宽度被「状态文字 + 两颗按钮」压着，长句会把副标题挤成
+            //   每行几个字的竖排窄条（第一版把整句 `ShortLabel` 拼上来，实测就是这样）。
+            //   完整解释在 ToolTip 里（下面 `ext.Detail` 那一段），不占这一行。
+            string suffix = "";
+            if (slots[0].exists)
+            {
+                if (ext.State == TraeExtInstaller.State.NoSource) suffix = "　·　桌宠缺扩展文件";
+                else if (ext.State == TraeExtInstaller.State.NoTrae) suffix = "　·　未发现 Trae";
+                else if (ext.State == TraeExtInstaller.State.NotInstalled) suffix = "　·　续期扩展未装";
+                else if (ext.State == TraeExtInstaller.State.Outdated) suffix = "　·　扩展待更新";
+                else if (needRefill) suffix = auto ? "　·　重启过，等自动补投" : "　·　重启过，需点安装";
+            }
+            _balTraeSub.Text = TraeSubBase + suffix;
+            _balTraeState.Text = slots[0].exists ? "● 已配置" : "○ 未配置";
+            _balTraeState.ForeColor = !slots[0].exists ? pal.Muted
+                : (ext.State == TraeExtInstaller.State.Installed && !needRefill ? pal.Good : pal.Warn);
+            _balTraeState.Tag = slots[0].path + "\n" + ext.Detail
+                + (ext.State == TraeExtInstaller.State.Installed
+                   ? "\n本会话：" + (live == true ? "已生效" : live == false ? "还没跑过" : "判不了（Trae 可能没在运行）")
+                     + "\n自动补投：" + (_w.Cfg == null ? "（这个窗口没接配置）" : _w.Cfg.TraeExtAuto ? "开" : "关")
+                   : "")
+                + "\n最近一次自检：" + (TraeExtAuto.LastNote ?? "（还没跑过）");
+            var tip = _balTip;
+            tip.SetToolTip(_balTraeState, (string)_balTraeState.Tag);
+            tip.SetToolTip(_balTraeSub, (string)_balTraeState.Tag);
+
+            _balWbState.Text = slots[1].exists ? "● 已配置" : "○ 未配置";
+            _balWbState.ForeColor = slots[1].exists ? pal.Good : pal.Muted;
+            tip.SetToolTip(_balWbState, slots[1].path);
+            tip.SetToolTip(_balWbSub, slots[1].path);
+
+            LayoutBuiltinRow(_balTraeRow);
+            LayoutBuiltinRow(_balWbRow);
+            // ⚠ 状态文字的长短会改变副标题的可用宽度 ⇒ 行高可能变 ⇒ **卡片高度必须跟着重算**。
+            //   只调 `LayoutBuiltinRow` 不够：它改的是行自己的 Height，而卡片高度是 `RelayoutCard`
+            //   算出来的、只在窗口 Resize 时跑一次（"状态文字变了但卡片还是旧高度"⇒ 最后一行
+            //   被排到卡片外，看起来像"这行没了"）。
+            var card = _balTraeRow.Parent as Card;
+            if (card != null) RelayoutCard(card);
+
+        }
+
+        /// <summary>Trae 那张卡副标题的固定部分（短后缀在 <see cref="RefreshBalanceBuiltins"/> 里拼）。</summary>
+        private const string TraeSubBase = "读取可用积分（总额 − 已用）｜ 14 天到期，靠扩展自动续期";
+
+        private void RefreshBalanceList()
+        {
+            if (_balList == null) return;
+            int old = _balList.SelectedIndex;
+            _balList.BeginUpdate();
+            _balList.Items.Clear();
+            if (_balItems.Count == 0)
+                _balList.Items.Add("还没有自定义接口。Trae / WorkBuddy 已在上方单独配置。");
+            else
+                foreach (var s in _balItems) _balList.Items.Add(s);
+            _balList.EndUpdate();
+            if (old >= 0 && old < _balList.Items.Count) _balList.SelectedIndex = old;
+            else if (_balItems.Count > 0) _balList.SelectedIndex = 0;
+        }
+
+        /// <summary>列表自绘。⚠ 两条硬约束：
+        /// ① **退化矩形直接返回** —— GDI+ 在宽或高 ≤ 0 的矩形上抛 `ArgumentException`，
+        ///    那就是屏幕上红叉的根因（本项目已经在版式判据里栽过一次）。
+        /// ② 一律走 `TextRenderer`（GDI），与文件里其它量/画文字的地方同一条口径。</summary>
+        private void BalListDrawItem(object sender, DrawItemEventArgs e)
+        {
+            var pal = SettingsTheme.Pal;
+            var b = e.Bounds;
+            if (e.Index < 0 || e.Index >= _balList.Items.Count) return;
+            if (b.Width <= 0 || b.Height <= 0) return;
+
+            bool sel = (e.State & DrawItemState.Selected) != 0;
+            using (var br = new SolidBrush(sel ? pal.AccentSoft : pal.Field))
+                e.Graphics.FillRectangle(br, b);
+
+            BalanceSource src = e.Index < _balItems.Count ? _balItems[e.Index] : null;
+            if (src == null)
+            {
+                TextRenderer.DrawText(e.Graphics, "还没有自定义接口。Trae / WorkBuddy 已在上方单独配置。",
+                    SettingsTheme.Small, new Rectangle(b.Left + SettingsTheme.GapSm, b.Top, Math.Max(1, b.Width - SettingsTheme.GapSm * 2), b.Height),
+                    pal.Faint, TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                return;
+            }
+
+            int h1 = SettingsTheme.LineH(SettingsTheme.BodyBold);
+            // 状态徽章（右侧）先算宽度，免得第一行压到它上面。
+            string badge;
+            Color bc;
+            BalanceCell cell;
+            if (_balTested != null && _balTested.TryGetValue(src.Name, out cell))
+            {
+                badge = cell.Ok ? "✓ " + cell.Value.ToString("0.##") + (string.IsNullOrEmpty(cell.Unit) ? "" : " " + cell.Unit)
+                                : "✕ " + cell.Error;
+                bc = cell.Ok ? pal.Good : pal.Bad;
+            }
+            else
+            {
+                bool secretOk = string.IsNullOrWhiteSpace(src.SecretFile) || File.Exists(BalanceSources.ResolveSecret(src.SecretFile));
+                bool hasSecretRef = !string.IsNullOrWhiteSpace(src.SecretFile);
+                badge = !secretOk ? "凭据缺失"
+                    : hasSecretRef ? (src.Enabled ? "凭据已保存 · 待测试" : "凭据已保存 · 已停用")
+                    : (src.Enabled ? "待测试" : "已停用");
+                bc = secretOk ? pal.Muted : pal.Bad;
+            }
+            int bw = SettingsTheme.MeasureW(badge, SettingsTheme.Small) + SettingsTheme.GapSm;
+
+            int textW = Math.Max(40, b.Width - SettingsTheme.GapSm * 2 - bw - SettingsTheme.GapSm);
+            TextRenderer.DrawText(e.Graphics,
+                (src.Enabled ? "" : "[停用] ") + (string.IsNullOrEmpty(src.Name) ? "未命名来源" : src.Name),
+                SettingsTheme.BodyBold,
+                new Rectangle(b.Left + SettingsTheme.GapSm, b.Top + SettingsTheme.GapXs, textW, h1),
+                src.Enabled ? pal.Text : pal.Muted,
+                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+
+            string host = "URL 未填写"; Uri u;
+            if (Uri.TryCreate(src.Url, UriKind.Absolute, out u)) host = u.Host;
+            TextRenderer.DrawText(e.Graphics,
+                (src.Method ?? "GET") + "  ·  " + host + "  ·  " + (src.PathExpr ?? ""),
+                SettingsTheme.Small,
+                new Rectangle(b.Left + SettingsTheme.GapSm, b.Top + SettingsTheme.GapXs + h1,
+                              textW, Math.Max(1, b.Height - SettingsTheme.GapXs - h1)),
+                pal.Faint,
+                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+
+            TextRenderer.DrawText(e.Graphics, badge, SettingsTheme.Small,
+                new Rectangle(b.Right - bw, b.Top, bw, b.Height), bc,
+                TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        }
+
+        private BalanceSource BalSelected()
+        {
+            int i = _balList == null ? -1 : _balList.SelectedIndex;
+            return (i >= 0 && i < _balItems.Count) ? _balItems[i] : null;
+        }
+
+        private void BalSetStatus(string text, Color color)
+        {
+            if (_balStatus == null) return;
+            _balStatus.Text = text;
+            _balStatus.ForeColor = color;
+            // ⚠⚠ 状态文字**会变长**（测试结果里带着服务端返回的错误原文）⇒ 必须重算高度、
+            //   并让卡片跟着长。不重算的话长出来的那部分被裁——那正是 `textNotClipped`
+            //   这条判据存在的理由（它只在构造期量一次，抓不到"运行后才变长"的这种情况）。
+            int w = _balStatus.Width;
+            if (w > 0)
+            {
+                _balStatus.Height = SettingsTheme.TextBlockH(text ?? "", _balStatus.Font, w);
+                var card = _balStatus.Parent as Card;
+                if (card != null) RelayoutCard(card);
+            }
+        }
+
+        /// <summary>切换「Trae 重启后自动补投」。**立刻落盘**，且写进桌宠**正在用的那份** `Cfg`
+        /// ⇒ 不必重启桌宠，下一拍自检就按新值走。
+        /// ⚠ 关掉时要把「会怎样」说清楚：它等于回到手点按钮，而不是"功能没了"（按钮一直在）。</summary>
+        private void BalSetAuto(bool on)
+        {
+            if (_w.Cfg == null) { BalSetStatus("这个窗口没有接上桌宠配置，改不了这一项。", SettingsTheme.Pal.Warn); return; }
+            _w.Cfg.TraeExtAuto = on;
+            _w.Cfg.Save();
+            BalSetStatus(on
+                ? "已开启：Trae 每次重启后，桌宠会自动补投一份新副本（不必你再点按钮）。"
+                : "已关闭：Trae 重启后需要你点一次「安装同步扩展」才会恢复自动续期。",
+                SettingsTheme.Pal.Muted);
+            RefreshBalanceBuiltins();
+        }
+
+        /// <summary>把「Trae 令牌同步扩展」投放到 Trae 的扩展目录（契约见 trae-ext/README.md）。
+        /// ⚠ 往**别的应用**的目录里写东西必须由用户点一下 —— 不静默发生。</summary>
+        private void InstallTraeExt()
+        {
+            var pal = SettingsTheme.Pal;
+            var st = TraeExtInstaller.Inspect();
+            if (st.State == TraeExtInstaller.State.NoSource)
+            { BalSetStatus("桌宠缺少扩展文件：" + st.Detail, pal.Bad); return; }
+            if (!st.HasTrae)
+            { BalSetStatus("没找到 Trae 的扩展目录 —— 先启动一次 Trae 并登录，再点这里。", pal.Bad); return; }
+            // ⚠ 这里**故意没有**「已经是最新就不装」的短路 —— 每次投放都是一份**新目录名**的副本，
+            //   而"投放一个新目录"正是让 Trae 当场加载它的唯一办法（Trae SOLO CN 启动时不扫用户扩展目录）。
+            //   那个短路曾把"重启后已失效"的扩展显示成"已启用"，用户点了没反应还以为一切正常。
+            string ask = (st.State == TraeExtInstaller.State.Outdated
+                    ? "Trae 里已有 " + TraeExtInstaller.OurFolders(st.ExtDir).Count + " 份同步扩展副本，"
+                      + "这次会再投放一份新的（" + TraeExtInstaller.Version + " 版）。\n\n"
+                    : "将把「Trae 令牌同步扩展」装进：\n" + st.ExtDir + "\n\n")
+                + "它做且只做一件事：**Trae 运行中**被加载时，把当前令牌写进阿助的凭据文件，"
+                + "让积分在 14 天到期后自动续上，不必再手工粘贴。\n"
+                + "不抓包、不联网、不读进程内存；只改 authorization 一行，改前留 .bak-autosync。\n\n"
+                + "若凭据文件本来不存在，会先准备一份骨架（那一行仍由扩展来填）。\n\n"
+                + TraeExtInstaller.RestartHint + "\n\n确定继续吗？";
+            if (MessageBox.Show(this, ask, "安装 Trae 同步扩展", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+            string credPath, credNote;
+            TraeExtInstaller.EnsureCredentialSkeleton(out credPath, out credNote);
+
+            string detail;
+            string err = TraeExtInstaller.Install(out detail);
+            if (err != null) BalSetStatus(err, pal.Bad);
+            else BalSetStatus(credNote + " " + detail, pal.Good);
+            RefreshBalanceBuiltins();
+        }
+
+        private void BalAddEdit(BalanceSource src)
+        {
+            if (src == null && _balList != null && _balList.SelectedIndex < 0 && _balItems.Count > 0)
+            { BalSetStatus("先在上面选一个来源，再点「编辑」。", SettingsTheme.Pal.Muted); return; }
+
+            using (var dlg = new SourceEditorForm(src))
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                if (src == null) _balItems.Add(dlg.Result);
+                else _balItems[_balItems.IndexOf(src)] = dlg.Result;
+                _balDirty = true;
+                if (dlg.CredentialSaved)
+                    BalSetStatus("凭据已安全保存；还要点「保存余额配置」提交来源设置。", SettingsTheme.Pal.Good);
+                else
+                    BalSetStatus("有未保存的修改 —— 点「保存余额配置」落盘。", SettingsTheme.Pal.Muted);
+            }
+            RefreshBalanceList();
+        }
+
+        private void BalDuplicate()
+        {
+            var s = BalSelected(); if (s == null) return;
+            var c = CloneBalance(s); c.Name += "（副本）"; c.Enabled = false;
+            _balItems.Add(c); _balDirty = true;
+            BalSetStatus("已复制一份（默认停用）—— 点「保存余额配置」落盘。", SettingsTheme.Pal.Muted);
+            RefreshBalanceList();
+        }
+
+        private void BalToggle()
+        {
+            var s = BalSelected(); if (s == null) return;
+            s.Enabled = !s.Enabled; _balDirty = true;
+            BalSetStatus("有未保存的修改 —— 点「保存余额配置」落盘。", SettingsTheme.Pal.Muted);
+            RefreshBalanceList();
+        }
+
+        private void BalDelete()
+        {
+            var s = BalSelected(); if (s == null) return;
+            if (MessageBox.Show(this, "从列表中移除“" + s.Name + "”？\n凭据文件会保留，防止误删。",
+                "删除余额源", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            _balItems.Remove(s); _balDirty = true;
+            BalSetStatus("有未保存的修改 —— 点「保存余额配置」落盘。", SettingsTheme.Pal.Muted);
+            RefreshBalanceList();
+        }
+
+        private bool BalSave()
+        {
+            var pal = SettingsTheme.Pal;
+            if (!_balLoadOk)
+            {
+                MessageBox.Show(this, "原配置读取失败。这一栏不会覆盖它。", "无法保存", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+            var errors = _balItems.Where(x => x.Enabled).SelectMany(x => BalanceSources.Validate(x).Select(e => x.Name + "：" + e)).ToList();
+            if (errors.Count > 0)
+            {
+                MessageBox.Show(this, string.Join("\n", errors), "请检查配置", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+            if (_balItems.Any(BalanceSources.HasSensitiveInlineHeaders))
+            {
+                MessageBox.Show(this, "检测到 cookie / authorization 仍写在普通请求头中。请编辑该来源，把敏感头移到「凭据」框。",
+                    "凭据未隔离", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+            try
+            {
+                BalanceSources.Save(_balItems, BalanceSources.ConfigPath());
+                _w.ReloadBalanceSources();
+                _balDirty = false;
+                BalSetStatus("已保存；下次打开状态气泡立即使用新配置。", pal.Good);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "保存失败：" + ex.Message, "余额配置", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return false;
+            }
+        }
+
+        private async void BalTestAll()
+        {
+            var pal = SettingsTheme.Pal;
+            var errors = _balItems.Where(x => x.Enabled).SelectMany(x => BalanceSources.Validate(x).Select(e => x.Name + "：" + e)).ToList();
+            if (errors.Count > 0)
+            {
+                MessageBox.Show(this, string.Join("\n", errors), "无法测试", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            _balTestBtn.Enabled = false; _balTestBtn.Text = "正在测试…";
+            BalSetStatus("正在请求已启用的余额接口。", pal.Muted);
+            try
+            {
+                var probe = new StatusProbe { CustomSources = _balItems.Where(x => x.Enabled).Select(CloneBalance).ToList() };
+                // force=true：面板上「测试全部」是用户主动要一次真结果，穿透浏览器通道的节流。
+                var r = await probe.CheckAsync(true);
+                var slots = StatusProbe.SecretSlots();
+                string traeTxt = r.TraeOk ? "Trae ✓ " + Math.Round(r.TraeAvailable).ToString("0")
+                    : (string.IsNullOrEmpty(r.TraeError) ? "Trae ○ 未配置" : "Trae ✕ " + r.TraeError);
+                string wbTxt = r.WorkbuddyOk ? "WorkBuddy ✓ " + Math.Round(r.WorkbuddyRemain).ToString("0")
+                    : (string.IsNullOrEmpty(r.WorkbuddyError) ? "WorkBuddy ○ 未配置" : "WorkBuddy ✕ " + r.WorkbuddyError);
+
+                _balTested = r.DynamicRows.GroupBy(x => x.Name).ToDictionary(x => x.Key, x => x.Last());
+                RefreshBalanceList();
+                bool ok = (r.TraeOk || !slots[0].exists) && (r.WorkbuddyOk || !slots[1].exists) && r.DynamicRows.All(x => x.Ok);
+                BalSetStatus(traeTxt + "　｜　" + wbTxt + "　——　"
+                    + (ok ? "已配置的来源均可用。" : "有来源需要处理（见上方每行右侧的标记）。"),
+                    ok ? pal.Good : pal.Bad);
+            }
+            catch (Exception ex) { BalSetStatus("测试失败：" + ex.Message, pal.Bad); }
+            finally { _balTestBtn.Text = "测试全部"; _balTestBtn.Enabled = true; }
+        }
+
+        private void OpenBalanceCredential(string platform, string file, params string[] required)
+        {
+            using (var dlg = new CredentialEditorForm(platform, file, required))
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                RefreshBalanceBuiltins();
+                _w.ReloadBalanceSources();
+                BalSetStatus(platform + " 凭据已更新，可点「测试全部」验证。", SettingsTheme.Pal.Good);
+            }
+        }
+
+        /// <summary>浏览器登录取凭据（WorkBuddy 专用）。成功时窗口内部就带了一次真实回测，
+        /// 所以这里只负责刷新卡片与气泡 —— 气泡的余额有 60 秒缓存，不主动丢弃的话最长一分钟仍显示旧的 401。
+        /// ⚠⚠ 这个窗口仍是 **WPF** 的（它托管 WebView2，重写风险与收益不成比例）。
+        ///   在 WinForms 里开它必须做两件事，少一件就会出怪事：
+        ///   ① 用 `WindowInteropHelper.Owner` 把 owner 设成**本 WinForms 窗体**（WPF 的 `Owner`
+        ///      属性只收 WPF Window，直接赋 `this` 编译不过）；
+        ///   ② 自己 `EnableWindow(false)` —— WPF 的模态性只对 WPF 那一层有效，
+        ///      不自己禁用宿主的话，登录窗开着时设置面板仍可点。</summary>
+        private void OpenBrowserLogin()
+        {
+            var dlg = new CredentialBrowserWindow(
+                "WorkBuddy 积分",
+                StatusProbe.WorkBuddySecretFile,
+                CredentialCapture.WorkbuddyCapturePattern,
+                CredentialCapture.WorkbuddyLoginUrl,
+                CredentialCapture.WorkbuddyBalanceUrl,
+                _w.ReloadBalanceSources);
+            new System.Windows.Interop.WindowInteropHelper(dlg).Owner = Handle;
+            bool wasEnabled = Native.DisableOwner(Handle);
+            try { dlg.ShowDialog(); }
+            finally { Native.RestoreOwner(Handle, wasEnabled); }
+            RefreshBalanceBuiltins();
+            if (dlg.Saved) BalSetStatus("WorkBuddy 凭据已从浏览器获取；可点「测试全部」复核。", SettingsTheme.Pal.Good);
+        }
+
+        private static BalanceSource CloneBalance(BalanceSource s) => new BalanceSource
+        {
+            Name = s.Name, Url = s.Url, Method = s.Method, PathExpr = s.PathExpr, Unit = s.Unit,
+            Enabled = s.Enabled, SecretFile = s.SecretFile, HeadersText = s.HeadersText, Body = s.Body,
+        };
+
         private void BuildPageAbout()
         {
             var flow = BeginPage("关于与位置", "出问题时你会想知道的两件事：东西在哪、怎么自证。");
@@ -940,15 +1613,10 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             FinishCard(c1);
 
             var c2 = BeginCard(flow, "余额来源");
-            AddRow(c2, Note("Trae / WorkBuddy 积分与自定义余额接口是另一套较复杂的界面（多来源列表 + 凭据隔离），"
-                          + "单独放在这个窗里。", SettingsTheme.Pal.Muted));
+            AddRow(c2, Note("Trae / WorkBuddy 积分与自定义余额接口都在「" + BalancePageTitle + "」那一栏 —— "
+                          + "凭据隔离、测试与保存也在那儿。", SettingsTheme.Pal.Muted));
             var btnRow = new Panel { Height = 34, BackColor = SettingsTheme.Pal.Card };
-            var bal = new Button
-            {
-                Text = "打开余额配置…", Location = new Point(0, 2), Width = 150, Height = 30,
-                FlatStyle = FlatStyle.Flat, BackColor = SettingsTheme.Pal.Field, ForeColor = SettingsTheme.Pal.Text,
-            };
-            bal.FlatAppearance.BorderColor = SettingsTheme.Pal.Line;
+            var bal = SmallButtonAt("去「" + BalancePageTitle + "」", 0);
             bal.Click += (s, e) => OpenBalance();
             btnRow.Controls.Add(bal);
             AddRow(c2, btnRow);
@@ -1064,87 +1732,27 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             return t;
         }
 
-        /// <summary>普通说明段（可换行，高度自适应 —— 不再写死 44 导致截字）。
+        /// <summary>普通说明段（可换行，尺寸自己量 —— 见 <see cref="SettingsTheme.TextLabel"/>）。
         ///
-        /// ⚠⚠ **为什么不用 `AutoSize = true`**（真实事故，2026-09-20，查了很久）：
-        ///   原先写的是 `AutoSize = true` + `MaximumSize = (宽, 0)`，靠 `Label.AdjustSize()`
-        ///   在挂上父容器（`OnParentChanged`）时自己量文本。这条路径**会间歇性地**抛
-        ///     `ExternalException: A generic error occurred in GDI+.`
-        ///   （栈：`Label.OnParentChanged → AdjustSize → GetPreferredSizeCore → MeasureString`）
-        ///   在 `--settings` 里它表现为**启动即崩**（`RunSettings` 里先起了 WPF 渲染器与
-        ///   PetWindow，之后才构造面板）；在 `--settingstest` 里却一直是绿的 —— 因为它只
-        ///   构造一次面板，撞不上那个窗口。
+        /// ⚠⚠ **为什么不用 `AutoSize = true`**（真实事故，2026-09-20，查了很久；完整实测记录
+        ///   连同已排除的解释一起搬到了 <see cref="SettingsTheme.TextLabel"/> 的注释里，
+        ///   改字号/改量法之前先读那里）：那条路（`Label.AdjustSize` → GDI+ `MeasureString`）
+        ///   会**间歇性**抛 `ExternalException: A generic error occurred in GDI+.`，
+        ///   在 `--settings` 里表现为**启动即崩**，而 `--settingstest` 一直全绿。
+        ///   结论：成因在框架内部 ⇒ 纪律是「别再走这条路径」，自己量一次、给死尺寸。
         ///
-        ///   已排除的解释（都实测过，别再往回猜）：
-        ///     ✗ GDI 句柄配额：异常时全进程只有 **38** 个 GDI 对象（上限约 10000）。
-        ///     ✗ 特定文本/字符：把真实文本、⚠、`%LOCALAPPDATA%`、全角括号、`——` 逐个喂进去，全过。
-        ///     ✗ `MaximumSize` 取值：0 / 1 / 10 / 700 / int.MaxValue / 负数，全过。
-        ///     ✗ 派生字体 `new Font(Body, Bold)`：连造 5 次全过。
-        ///     ✗ 纯 WPF Window 先 Show/Hide：过。
-        ///     ✗ 重复运行计数：**间歇性**，同一条命令有时过有时不过（约 1/10 失败）。
-        ///
-        ///   ⇒ 结论：这是 `Label.AutoSize` 在「同线程已有 WPF 渲染器」时对 GDI+ 文本度量的
-        ///     一种脆弱依赖，成因在框架内部，不在我们的文本或字体里。**判据是「别再走这条路径」**：
-        ///     我们自己拿 `Graphics.MeasureString` 量一次、给死尺寸，`AutoSize = false`。
-        ///     量不准也不会有异常 —— 最坏是少一行字，而不是整个窗口起不来。</summary>
-        private Label Note(string text, Color color)
+        /// ⚠ 2026-10-01：量文字与造文字盒的**实现**搬去了 <see cref="SettingsTheme"/> ——
+        ///   因为「余额与凭据」那两个弹窗（`BalanceEditorForms.cs`）也要用同一套，
+        ///   在本文件里再留一份就是**第二个会漂的口径**（本仓老毛病）。这里只留转发。</summary>
+        private static Label Note(string text, Color color)
         {
-            return MakeTextLabel(text, color, SettingsTheme.Small);
-        }
-
-        /// <summary>造一个「自己量好尺寸」的说明段：绕开 <see cref="Note"/> 里说明的那条脆弱路径。
-        /// 宽度按卡片可用宽度封顶，高度按换行后的真实行数给 —— 显式尺寸，不靠框架自适应。</summary>
-        private static Label MakeTextLabel(string text, Color color, Font font)
-        {
-            var l = new Label
-            {
-                Text = text ?? "",
-                AutoSize = false,
-                ForeColor = color,
-                Font = font,
-                BackColor = Color.Transparent,
-            };
-            return l;
-        }
-
-        /// <summary>把说明段的宽高定下来（在它在卡片里、卡片有宽度之后调用）。
-        /// 量文本这一步包了 try —— 量不出来（返回空）时退化成「一行高」，绝不让异常冒出去。</summary>
-        private static void FitTextLabel(Label l, int width)
-        {
-            if (width < 40) width = 40;                 // 卡片还没排过版时不写死一个可疑的小值
-            SizeF need;
-            try
-            {
-                using (var bmp = new Bitmap(1, 1))
-                using (var g = Graphics.FromImage(bmp))
-                {
-                    // ⚠ 用 TextRenderer（GDI，非 GDI+）—— 它对「同线程有 WPF 渲染器」不敏感，
-                    //   正是上面那条脆弱路径换掉之后要用的东西。
-                    // ⚠⚠ 这一步曾是「打开设置卡 16.5 秒」的量测点（2026-09-20 事故）：
-                    //   病灶不在 MeasureText 本身，而在喂给它的字符串有 2.68 亿字符。
-                    //   ⇒ 纪律：**量文本的地方要假设文本可能很长**，谁生产这个字符串谁负责消毒
-                    //     （已落在 PetConfig.IsPoisonedPath + Load 自愈里）。
-                    need = TextRenderer.MeasureText(g, l.Text, l.Font,
-                        new Size(width, int.MaxValue), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
-                }
-            }
-            catch
-            {
-                need = new SizeF(width, l.Font.Height);
-            }
-            l.Width = Math.Min(width, Math.Max(20, (int)Math.Ceiling(need.Width)));
-            // ⚠⚠ 高度**不要**用上面那个 `need.Height`：它带 `NoPadding`，每行比 Label 实际
-            //   排出来矮约 **4px**（本机 150% 缩放）。拿它定高，多行说明的**最后一行会被裁掉** ——
-            //   2026-09-29 加 `settingstest.textNotClipped` 判据时一次性量出 **13 段**说明全中
-            //   （「填写规则」那段实得 286、需要 378，少了两行多）。
-            //   ⇒ 交给 `SettingsTheme.TextBlockH`：它按 `LineH`（＝框架自己排一行要多少）累加行数。
-            l.Height = SettingsTheme.TextBlockH(l.Text, l.Font, l.Width);
+            return SettingsTheme.TextLabel(text, color, SettingsTheme.Small);
         }
 
         /// <summary>等宽字体的说明段（填法示例、路径、命令行 —— 对齐才好读）。</summary>
-        private Label NoteBox(string text, Color color)
+        private static Label NoteBox(string text, Color color)
         {
-            return MakeTextLabel(text, color, SettingsTheme.Mono);
+            return SettingsTheme.TextLabel(text, color, SettingsTheme.Mono);
         }
 
         // ==================================================================================
@@ -1208,7 +1816,12 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             {
                 foreach (Control k in c.Controls)
                 {
-                    if (k is Toggle || k is TextBox || k is NumericUpDown || k is ComboBox)
+                    // ⚠⚠ 「余额与凭据」那一栏的自动补投勾选框**不算脏**：它是即时落盘的
+                    //   （勾完下一拍自检就按新值走，见 BalSetAuto）。把它接进来会让底部状态条
+                    //   一直显示「有未保存的修改」，而用户点「保存并生效」也存不了它 —— 那句
+                    //   提示就成了假话（本仓最忌讳的那种：状态条不说实话）。
+                    if (ReferenceEquals(k, _balAuto)) { /* 既不接处理器，也不往下走 */ }
+                    else if (k is Toggle || k is TextBox || k is NumericUpDown || k is ComboBox)
                     {
                         var ctl = k;
                         if (ctl is Toggle tg) tg.CheckedChanged += CheckChanged;
@@ -1285,9 +1898,37 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
 
         private void OpenBalance()
         {
-            // 传桌宠**正在用的** `Cfg`：自动补投开关要写进同一个实例才对下一拍生效。
-            var panel = new BalanceSettingsWindow(_w.ReloadBalanceSources, _w.Cfg);
-            panel.Show();
+            // 2026-10-01 起余额不再是独立窗口，而是本窗的一栏 ⇒ 这里只负责「带用户过去」。
+            ShowPageByTitle(BalancePageTitle);
+        }
+
+        /// <summary>切到某一栏（按**标题**找，不按下标）。
+        /// ⚠ 不按下标的理由：栏数会随版本增删（本轮整合刚从 6 栏变成 7 栏），下标就是会漂的那个量；
+        ///   而「按下标找页」正是本仓那一族假绿的老病灶。</summary>
+        private void ShowPageByTitle(string title)
+        {
+            for (int i = 0; i < _navItems.Count && i < _pages.Count; i++)
+                if (_navItems[i].Title == title) { ShowPage(i); return; }
+        }
+
+        /// <summary>给判据用（**只读**）：余额栏「自动补投」勾选框现在的状态。
+        /// 存在只为一件事 —— 断言它的**初值真的绑到了配置上**。「控件写了但没绑 / 绑反了」
+        /// 肉眼看不出来，而它恰好是"用户勾了没生效"那类故障的源头。</summary>
+        internal bool BalanceAutoDeployChecked { get { return _balAuto != null && _balAuto.Checked; } }
+
+        /// <summary>给判据用（**只读**）：勾选框是否可操作（没有配置可写时应当置灰，而不是假装能改）。</summary>
+        internal bool BalanceAutoDeployEnabled { get { return _balAuto != null && _balAuto.Enabled; } }
+
+        /// <summary>给判据用（**只读**）：余额列表里的行数。空列表会有一个占位行 ⇒ 断言时要知道这件事。</summary>
+        internal int BalanceRowCount { get { return _balList == null ? -1 : _balList.Items.Count; } }
+
+        /// <summary>给判据用：这个窗口里有没有叫这个名字的栏目。
+        /// ⚠ 它测的是「结构还在不在」——本轮把余额从独立窗口并进来，最容易出的错不是画错，
+        ///   而是**整合没做成**（栏没加上／被后来的人删了），那种情况下所有版式判据照样全绿。</summary>
+        internal bool HasPage(string title)
+        {
+            foreach (var it in _navItems) if (it.Title == title) return true;
+            return false;
         }
 
         private void RestoreDefaults()
@@ -1368,6 +2009,25 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             t.Tick += (s, e) => { t.Stop(); t.Dispose(); if (!IsDisposed) _saveBtn.Text = "保存并生效"; };
             t.Start();
 
+            // ⚠⚠ 余额那一栏是**独立保存**的（写 balances.json，不走这颗按钮）。用户按了这颗
+            //   「保存并生效」而那边还有没落盘的改动时，必须**当场说清楚并把他送过去**：
+            //   直接关窗会让那些改动静默消失，而状态条还写着「✓ 已保存并生效」——
+            //   那是本仓最忌讳的一句假话。
+            //   这里 return（不设 DialogResult）⇒ 模态窗不关，用户能接着去存。
+            if (_balDirty)
+            {
+                bool go = MessageBox.Show(this,
+                    "设置已保存。\n\n但「" + BalancePageTitle + "」那一栏还有没保存的改动 —— "
+                    + "它写的是另一份文件，这颗按钮管不了它。\n\n现在带你过去存一下？",
+                    "余额配置还没保存", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+                if (go)
+                {
+                    ShowPageByTitle(BalancePageTitle);
+                    BalSetStatus("⚠ 上面那些改动还没落盘 —— 点「保存余额配置」。", pal.Warn);
+                    return;
+                }
+            }
+
             DialogResult = DialogResult.OK;
         }
 
@@ -1382,6 +2042,14 @@ BuildPageSpeech();BuildPageModel();BuildPagePrivacy();BuildPageSummary();BuildPa
             if (_dirty && DialogResult != DialogResult.OK)
             {
                 if (MessageBox.Show(this, "还有没保存的修改，关闭就丢了。确定关闭吗？",
+                    "阿助设置", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                    e.Cancel = true;
+            }
+            // ⚠ 余额那一栏有**它自己那条**保存（写 balances.json，不走底部那颗按钮）⇒ 它的脏
+            //   必须单独问一次，否则关窗时那些改动会静默消失（旧余额窗就是为这件事挂了 Closing）。
+            if (!e.Cancel && _balDirty)
+            {
+                if (MessageBox.Show(this, "「" + BalancePageTitle + "」里还有没保存的改动，关闭就丢了。确定关闭吗？",
                     "阿助设置", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                     e.Cancel = true;
             }

@@ -759,29 +759,41 @@ namespace AzhuPet
                         ref pass, ref fail);
                 }
 
-                // ---- 余额配置窗口：构造冒烟 ＋「自动补投」勾选框的初值绑定（2026-10-01 加这一项时补）----
-                // ⚠⚠ 为什么值得单独测：这个窗口的构造期会走 `RefreshBuiltins()`，而它现在要
+                // ---- 设置面板的「余额与凭据」栏：构造冒烟 ＋「自动补投」勾选框的初值绑定 ----
+                // ⚠⚠ 为什么值得单独测：这一栏的构造期会调 `RefreshBalanceBuiltins()`，而它要
                 //   ① 读 Trae 的扩展目录 ② **枚举几百个进程**（判"本会话到底生效没有"）。
-                //   那里抛一次的症状是「用户点开余额配置就崩」，而**所有离线判据照样全绿** ——
+                //   那里抛一次的症状是「用户点开设置、切到余额那一栏就崩」，而**所有离线判据照样全绿** ——
                 //   因为它们都不建窗口。这就是本条存在的全部理由。
                 // ⚠ 只**构造**、不 Show：不创建可见窗口、不进消息循环。
                 // ⚠ 传自己造的 `PetConfig`：勾选框的回调会 `Save()`，绝不能落到用户真配置上
                 //   （`--balanceconfigtest` 已在 `AnyTest()` 里 ⇒ `RealWriteAllowed=false`，再加一道保险）。
+                // ⚠⚠ 2026-10-01 换落点：余额**不再是独立的 WPF 窗**，而是设置面板里的一栏
+                //   （`BalanceSettingsWindow.cs` 已随这次整合删除）。原来那三条断言里有两条只是换了对象，
+                //   第三条（"没接配置时勾选框置灰"）**随窗口一起退役** —— 设置面板一定有个可写的配置，
+                //   那条路径不存在了，留着就是测空气。替换它的是一条对着新结构的断言（栏目真的存在）。
                 try
                 {
-                    var wOff = new BalanceSettingsWindow(null, new PetConfig { TraeExtAuto = false });
-                    Check(!wOff.AutoDeployChecked,
-                          "自动补投勾选框：配置为关时未勾（防把初值写死成 true）", ref pass, ref fail);
-                    var wOn = new BalanceSettingsWindow(null, new PetConfig { TraeExtAuto = true });
-                    Check(wOn.AutoDeployChecked,
-                          "自动补投勾选框：配置为开时已勾（防把初值写死成 false）", ref pass, ref fail);
-                    var wNone = new BalanceSettingsWindow(null, null);
-                    Check(!wNone.AutoDeployEnabled,
-                          "没接配置时勾选框置灰（不假装能改）", ref pass, ref fail);
+                    using (var wOff = new SettingsWindow(new StubHost(new PetConfig { TraeExtAuto = false })))
+                    {
+                        Check(!wOff.BalanceAutoDeployChecked,
+                              "余额栏「自动补投」勾选框：配置为关时未勾（防把初值写死成 true）", ref pass, ref fail);
+                        Check(wOff.BalanceAutoDeployEnabled,
+                              "余额栏「自动补投」勾选框可操作（设置面板必有配置可写；旧窗口那条 cfg==null 的置灰路径已退役）",
+                              ref pass, ref fail);
+                        Check(wOff.HasPage(SettingsWindow.BalancePageTitle),
+                              "设置面板里确实有「" + SettingsWindow.BalancePageTitle + "」这一栏（防整合没做成／栏目被删）",
+                              ref pass, ref fail);
+                        Check(wOff.BalanceRowCount == 1,
+                              "余额栏列表在「没有自定义来源」时有一个占位行（不是一块空白）"
+                              + "，实得 " + wOff.BalanceRowCount + " 行", ref pass, ref fail);
+                    }
+                    using (var wOn = new SettingsWindow(new StubHost(new PetConfig { TraeExtAuto = true })))
+                        Check(wOn.BalanceAutoDeployChecked,
+                              "余额栏「自动补投」勾选框：配置为开时已勾（防把初值写死成 false）", ref pass, ref fail);
                 }
                 catch (Exception ex)
                 {
-                    Check(false, "余额配置窗口能构造出来（含自动补投勾选框）：" + ex.Message, ref pass, ref fail);
+                    Check(false, "设置面板能构造出来（含「余额与凭据」栏与自动补投勾选框）：" + ex.Message, ref pass, ref fail);
                 }
             }
             catch (Exception ex)
@@ -803,6 +815,23 @@ namespace AzhuPet
             }
             Console.WriteLine("余额配置测试：PASS " + pass + " / FAIL " + fail);
             return fail == 0 ? 0 : 1;
+        }
+
+        /// <summary>设置面板的**最小宿主**替身：只回一份配置，别的动作只记次数、不执行。
+        ///
+        /// ⚠ 为什么不用真的 `PetWindow`：那要先加载 GLB、起 WPF 渲染器 ——
+        ///   为了量一个勾选框的初值就把整条渲染链拉起来，是本末倒置（渲染链一坏，这条判据也跟着红，
+        ///   分不清是谁的错）。`SettingsWindow` 当初就是为这件事抽的 `ISettingsHost`
+        ///   （它对寄主只要求这 4 个成员）。</summary>
+        private sealed class StubHost : ISettingsHost
+        {
+            private readonly PetConfig _cfg;
+            public StubHost(PetConfig cfg) { _cfg = cfg; }
+            public PetConfig Cfg { get { return _cfg; } }
+            public int Applied, Sized, Reloaded;
+            public void ApplyConfig() { Applied++; }
+            public void SetSize(int idx) { Sized++; }
+            public void ReloadBalanceSources() { Reloaded++; }
         }
 
         private static void Check(bool ok, string name, ref int pass, ref int fail)

@@ -43,6 +43,36 @@ namespace AzhuPet
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
         [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool EnableWindow(IntPtr hWnd, bool enable);
+        [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hWnd);
+
+        /// <summary>把一个 WinForms 宿主窗**临时禁用**，好让一个 WPF 模态对话框真的模住它。
+        /// ⚠ 为什么要手工做：WPF 的 `Window.ShowDialog()` 只对 **WPF 那一层**模态 ——
+        ///   宿主是 WinForms 窗体时，登录窗开着，设置面板照样能被点（用户看到的是"两个模态窗"）。
+        ///   返回值是**原状态**，归还时必须用它、不要写死 true：原状态本来就是禁用的话，
+        ///   写死 true 等于替别人把它启用了。</summary>
+        public static bool DisableOwner(IntPtr hwnd)
+        {
+            bool was = true;
+            try
+            {
+                if (hwnd == IntPtr.Zero) return true;
+                was = IsWindowEnabled(hwnd);
+                EnableWindow(hwnd, false);
+            }
+            catch { }
+            return was;
+        }
+
+        /// <summary>归还 <see cref="DisableOwner"/> 借走的启用状态（幂等：原状态就是启用时无副作用）。</summary>
+        public static void RestoreOwner(IntPtr hwnd, bool wasEnabled)
+        {
+            try
+            {
+                if (hwnd != IntPtr.Zero && wasEnabled) EnableWindow(hwnd, true);
+            }
+            catch { }
+        }
         [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
         [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
         // 主动发消息：用来查询 WM_NCHITTEST 的**真值**。比"移动光标再看 LastHitKind"可靠 ——
