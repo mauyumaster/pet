@@ -66,6 +66,13 @@ namespace AzhuPet
         //   ⚠ 它**只**在「用户装过一次（目录里已有副本）」时才动 Trae 的目录 —— 没装过就永远不写。
         //   ⚠ 关掉它就等于回到"手点按钮"（按钮仍然在余额配置里）。
         public bool TraeExtAuto = true;
+        // ⚠⚠ 多 agent 任务计时读数（TRAE / WorkBuddy / Codex）：默认开。
+        //   它 tail 的是**本机这三个工具**的日志（%APPDATA%\TRAE*\logs / %USERPROFILE%\.workbuddy\logs /
+        //   %USERPROFILE%\.codex\sessions），全程本机、不发出去、也不碰 agent 本身。
+        //   默认开是因为「装了桌宠就想看到读数」；关掉＝**完全不读**这些日志、气泡流顶上也不显示
+        //   （见 PetWindow.StepAgentTimer）。⚠ 换机器时：路径会自动指到那个用户的 profile，无需配置；
+        //   但对方得**真的用**这三个工具，否则日志不存在、读数自然为空。
+        public bool TaskTimerOn = true;
         public double X = double.NaN, Y = double.NaN;   // 记住位置（物理像素）
 
         // 三档尺寸。宽高比固定 0.8：再窄就会因为「横向留白不足」把角色缩得比预期小。
@@ -105,6 +112,7 @@ namespace AzhuPet
                 c.Topmost = Bool(s, "topmost", c.Topmost);
                 c.NightDim = Bool(s, "nightDim", c.NightDim);
                 c.TraeExtAuto = Bool(s, "traeExtAuto", c.TraeExtAuto);
+                c.TaskTimerOn = Bool(s, "taskTimerOn", c.TaskTimerOn);
                 c.ShowTray = Bool(s, "showTray", c.ShowTray);
                 c.SpeechOn = Bool(s, "speechOn", c.SpeechOn);
                 c.SpeechLlm = Bool(s, "speechLlm", c.SpeechLlm);
@@ -177,6 +185,7 @@ namespace AzhuPet
                 sb.Append("  \"topmost\": ").Append(Topmost ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"nightDim\": ").Append(NightDim ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"traeExtAuto\": ").Append(TraeExtAuto ? "true" : "false").Append(",\r\n");
+                sb.Append("  \"taskTimerOn\": ").Append(TaskTimerOn ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"showTray\": ").Append(ShowTray ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"speechOn\": ").Append(SpeechOn ? "true" : "false").Append(",\r\n");
                 sb.Append("  \"speechLlm\": ").Append(SpeechLlm ? "true" : "false").Append(",\r\n");
@@ -540,6 +549,10 @@ namespace AzhuPet
         /// <summary>--no-beat-cap：**负对照** —— 去掉 AgentTaskTimer 心跳兜底的两条上限
         /// （静默窗口 ＋ 封顶判定），回到「心跳新鲜就一直算活着」，--agenttimertest 的 E4/E5 必须因此变红。</summary>
         public bool NoBeatCap;
+        /// <summary>--no-wb-sm：**负对照** —— 不发现 WorkBuddy 的**工作区状态机日志**
+        /// （`logs\<日期>\<工作区>__<hash>.log` 里的 `RUN_PREPARING`/`AGENT_ENDED`），
+        /// 退回「只看会话日志的 PROMPT_SENT/TURN_COMPLETED」，--agenttimertest 的 G1 必须因此变红。</summary>
+        public bool NoWbSm;
         /// <summary>--no-freq-clamp：**负对照** —— 跳过 <c>SpeechFreq</c> 的两条钳制（保底间隔 ≥ 开口冷却、
         /// 冷却不低到骚扰档），把配置里的分钟数原样当秒数用，--speaktest 的频率判据必须因此变红。</summary>
         public bool NoFreqClamp;
@@ -761,6 +774,7 @@ namespace AzhuPet
                     case "--old-openai-body": c.OldOpenAiBody = true; break;   // 负对照：见字段注释
                     case "--no-multiline": c.NoMultiline = true; break;        // 负对照：见字段注释
                     case "--no-beat-cap": c.NoBeatCap = true; break;           // 负对照：见字段注释
+                    case "--no-wb-sm": c.NoWbSm = true; break;                 // 负对照：见字段注释
                     case "--no-freq-clamp": c.NoFreqClamp = true; break;       // 负对照：见字段注释
                     case "--out": c.OutFile = Nxt(a, ref i); break;
                     case "--shot": c.ShotFile = Nxt(a, ref i); break;

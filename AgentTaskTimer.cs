@@ -6,6 +6,8 @@
 //              [StreamDomainService] Stream started  /  [StreamDomainService] Stream finalized
 //   WorkBuddy  %USERPROFILE%\.workbuddy\logs\<日期>\sdk\conversations\<会话ID>.log
 //              "input":"PROMPT_SENT"  /  "input":"TURN_COMPLETED"
+//              ＋ %USERPROFILE%\.workbuddy\logs\<日期>\<工作区>__<hash>.log（**主信号**，不封顶）
+//              [SessionRunStateMachine] … event=RUN_PREPARING  /  … event=AGENT_ENDED
 //   Codex      %USERPROFILE%\.codex\sessions\YYYY\MM\DD\rollout-*.jsonl
 //              "type":"task_started"  /  "type":"task_complete"  /  "type":"turn_aborted"
 //
@@ -85,6 +87,13 @@ namespace AzhuPet
         /// 正式路径上绝不开。</summary>
         public static bool NoBeatCap;
 
+        /// <summary>负对照（`--no-wb-sm`）：**不发现** WorkBuddy 的工作区状态机日志，
+        /// 退回「只看会话日志的 `PROMPT_SENT`/`TURN_COMPLETED`」。
+        /// ⚠ 存在的意义同 <see cref="OldCodex"/>：没有它，G1 的绿说明不了任何事 ——
+        ///   可能只是会话日志那条老通路碰巧通了。开着它 G1 必须红（见 AgentTimerTest 的 G 组）。
+        /// 正式路径上绝不开。</summary>
+        public static bool NoWbSm;
+
         private const double ScanEverySec = 5.0;          // 重新定位日志文件的节流（agent 重启会换目录）
         private const double ReadEverySec = 0.5;          // 增量读日志的节流
         private const double StaleSec = 2 * 3600;         // 单个任务跑超过 2 小时 ⇒ 当作残留
@@ -127,8 +136,29 @@ namespace AzhuPet
         // （10 MiB = 10485760，只差几十字节），且 mtime 冻结 —— 之后该会话**永久**不再落新事件。
         // ⚠ 不敢把 10 MiB 写死当判据 —— 那是从两个样本推出来的值，写偏了会在「日志本来就大、
         //   又真的静默」时误杀**真长任务**（而那恰恰是加心跳要救的场景）。
-        //   ⇒ 这里只取「够大」这一个弱条件，再配上「已过正常静默阈值」才认定它封顶。
+        //   ⇒ 这里只取「够大」这一个弱条件。
         private const long WbLogBigBytes = 8L * 1024 * 1024;
+
+        // ⚠⚠ 封顶日志的 mtime 冻结**不是**「还在跑」的证据（见 <see cref="WbLogBigBytes"/>），
+        //   所以它**不能**享用 <see cref="NoWriteSec"/> 的 900 s 静默兜底，只认这个短窗口。
+        //   取 180 s：心跳一跳 30–60 s，正常轮次里 `tool_call_update` 密到按秒写 ——
+        //   还在写 ⇒ 这一轮真在跑；一停写 ⇒ 立刻判死，悬空 `PROMPT_SENT` 几分钟内就消失。
+        private const double WbCappedGraceSec = 180;
+
+        // WorkBuddy 还有第二份、**不封顶**的日志：工作区状态机日志
+        //   `%USERPROFILE%\.workbuddy\logs\<日期>\<工作区目录名>__<hash>.log`
+        //   行形如 `[<本地时间>] [Info] [pid=N] [SessionRunStateMachine] transition | sessionId=<UUID> |
+        //   event=RUN_PREPARING | …`（一轮开始）与 `… event=AGENT_ENDED | …`（一轮结束）。
+        // ⚠⚠ 为什么必须加它：会话日志（`sdk\conversations\<会话>.log`）会**封顶在 ~10 MiB**，
+        //   封顶后该会话**永久**不再落 `PROMPT_SENT`/`TURN_COMPLETED` —— 读数从此整条消失
+        //   （2026-10-02 用户报「workbuddy 的任务计时显示消失了」）。工作区日志一直在写、不封顶，
+        //   是同一个会话更可靠的边界来源。会话日志那对边界串**原样保留**当兜底。
+        // ⚠ 一个工作区日志里会有**多条会话**（实测同一份里有 3 个 sessionId）⇒ 它像 TRAE 的
+        //   renderer.log 一样「一文件多会话」，会话号只能从行里的 `sessionId=` 取（见 SessionOf）。
+        // ⚠ 配额给到 5（而不是像会话日志那样 4）：同一目录里还有 `workbuddyMainThread__*`、
+        //   `unknown-workspace__*` 这类**没有状态机事件**的内部日志会一起被发现、一起抢配额，
+        //   留宽一点才不会把真正在跑的那个工作区的日志挤出去（在跑的任务另有 HasRunning 保底）。
+        private const int WbSmQuota = 5;                  // 最多同时盯几个工作区状态机日志
 
         private enum Agent { Trae, WorkBuddy, Codex }
 
@@ -140,6 +170,7 @@ namespace AzhuPet
             public Agent Agent;
             public string Tag;               // 文件级标签：TRAE 的 w1、WorkBuddy/Codex 的会话号片段
             public string SessId;            // **文件级**会话号：只有 Codex 有（取文件名里第一段 UUID）
+            public bool WbSm;                // 是不是 WorkBuddy 的**工作区状态机日志**（另一套边界串/时间戳，见 StampWbSm）
             public long Pos;                 // 已消费到的字节偏移
             public long Len;                 // 最后一次看到的**文件大小**（判「已封顶的大日志」，见 WbLogBigBytes）
             public string Carry;             // 上一段结尾那半行（换行还没来）
@@ -157,6 +188,10 @@ namespace AzhuPet
         {
             public Agent Agent;
             public string Tag;               // 多任务并存时用来区分（会话号片段）
+            // WorkBuddy 的会话号（＝心跳文件里的 `sessionId`）。⚠ 一份 WorkBuddy 状态可能由
+            // **两个**文件承载（封顶的会话日志 ＋ 不封顶的工作区状态机日志），心跳只按会话号认，
+            // 所以这里存下来（见 WbBeatAlive）。
+            public string SessId;
             // 承载这份状态的所有日志文件。TRAE / WorkBuddy 恒为 1 个；Codex 一个会话可能有好几个。
             public readonly HashSet<string> Paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             public long StartMs, EndMs;
@@ -197,6 +232,12 @@ namespace AzhuPet
             // WorkBuddy 的存活兜底（真心跳）—— 与日志发现同一节流（5 s），见 RefreshWbHeartbeats。
             try { RefreshWbHeartbeats(); } catch { }
 
+            // ⚠ `found` 里的 WriteUtc 来自 mtime（见 <see cref="Make"/>），而 mtime 可能**冻住**
+            //   （见 <see cref="ReadNew"/>）—— 已在盯的文件要以 `_src` 里那份**观测到的** WriteUtc 为准，
+            //   否则配额会按冻住的 mtime 把正在跑的会话挤出 keep，读数照样消失。
+            foreach (var s in found)
+                if (_src.TryGetValue(s.Path, out Source tracked)) s.WriteUtc = tracked.WriteUtc;
+
             // 按配额取「最后写入」最新的几个
             var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (Agent a in new[] { Agent.Trae, Agent.WorkBuddy, Agent.Codex })
@@ -204,6 +245,7 @@ namespace AzhuPet
                 var list = found.FindAll(s => s.Agent == a);
                 list.Sort((x, y) => y.WriteUtc.CompareTo(x.WriteUtc));
                 if (a == Agent.Codex) KeepCodex(list, keep);   // ⚠ Codex 按**会话**配额（见 KeepCodex）
+                else if (a == Agent.WorkBuddy) KeepWorkBuddy(list, keep);
                 else
                 {
                     int quota = Quota(a);
@@ -268,6 +310,22 @@ namespace AzhuPet
             }
         }
 
+        /// <summary>WorkBuddy 的配额：**会话日志与工作区状态机日志各占各的**。
+        /// ⚠ 不能合在一起按「最新写入」切：工作区日志几乎总在写（连空闲时都有零星几行），
+        ///   合在一起它们会把**真正带边界**的会话日志全挤出去；反过来，一个封顶后冻住的会话日志
+        ///   也会被工作区日志挤掉 —— 而它承载的那条会话状态还得靠它。
+        /// <paramref name="list"/> 已按最后写入时间降序。</summary>
+        private static void KeepWorkBuddy(List<Source> list, HashSet<string> keep)
+        {
+            int sm = 0, conv = 0;
+            foreach (Source s in list)
+            {
+                if (s.WbSm) { if (sm >= WbSmQuota) continue; sm++; }
+                else { if (conv >= WorkBuddyQuota) continue; conv++; }
+                keep.Add(s.Path);
+            }
+        }
+
         /// <summary>该文件下是否有「开始晚于结束」的会话（＝还在跑）。</summary>
         private bool HasRunning(string path)
         {
@@ -317,6 +375,36 @@ namespace AzhuPet
                     if (!Guid.TryParse(stem, out _)) continue;
                     outp.Add(Make(f, Agent.WorkBuddy, Head(stem, 4)));
                 }
+
+            // ---- 工作区状态机日志（**主信号**，见 WbSmQuota 那段）----
+            // ⚠ 与上面的会话日志**是两份不同的文件**：会话日志在 `sdk\conversations\`（会封顶），
+            //   工作区日志在日期目录直下（不封顶）。两者都收，边界由 Key 按**会话号**并成一份状态。
+            if (NoWbSm) return;                                   // 负对照：见 NoWbSm
+            foreach (string dir in WbSmDirs(root))
+            {
+                string[] files;
+                try { files = Directory.GetFiles(dir, "*__*.log"); } catch { continue; }
+                foreach (string f in files)
+                {
+                    Source s = Make(f, Agent.WorkBuddy, null);
+                    s.WbSm = true;        // ⚠ 必须标上：边界串／时间戳／会话号都走另一套（见 StampWbSm）
+                    outp.Add(s);
+                }
+            }
+        }
+
+        /// <summary>工作区状态机日志可能落在的目录：`logs\` 直下（旧布局）与每个**日期**目录
+        /// （`logs\2026-10-02\`）。⚠ 只认日期名，不枚举 `startup`/`update`/`sandbox` 那些子目录 ——
+        /// 它们下面没有这种文件，白列一遍目录而已。</summary>
+        private static IEnumerable<string> WbSmDirs(string root)
+        {
+            yield return root;
+            foreach (string d in Directory.GetDirectories(root))
+            {
+                string n = Path.GetFileName(d);
+                if (DateTime.TryParseExact(n, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                        DateTimeStyles.None, out _)) yield return d;
+            }
         }
 
         private static void DiscoverCodex(List<Source> outp)
@@ -441,7 +529,23 @@ namespace AzhuPet
                 {
                     var fi = new FileInfo(s.Path);
                     long len = fi.Length;
-                    s.WriteUtc = fi.LastWriteTimeUtc;
+                    // ⚠⚠ 只有 **Codex** 不能只信 mtime：它的 rollout 是**长句柄追加**，NTFS 的
+                    //   LastWriteTime 在句柄关闭前不刷新 —— 实测 2026-10-02：文件内容时间戳已到 17:36、
+                    //   长度还在涨，mtime 却一直停在创建时刻 17:17:37 ⇒ `silent` 被算成 20 分钟 >
+                    //   NoWriteSec(900)，**正在跑**的 Codex 被判死、读数整条消失（用户报「codex 在运行
+                    //   但桌宠不显示」）。⇒ 长度一变就记「此刻还在写」。
+                    //   ⚠ 这里对 mtime 取 **max**（而不是直接退回 mtime）是必须的：一次读取间隔（0.5 s）
+                    //     内没长不代表停了，若立刻退回冻住的旧 mtime，读数会在模型生成的空档里**闪断**。
+                    // ⚠⚠ 其余 agent（WorkBuddy / TRAE）**不许**走这条兜底：它们的会话日志 mtime 是可信的
+                    //   （WorkBuddy 封顶后 mtime 冻结＝真的不再写，见 WbLogBigBytes；E 组判据正建立在这上面）。
+                    //   给它们也套「增长兜底」会让「日志已静默」这件事**永远**被上一次观测到的增长盖住 ⇒
+                    //   假「进行中」再不清除（实测：E2/E4/E5 三条判据因此全红）。
+                    if (s.Agent == Agent.Codex)
+                    {
+                        if (len != s.Len) s.WriteUtc = DateTime.UtcNow;
+                        else if (fi.LastWriteTimeUtc > s.WriteUtc) s.WriteUtc = fi.LastWriteTimeUtc;
+                    }
+                    else s.WriteUtc = fi.LastWriteTimeUtc;           // mtime 就是真话（可信）
                     s.Len = len;                                     // 见 WbLogBigBytes（封顶判定）
                     if (len < s.Pos) { s.Pos = 0; s.Carry = null; }   // 被截断 / 轮转 ⇒ 从头再来
                     if (len == s.Pos) continue;
@@ -489,24 +593,30 @@ namespace AzhuPet
             string k = Key(s, sess);
             if (!_task.TryGetValue(k, out Task t))
                 _task[k] = t = new Task { Agent = s.Agent, Tag = TaskTag(s, sess) };
+            // ⚠ 心跳按**会话号**认（见 WbBeatAlive）：会话日志与工作区状态机日志两边都报同一个
+            //   `sessionId`，谁先读到谁把它登记上。
+            if (s.Agent == Agent.WorkBuddy && !string.IsNullOrEmpty(sess)) t.SessId = sess;
             return t;
         }
 
-        /// <summary>状态键。⚠ 两种 agent 的「会话 ↔ 文件」关系**正好相反**：
-        /// TRAE 是**一个文件多个会话**（键要带行里的 sessionId），
-        /// Codex 是**一个会话多个文件**（键只认会话号，多个文件合并到同一份状态）。</summary>
+        /// <summary>状态键。⚠ 三种 agent 的「会话 ↔ 文件」关系不一样：
+        /// TRAE 是**一个文件多个会话**（键要带行里的 sessionId）；
+        /// Codex 是**一个会话多个文件**（键只认会话号，多个文件合并到同一份状态）；
+        /// WorkBuddy 是**一个会话两个文件**（封顶的会话日志 ＋ 不封顶的工作区状态机日志），
+        /// 同样只认会话号 —— 否则同一次任务会在读数里出现**两条**（各自从自己文件里的边界算）。</summary>
         private static string Key(Source s, string sess)
         {
             if (!OldCodex && s.Agent == Agent.Codex && !string.IsNullOrEmpty(sess)) return "codex|" + sess;
+            if (s.Agent == Agent.WorkBuddy && !string.IsNullOrEmpty(sess)) return "workbuddy|" + sess;
             return s.Path + "|" + (sess ?? "");
         }
 
         /// <summary>多任务并存时那截区分标识。TRAE 用会话号 —— 同一个 window 里可能有好几条对话，
-        /// 只报窗口（w1）两条就分不清了；WorkBuddy 一文件一会话、Codex 一会话多文件，
-        /// 两者的文件级标签本来就取自会话号（见 DiscoverWorkBuddy / DiscoverCodex），直接用它。</summary>
+        /// 只报窗口（w1）两条就分不清了；WorkBuddy / Codex 的标签本来就取自会话号，直接用它。</summary>
         private static string TaskTag(Source s, string sess)
         {
             if (s.Agent == Agent.Trae && !string.IsNullOrEmpty(sess)) return Head(sess, 6);
+            if (s.Agent == Agent.WorkBuddy && !string.IsNullOrEmpty(sess)) return Head(sess, 4);
             return s.Tag;
         }
 
@@ -526,12 +636,17 @@ namespace AzhuPet
                 // 存活看**文件**有没有在被写（会话自己不会报心跳），所以取承载它的那些文件里
                 // **最新被写的那个**。⚠ 不能只看某一个：Codex 一个会话横跨多个文件，旧文件
                 // 在 compact 之后就冻住了，只盯它会把「还在跑」判成「已经没了」。
-                DateTime newest = DateTime.MinValue; bool has = false; long newestLen = 0;
+                DateTime newest = DateTime.MinValue; bool has = false;
+                // ⚠ 「封顶的大文件」只认**会话日志**：工作区状态机日志天生就大（实测 12 MB+）且
+                //   **不封顶**，拿它去撞 WbLogBigBytes 会把**正常在跑**的会话误判成「封顶日志」，
+                //   进而套上 WbCappedGraceSec 的短窗口 ⇒ 一轮稍长的任务被误杀。
+                DateTime newestConv = DateTime.MinValue; long newestConvLen = 0;
                 foreach (string p in t.Paths)
                 {
                     if (!_src.TryGetValue(p, out Source src)) continue;
                     has = true;
-                    if (src.WriteUtc > newest) { newest = src.WriteUtc; newestLen = src.Len; }
+                    if (src.WriteUtc > newest) newest = src.WriteUtc;
+                    if (!src.WbSm && src.WriteUtc > newestConv) { newestConv = src.WriteUtc; newestConvLen = src.Len; }
                 }
                 if (!has) continue;
                 double silent = (DateTime.UtcNow - newest).TotalSeconds;
@@ -542,15 +657,20 @@ namespace AzhuPet
                 // ⚠⚠ 但**没有上限的兜底＝假「进行中」的永久许可证**（2026-09-29 用户报）。加两条上限：
                 //   ① 日志静默超过 <see cref="WbBeatMaxSilenceSec"/> ⇒ 不再认心跳
                 //      （当初加心跳要救的现场是静默 21 分钟，30 分钟窗口盖得住）。
-                //   ② 承载文件已是**大文件且早已停写** ⇒ 那是会话日志**封顶**了
-                //      （见 <see cref="WbLogBigBytes"/>）—— 此时「没有结束标记」不是「还在跑」，
-                //      而是「再也不会有了」。
-                bool wbFrozen = t.Agent == Agent.WorkBuddy
-                                && newestLen >= WbLogBigBytes && silent > NoWriteSec(t.Agent);
+                //   ② 承载文件是**封顶的大文件** ⇒ 那是会话日志封顶了（见 <see cref="WbLogBigBytes"/>）
+                //      —— 此时「没有结束标记」不是「还在跑」，而是「再也不会有了」。
+                bool wbCapped = t.Agent == Agent.WorkBuddy && newestConvLen >= WbLogBigBytes;
                 bool beatOk = !NoWbBeat
-                              && (NoBeatCap || (silent <= WbBeatMaxSilenceSec && !wbFrozen))
+                              && (NoBeatCap || (silent <= WbBeatMaxSilenceSec && !wbCapped))
                               && WbBeatAlive(t);
-                bool alive = silent <= NoWriteSec(t.Agent) || beatOk;
+                // ⚠⚠ 封顶日志**也不能**享用 900 s 的日志静默兜底 —— 那正是用户 2026-10-02 报的
+                //   「WorkBuddy 里没有正在执行的任务、桌宠还显示进行中」：日志撞顶后**丢行**
+                //   （实测尾部有 `diagnostic-log:dropped`），`TURN_COMPLETED` 可能就这么没了，
+                //   留下一条悬空的 `PROMPT_SENT`；它的 mtime 一冻结，`silent <= NoWriteSec(900)`
+                //   还替这条假读数续了 15 分钟命（实测 a1d8f277：16:54:50 封顶停写，17:03 仍显示「进行中」）。
+                //   封顶日志只认**短窗口**：还在写 ⇒ 这一轮真在跑；一停写 ⇒ 立刻判死。
+                double noWrite = wbCapped ? WbCappedGraceSec : NoWriteSec(t.Agent);
+                bool alive = silent <= noWrite || beatOk;
 
                 if (t.StartMs > t.EndMs)
                 {
@@ -661,6 +781,10 @@ namespace AzhuPet
         /// 不是边界、或时间戳读不出来，都返回 0 ⇒ 调用方当作「没有」。</summary>
         private static long Stamp(Source s, string line, out bool isStart, out bool isEnd, out string sess)
         {
+            // ⚠ WorkBuddy 的工作区状态机日志是**完全另一套**形状（边界串、时间戳格式、会话号位置
+            //   都不一样），单独走一条，不要在这里混着判。
+            if (s.WbSm) return StampWbSm(line, out isStart, out isEnd, out sess);
+
             Agent a = s.Agent;
             sess = SessionOf(s, line);
             isStart = line.IndexOf(StartMark(a), StringComparison.Ordinal) >= 0;
@@ -679,12 +803,15 @@ namespace AzhuPet
         /// <summary>这一行（或这个文件）属于哪条会话。
         /// ⚠ TRAE 的 renderer.log **一个文件里有多条对话**，只能从行的 `"sessionId":"…"` 取；
         ///   Codex **一个会话横跨多个文件**，会话号在**文件名**里（行里没有），由 DiscoverCodex 预先取好；
-        ///   WorkBuddy 一文件一会话，返回空串（键退化成文件路径）。
+        ///   WorkBuddy **一会话两文件**：会话日志的文件名**就是**会话号，工作区状态机日志则从行里的
+        ///   `sessionId=` 取 —— 两边取到的是同一个值，于是两份文件的边界并成同一份状态（见 Key）。
         /// ⚠ TRAE 取不到时返回 null 而不是空串：null＝「这家没有会话概念」（标签退回文件级），
         ///   空串会被当成一个真实会话键，两者在标签选择上语义不同。</summary>
         private static string SessionOf(Source s, string line)
         {
             if (s.Agent == Agent.Codex) return s.SessId;
+            if (s.Agent == Agent.WorkBuddy)
+                return s.WbSm ? WbSmSess(line) : Path.GetFileNameWithoutExtension(s.Path);
             if (s.Agent != Agent.Trae) return "";
             const string key = "\"sessionId\":\"";
             int i = line.IndexOf(key, StringComparison.Ordinal);
@@ -692,6 +819,65 @@ namespace AzhuPet
             i += key.Length;
             int j = line.IndexOf('"', i);
             return j > i ? line.Substring(i, j - i) : null;
+        }
+
+        // ==== WorkBuddy 的工作区状态机日志（主信号）====
+        //
+        // 形状：`[2026/10/2 22:09:55.386] [Info] [pid=53888] [SessionRunStateMachine] transition |
+        //        sessionId=<UUID> | event=AGENT_ENDED | from=… | to=… | lifecycle=… | busy=… | …`
+        //   `event=RUN_PREPARING`（from=idle to=preparing）＝一轮开始（＝会话日志的 `PROMPT_SENT`）；
+        //   `event=AGENT_ENDED`（to=idle）＝一轮结束（＝会话日志的 `TURN_COMPLETED`）。
+        //   ⚠ 实测一轮会连报**两次** `AGENT_ENDED`（相差 ~10 ms），取较晚那次即可（Apply 取 max）。
+        // ⚠ 时间戳是**本地时间**、方括号包着，且月/日**不补零**（`2026/10/2`）—— 与会话日志的
+        //   ISO(UTC)、Codex 的 `"timestamp"` 都不同，所以单独一套解析（见 WbSmStamp）。
+        // ⚠ 带**尾随空格**：字段是 `event=X | …`，带上空格才不会被 `event=AGENT_ENDED_XXX` 这类
+        //   将来更长的词命中（同 EndMark 里 `"type":"task_complete"` 带前缀的道理）。
+        private const string WbSmStartMark = "event=RUN_PREPARING ";
+        private const string WbSmEndMark = "event=AGENT_ENDED ";
+
+        private static readonly Regex WbSmSessRe = new Regex(
+            @"\bsessionId=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+            RegexOptions.Compiled);
+
+        private static readonly string[] WbSmTimeFormats =
+        {
+            "yyyy/M/d H:mm:ss.fff", "yyyy/M/d HH:mm:ss.fff",
+            "yyyy/M/d H:mm:ss",     "yyyy/M/d HH:mm:ss",
+        };
+
+        /// <summary>认出一行工作区状态机日志是不是任务边界。见上面那段。</summary>
+        private static long StampWbSm(string line, out bool isStart, out bool isEnd, out string sess)
+        {
+            isStart = false; isEnd = false; sess = null;
+            // ⚠ 先按这个廉价串把绝大多数行挡掉，再谈边界 —— 工作区日志动辄十几 MB（实测 12 MB+），
+            //   每行都跑正则会把桌宠自己的轮询拖慢。
+            if (line.IndexOf("[SessionRunStateMachine]", StringComparison.Ordinal) < 0) return 0;
+            isStart = line.IndexOf(WbSmStartMark, StringComparison.Ordinal) >= 0;
+            isEnd = !isStart && line.IndexOf(WbSmEndMark, StringComparison.Ordinal) >= 0;
+            if (!isStart && !isEnd) return 0;
+            sess = WbSmSess(line);
+            if (string.IsNullOrEmpty(sess)) return 0;   // 没有会话号就没法并进状态，宁可不要
+            return WbSmStamp(line);
+        }
+
+        private static string WbSmSess(string line)
+        {
+            Match m = WbSmSessRe.Match(line);
+            return m.Success ? m.Groups[1].Value : null;
+        }
+
+        /// <summary>取 `[yyyy/M/d H:mm:ss.fff]` 里的**本地**时间戳，转成 Unix 毫秒。
+        /// ⚠ 必须按本地解释再转 UTC：状态机行写的是本机墙上时间（实测 `22:09:55` 就是当时的
+        ///   本地钟点），而存活判据全程用 UTC。与会话日志的 `…Z`（本来就是 UTC）不可混用。</summary>
+        private static long WbSmStamp(string line)
+        {
+            int a = line.IndexOf('[');
+            int b = a < 0 ? -1 : line.IndexOf(']', a + 1);
+            if (a < 0 || b <= a) return 0;
+            DateTime dt;
+            if (!DateTime.TryParseExact(line.Substring(a + 1, b - a - 1), WbSmTimeFormats,
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out dt)) return 0;
+            return new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Local)).ToUnixTimeMilliseconds();
         }
 
         /// <summary>Codex rollout 文件名里的**会话号** ＝ 时间戳之后的第一段 UUID。
@@ -762,14 +948,13 @@ namespace AzhuPet
         }
 
         /// <summary>这份 WorkBuddy 状态承载的会话，心跳还新鲜吗。
-        /// ⚠ WorkBuddy 一文件一会话、会话号**就是日志文件名**（见 DiscoverWorkBuddy），
-        ///   所以直接从 Paths 里的文件名取即可 —— 不必给 Task 再加一个字段。</summary>
+        /// ⚠ 按**会话号**认（`Task.SessId`），不再按文件名 —— 一份状态可能只由**工作区状态机日志**
+        ///   承载（会话日志被封顶后冻住、被配额挤掉），那时按文件名会匹配不到心跳。
+        ///   会话号两边同源：会话日志的文件名／工作区日志行里的 `sessionId=`（见 SessionOf）。</summary>
         private bool WbBeatAlive(Task t)
         {
             if (t.Agent != Agent.WorkBuddy) return false;
-            foreach (string p in t.Paths)
-                if (_wbLive.Contains(Path.GetFileNameWithoutExtension(p))) return true;
-            return false;
+            return !string.IsNullOrEmpty(t.SessId) && _wbLive.Contains(t.SessId);
         }
 
         private static long JsonStamp(string line)

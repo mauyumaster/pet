@@ -68,8 +68,11 @@ namespace AzhuPet
         // 备用通道（可选，2026-09-29 加）：主通道被限流时改走它。
         private TextBox _tBase2, _tModel2, _tKey2;
         private CheckBox _cTopmost, _cNight, _cAutostart;
+        // 多 agent 任务计时读数（TRAE / WorkBuddy / Codex）—— 第 5 栏「任务计时读数」卡片。
+        private CheckBox _cTaskTimer;
         private ComboBox _cSize;
         private Toggle _tSpeech, _tLlm, _tRoast, _tSummary, _tOcr, _tOcrSend, _tEye, _tTopmost, _tNight, _tAutostart;
+        private Toggle _tTaskTimer;
 
         // ---- 第 6 栏「余额与凭据」（2026-10-01 由独立的 WPF 余额窗合并进来）----
         // ⚠⚠ 这一栏的数据**不走**本窗的 `Save()` / `_dirty` 那一套，这是**有意的**：
@@ -719,7 +722,7 @@ namespace AzhuPet
         // ==================================================================================
         private void BuildPageAppearance()
         {
-            var flow = BeginPage("外观与启动", "她在桌面上什么样、开机要不要自己起来。");
+            var flow = BeginPage("外观与启动", "她在桌面上什么样、顶上显示什么读数、开机要不要自己起来。");
 
             var c1 = BeginCard(flow, "尺寸");
             _cSize = new ComboBox
@@ -740,6 +743,19 @@ namespace AzhuPet
             var _trow10 = ToggleRow("开机自启", "开机后自动出现在桌面右下角", out _tAutostart, out _cAutostart, PetConfig.AutostartOn());
             AddRow(c2, _trow10);
             FinishCard(c2);
+
+            var c3 = BeginCard(flow, "任务计时读数",
+                "把本机 TRAE / WorkBuddy / Codex 的任务耗时显示在气泡流顶上。");
+            var _trow11 = ToggleRow("显示 agent 任务耗时",
+                    "读本机这三个工具的日志，每任务一行（进行中 / 刚跑完用了多久）",
+                    out _tTaskTimer, out _cTaskTimer, _w.Cfg.TaskTimerOn);
+            AddRow(c3, _trow11);
+            AddRow(c3, NoteBox("• 读数来自这三个工具各自的日志；路径按**当前用户**的 profile 自动定位，"
+                + "换机器不用改配置。\n"
+                + "• 它会读取日志里的**任务边界行**来判断开始／结束 —— 全程在本机，不发送任何数据。\n"
+                + "• 前提是那台机器**真的在用**这些工具：没装的来源读数自然为空（不是故障）。\n"
+                + "• 关掉＝完全不再读这些日志，顶上那组读数也会立刻消失。", SettingsTheme.Pal.Muted));
+            FinishCard(c3);
         }
 
         // ==================================================================================
@@ -1956,6 +1972,7 @@ namespace AzhuPet
             _tEye.Checked = d.EyeOn;
             _tTopmost.Checked = d.Topmost;
             _tNight.Checked = d.NightDim;
+            _tTaskTimer.Checked = d.TaskTimerOn;
             _cSize.SelectedIndex = d.SizeIndex;
             _statusText.Text = "● 已恢复默认（尚未保存）";
             _statusText.ForeColor = pal.Warn;
@@ -1991,6 +2008,7 @@ namespace AzhuPet
             if (key2.Length > 0) c.FallbackKey = key2;      // 与上面同一条口径：空＝保留已存 key
             c.Topmost = _tTopmost.Checked;
             c.NightDim = _tNight.Checked;
+            c.TaskTimerOn = _tTaskTimer.Checked;
             c.SizeIndex = _cSize.SelectedIndex;
             c.Save();
 

@@ -86,6 +86,18 @@ namespace AzhuPet
                     "旧配置缺这三个键时回落默认（十分钟一句／200 句）",
                     "读到 " + bOld.SpeechCooldownMin + " 分钟／" + bOld.RoastIdleMin + " 分钟／" + bOld.SpeechDailyCap + " 句");
 
+                // ---- ②''' 任务计时读数开关（taskTimerOn，2026-10-02 加）----
+                //     默认**开**（装了桌宠就想看到读数）。这条盯两件事，缺一条就有真实症状：
+                //     ① 面板上关掉后必须能读回来 —— 否则「关了它还在显示」；
+                //     ② 旧配置（用户机上那份）没有这个键时必须回落默认开 —— 否则升级后读数**凭空消失**。
+                var ct = new PetConfig { TaskTimerOn = false };
+                ct.Save();
+                var bt = PetConfig.Load();
+                Check(!bt.TaskTimerOn, "taskTimerOn=false 往返保真", "读到 " + bt.TaskTimerOn);
+                File.WriteAllText(Path.Combine(tmp, "config.json"), "{\r\n  \"size\": 1\r\n}\r\n");
+                var bOldT = PetConfig.Load();
+                Check(bOldT.TaskTimerOn, "旧配置缺 taskTimerOn 时回落默认（开）", "读到 " + bOldT.TaskTimerOn);
+
                 // ---- ③ 反斜杠数量不许增长（直接盯住那个翻倍的量）----
                 int n0 = CountBackslashes(back.VaultPath);
                 for (int i = 0; i < 6; i++) { back.Save(); back = PetConfig.Load(); }

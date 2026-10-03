@@ -22,9 +22,12 @@
 //   C **正对照**：把日志补一行 `task_complete` ⇒ 读数必须**换成「耗时」**、
 //     再等过 `AfterEndSec`(10 s) 必须**真的消失**。
 //     ⚠ 没有 C，「B 通过」可能只是因为我把读数整个焊死在屏幕上 —— 那不是需求，是新 bug。
+//   F 开关（`TaskTimerOn`）：关掉 ⇒ 顶上读数必须**立刻消失**；重新打开 ⇒ 必须自己回来。
+//     ⚠ 没有 F，「开关关了读数还挂着」会一路静默 —— 本仓最忌讳的那种假状态。
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -57,8 +60,10 @@ namespace AzhuPet
             AgentTaskTimer.OldCodex = o.OldCodex;
             AgentTaskTimer.NoWbBeat = o.NoWbBeat;
             AgentTaskTimer.NoBeatCap = o.NoBeatCap;
+            AgentTaskTimer.NoWbSm = o.NoWbSm;
             RunCodexSessions(rows, notes, o.OldCodex);
             RunWorkBuddyHeartbeat(rows, notes);
+            RunWorkBuddyStateMachine(rows, notes);
 
             string modelPath = Cli.ResolveModel(o.ModelPath);
             if (modelPath == null)
@@ -134,6 +139,9 @@ namespace AzhuPet
             double hideKAfterDrag = 0;                // 松手 2 s 后的隐退进度（1 = 已隐退）
             string hDone = null;                      // C：补了 task_complete 之后的读数
             string hGone = "(未采到)";                // C：过 AfterEndSec 之后的读数
+            string hGateOff = "(未采到)";             // F：开关关掉后的读数（期望 null）
+            string hGateOn = "(未采到)";              // F：开关重新打开后的读数（期望「进行中」）
+            double tGate = 0;                         // F：开关翻转的时刻
 
             int step = 0, sub = 0;
             int atX = (o.At != null && o.At.Length == 2) ? o.At[0] : 900;
@@ -242,6 +250,28 @@ namespace AzhuPet
                             hAfterDrag = w.HeaderText;
                             vAfterDrag = w.BubbleVisible;
                             hideKAfterDrag = w.HideK;
+                            // ---- F：开关（TaskTimerOn）----
+                            // ⚠ 插在**这里**（任务仍在跑、文件已被盯住）而不是等 C 之后：C 之后会话
+                            //   已结束并被清出 keep，再出现要等 Locate 的 5 s 扫描，会把这条判据拖成慢判据。
+                            w.Cfg.TaskTimerOn = false;
+                            tGate = t;
+                            step = 20;
+                            break;
+
+                        // ---- F：开关必须真的管用 ----
+                        // 任务**仍在跑**的前提下：关掉开关 ⇒ 顶上读数必须**立刻消失**；重新打开 ⇒ 必须自己回来。
+                        // ⚠ 没有这条，「开关关了读数还挂着」会一路静默 —— 那正是本仓最忌讳的假状态。
+                        case 20:
+                            if (t - tGate < 0.9) break;     // 跨过好几拍 SlowTick(120ms)
+                            hGateOff = w.HeaderText;
+                            w.Cfg.TaskTimerOn = true;
+                            tGate = t;
+                            step = 21;
+                            break;
+
+                        case 21:
+                            if (t - tGate < 1.0) break;     // Poll 每拍都 Compose，够它把读数重算回来
+                            hGateOn = w.HeaderText;
                             step = 7;
                             break;
 
@@ -319,6 +349,13 @@ namespace AzhuPet
                 rows.Add(Row("agenttimer.C.gone_after_window",
                     "过 AfterEndSec(10 s) 后读数 = " + Show(hGone) + "（期望 null：真的走掉）",
                     hGone == null));
+
+                // ---- F：开关（TaskTimerOn）必须真的管用（关＝立刻消失，开＝自己回来）----
+                rows.Add(Row("agenttimer.F.gate_off_hides",
+                    "开关关掉后读数 = " + Show(hGateOff) + "（期望 null：不能只停 Poll 留着上一次的）",
+                    hGateOff == null));
+                rows.Add(Row("agenttimer.F.gate_on_shows",
+                    "开关重新打开后读数 = " + Show(hGateOn) + "（期望含「进行中」）", HasRunning(hGateOn)));
                 Done(rows, notes, o, w, app);
             }
         }
@@ -343,8 +380,10 @@ namespace AzhuPet
         //   D1 合并：悬空 start 在旧文件、完整一轮在新文件 ⇒ **只能一条** Codex 读数、且是「耗时」。
         //   D2 中断：`turn_aborted` 必须算结束（中断后不会再来 `task_complete`）⇒ 不得报「进行中」。
         //   D3 存活：悬空 start 在**已冻住**的旧文件、新文件还在被写 ⇒ 必须仍报「进行中」。
-        //            ⚠ 这一条才是用户看到的「消失」。
-        // ⚠ `--old-codex`（负对照）下三段必须全红 —— 否则本组没有区分度（见 AgentTaskTimer.OldCodex）。
+        //   D4 存活：**同一个**文件 mtime 冻住、但文件还在增长 ⇒ 必须仍报「进行中」。
+        //            ⚠ D3/D4 才是用户看到的「消失」；D4 是 2026-10-02 那次（mtime 不刷新）。
+        // ⚠ `--old-codex`（负对照）下 D1–D3 必须全红 —— 否则本组没有区分度（见 AgentTaskTimer.OldCodex）。
+        //   ⚠ D4 **不受它影响**：D4 验的是「mtime 冻住时以文件增长为准」，与 Codex 的状态口径无关。
 
         private static void RunCodexSessions(List<string[]> rows, List<string> notes, bool oldCodex)
         {
@@ -445,6 +484,34 @@ namespace AzhuPet
                 rows.Add(Row("agenttimer.D3.new_file_keeps_alive",
                     "会话的活动已挪到新文件、旧文件冻了 25 分钟 ⇒ 仍须报「进行中」＝ " + Show(h3),
                     h3 != null && h3.Contains("进行中")));
+
+                // ---- D4：**单文件**的 mtime 冻住、但文件还在增长 ⇒ 必须仍报「进行中」----
+                // ⚠⚠ 现场（2026-10-02 用户报「codex 在运行但桌宠不显示」）：Codex 的 rollout 是**长句柄追加**，
+                //   NTFS 的 LastWriteTime 在句柄关闭前不刷新 —— 实测文件内容时间戳已到 17:36、长度还在涨，
+                //   mtime 却一直停在创建时刻 17:17:37 ⇒ `silent` 被算成 20 分钟 > NoWriteSec(900)，
+                //   正在跑的任务被判死、读数整条消失。
+                //   ⚠ D3 盖不住它：D3 靠的是**另一个**新文件的 mtime；这里是**同一个**文件既冻着 mtime 又在长。
+                clearDay();
+                string s4 = Guid.NewGuid().ToString("D");
+                string d1 = Rollout(day, DateTime.Now.AddMinutes(-20), s4);
+                WriteLines(d1, new[]
+                {
+                    Line(DateTime.UtcNow.AddSeconds(-1200), 1, "task_started", "d1"),
+                });
+                Touch(d1, DateTime.UtcNow.AddSeconds(-1200));    // mtime 冻在 20 分钟前（句柄没关，不刷新）
+                settle();                                         // 先接入：此刻按 mtime 判，是「已死」
+                WriteLines(d1, new[]                             // 之后文件**继续增长**（这一轮还在跑）
+                {
+                    Line(DateTime.UtcNow.AddSeconds(-1200), 1, "task_started", "d1"),
+                    Line(DateTime.UtcNow.AddSeconds(-2),    2, "token_count",  "d1"),
+                });
+                Touch(d1, DateTime.UtcNow.AddSeconds(-1200));    // ⚠ mtime 仍冻着 —— 这正是要复现的现场
+                notes.Add("D4 会话 " + s4 + " ＝ " + Path.GetFileName(d1) + "（mtime 冻在 20 分钟前，但文件在长）");
+
+                string h4c = settle();
+                rows.Add(Row("agenttimer.D4.frozen_mtime_still_grows",
+                    "单文件 mtime 冻住、但文件还在增长 ⇒ 仍须报「进行中」＝ " + Show(h4c),
+                    h4c != null && h4c.Contains("进行中")));
             }
             catch (Exception ex)
             {
@@ -593,6 +660,45 @@ namespace AzhuPet
                 rows.Add(Row("agenttimer.E5.capped_log_no_beat",
                     "日志已 ≥8 MiB（会话日志封顶在 ~10 MiB）＋静默 20 分钟＋心跳新鲜 ⇒ 不许报「进行中」＝ " + Show(h5),
                     h5 == null || !h5.Contains("进行中")));
+
+                // ---- E6：封顶日志 ＋ 心跳**已停** ＋ 静默**不足 900 s** ⇒ 必须消失（＝用户 2026-10-02 报）----
+                // ⚠ 与 E5 的差别：E5 的心跳是**新鲜**的、静默 20 分钟；E6 的心跳**已停**、静默只有 10 分钟。
+                //   后者才是用户报的现场：会话真的没了（心跳停），可 `silent <= NoWriteSec(900)` 还在续命。
+                //   ⚠ 没有这一条，E5 全绿也盖不住「900 s 窗口内的假进行中」—— 那正是本次要修的那段。
+                // ⚠⚠ 先清场：`Header` 是**多行**的（所有活任务拼成一段），E4/E5 的日志留着会让 E6 读到
+                //   **别人的**「进行中」（负对照 `--no-beat-cap` 下尤其明显）⇒ E6 红得不是地方。
+                foreach (string f in Directory.GetFiles(conv, "*.log")) { try { File.Delete(f); } catch { } }
+                string sid6 = Guid.NewGuid().ToString("D");
+                string log6 = Path.Combine(conv, sid6 + ".log");
+                WriteBigWbLog(log6, 8.5, new[]
+                {
+                    WbLine(DateTime.UtcNow.AddMinutes(-40), "TURN_COMPLETED"),
+                    WbLine(DateTime.UtcNow.AddMinutes(-10), "PROMPT_SENT"),
+                });
+                Touch(log6, DateTime.UtcNow.AddMinutes(-10));
+                string hb6 = Path.Combine(sessRoot, "600001.json");
+                WriteBeat(hb6, sid6, DateTime.UtcNow.AddMinutes(-30));
+                Touch(hb6, DateTime.UtcNow.AddMinutes(-30));   // 心跳也停（会话真的没了）
+                string h6 = settle();
+                rows.Add(Row("agenttimer.E6.capped_stale_beat_short_silence",
+                    "封顶日志 ＋ 心跳停 30 分钟 ＋ 静默仅 10 分钟（< 900 s）⇒ 不许报「进行中」＝ " + Show(h6),
+                    h6 == null || !h6.Contains("进行中")));
+
+                // ---- E7：**正对照** —— 封顶日志刚被写过 ⇒ 必须仍报「进行中」----
+                // ⚠ 没有这一条，「封顶日志一律判死」也能让 E5/E6 全绿 —— 那不是需求，是新 bug：
+                //   一轮**正在跑**的封顶日志（tool_call_update 密到按秒写、mtime 新鲜）会被误杀。
+                string sid7 = Guid.NewGuid().ToString("D");
+                string log7 = Path.Combine(conv, sid7 + ".log");
+                WriteBigWbLog(log7, 8.5, new[]
+                {
+                    WbLine(DateTime.UtcNow.AddMinutes(-40), "TURN_COMPLETED"),
+                    WbLine(DateTime.UtcNow.AddSeconds(-2), "PROMPT_SENT"),
+                });
+                Touch(log7, DateTime.UtcNow);                  // 刚写过 ⇒ 这一轮真在跑
+                string h7 = settle();
+                rows.Add(Row("agenttimer.E7.capped_fresh_log_alive",
+                    "封顶日志**刚被写过**（无心跳）⇒ 仍须报「进行中」＝ " + Show(h7),
+                    h7 != null && h7.Contains("进行中")));
             }
             catch (Exception ex)
             {
@@ -605,6 +711,120 @@ namespace AzhuPet
                 AgentTaskTimer.TraeRootOverride = null;
                 AgentTaskTimer.CodexRootOverride = null;
             }
+        }
+
+        // ---- G 组：WorkBuddy 的**工作区状态机日志**（主信号）----
+        //
+        // 现场（2026-10-02 用户报「workbuddy 的任务计时显示消失了」）：会话日志撞上 ~10 MiB 封顶后
+        //   **永久**不再落 `PROMPT_SENT`/`TURN_COMPLETED`，mtime 冻在封顶那一刻 ⇒ 会话日志这条通路
+        //   再也读不到新边界，读数整条消失。而同一会话的**工作区状态机日志**
+        //   （`logs\<日期>\<工作区>__<hash>.log`）一直在写、**不封顶**，里面有
+        //   `event=RUN_PREPARING`（一轮开始）与 `event=AGENT_ENDED`（一轮结束）。
+        // 修法：把工作区日志当**主信号**，会话日志那对边界串**原样保留**当兜底（见 AgentTaskTimer）。
+        //
+        // 三条，缺一条就证明不了：
+        //   G3 同一个会话的两份文件都有边界 ⇒ 读数**只能有一条**（证明两会话来源按会话号并成一份）。
+        //      ⚠ 没有 G3，「并成一份」这件事一路静默 —— 用户会看到两条一模一样的读数。
+        //   G1 会话日志已封顶且冻住、工作区日志里这一轮正跑着 ⇒ **必须报「进行中」**（用户看到的现场）。
+        //      ⚠ 负对照 `--no-wb-sm` 下必须**红** —— 否则 G1 的绿可能只是会话日志那条老通路碰巧通了。
+        //   G2 工作区日志补一条 `AGENT_ENDED` ⇒ 必须**换成「耗时」**（证明结束信号也接到了）。
+        private static void RunWorkBuddyStateMachine(List<string[]> rows, List<string> notes)
+        {
+            string root = Path.Combine(Path.GetTempPath(), "azhu-wbsm");
+            try
+            {
+                try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch { }
+                string logsRoot = Path.Combine(root, "logs");
+                string dayDir = Path.Combine(logsRoot, DateTime.Now.ToString("yyyy-MM-dd"));
+                string conv = Path.Combine(dayDir, "sdk", "conversations");
+                string sessRoot = Path.Combine(root, "sessions");
+                Directory.CreateDirectory(conv);
+                Directory.CreateDirectory(sessRoot);
+
+                AgentTaskTimer.WorkBuddyRootOverride = logsRoot;
+                AgentTaskTimer.WorkBuddySessionsOverride = sessRoot;
+                AgentTaskTimer.TraeRootOverride = Path.Combine(root, "no-trae");
+                AgentTaskTimer.CodexRootOverride = Path.Combine(root, "no-codex");
+
+                string sid = Guid.NewGuid().ToString("D");
+
+                // 会话日志：**小而新鲜** —— 它自己那条通路是通的（PROMPT_SENT 在 19 分钟前）。
+                string convLog = Path.Combine(conv, sid + ".log");
+                WriteLines(convLog, new[]
+                {
+                    WbLine(DateTime.UtcNow.AddMinutes(-40), "TURN_COMPLETED"),
+                    WbLine(DateTime.UtcNow.AddMinutes(-19), "PROMPT_SENT"),
+                });
+                Touch(convLog, DateTime.UtcNow);
+
+                // 工作区状态机日志：同一会话，**不封顶**，这一轮正跑着（20 分钟前开始）。
+                string wsLog = Path.Combine(dayDir, "SecondBrain__f82ebd5c5aa8c6909d1ac1ef755e9f56.log");
+                WriteLines(wsLog, new[]
+                {
+                    WsLine(DateTime.Now.AddMinutes(-45), sid, "AGENT_ENDED"),    // 上一轮结束
+                    WsLine(DateTime.Now.AddMinutes(-20), sid, "RUN_PREPARING"),  // 本轮开始
+                    WsLine(DateTime.Now.AddMinutes(-19), sid, "RUN_ACCEPTED"),
+                    WsLine(DateTime.Now.AddMinutes(-18), sid, "AGENT_STARTED"),
+                    WsLine(DateTime.Now.AddMinutes(-1),  sid, "MODEL_STREAM_STARTED"),
+                });
+                Touch(wsLog, DateTime.UtcNow);        // 工作区日志新鲜 ⇒ 存活判据靠它过（**故意不写心跳**）
+                notes.Add("G 组合成工作区状态机日志 = " + wsLog);
+                if (AgentTaskTimer.NoWbSm) notes.Add("⚠ 负对照 --no-wb-sm 已开：G1/G2 **必须**变红，否则本组没有区分度");
+
+                var t = new AgentTaskTimer();
+                double clock = 0;
+                Func<string> header = () => { clock += 6; t.Poll(clock); return t.Header; };
+                Func<string> settle = () => { header(); return header(); };
+
+                // ---- G3：同一会话的两份文件都有边界 ⇒ 读数**只能有一条**----
+                // ⚠ 会话日志那条边界本来就是同一轮的**兜底**，若没按会话号并成一份，这里会冒出两条。
+                string h3 = settle();
+                rows.Add(Row("agenttimer.G3.wb_sm_merges_sources",
+                    "同一会话的会话日志＋工作区日志都有边界 ⇒ 读数只许一条「进行中」＝ " + Show(h3),
+                    CountLines(h3, "进行中") == 1));
+
+                // ---- G1：把会话日志换成**封顶且冻住**的 ⇒ 会话日志这条通路瞎了，只靠工作区日志 ----
+                WriteBigWbLog(convLog, 8.5, new[]
+                {
+                    WbLine(DateTime.UtcNow.AddMinutes(-40), "TURN_COMPLETED"),
+                    WbLine(DateTime.UtcNow.AddMinutes(-30), "PROMPT_SENT"),
+                });
+                Touch(convLog, DateTime.UtcNow.AddMinutes(-30));   // 封顶 ＋ mtime 冻在 30 分钟前
+                string h1 = settle();
+                rows.Add(Row("agenttimer.G1.wb_sm_overrides_capped_session",
+                    "会话日志封顶冻住、工作区状态机日志里本轮在跑 ⇒ 仍须报「进行中」＝ " + Show(h1),
+                    h1 != null && h1.Contains("进行中")));
+
+                // ---- G2：工作区日志补 `AGENT_ENDED` ⇒ 必须换成「耗时」----
+                File.AppendAllText(wsLog, WsLine(DateTime.Now, sid, "AGENT_ENDED") + "\n", new UTF8Encoding(false));
+                Touch(wsLog, DateTime.UtcNow);
+                string h2 = settle();
+                rows.Add(Row("agenttimer.G2.wb_sm_end_closes_run",
+                    "工作区日志补 `AGENT_ENDED` ⇒ 必须换成「耗时」＝ " + Show(h2),
+                    h2 != null && h2.Contains("耗时") && !h2.Contains("进行中")));
+            }
+            catch (Exception ex)
+            {
+                rows.Add(Row("agenttimer.G.exception", ex.GetType().Name + ": " + ex.Message, false));
+            }
+            finally
+            {
+                AgentTaskTimer.WorkBuddyRootOverride = null;
+                AgentTaskTimer.WorkBuddySessionsOverride = null;
+                AgentTaskTimer.TraeRootOverride = null;
+                AgentTaskTimer.CodexRootOverride = null;
+            }
+        }
+
+        /// <summary>合成一行 WorkBuddy 工作区状态机日志。⚠ 形状照抄真实：
+        /// `[<本地时间>] [Info] [pid=…] [SessionRunStateMachine] transition | sessionId=… | event=… | …`
+        /// —— 时间戳是**方括号里的本地时间、月/日不补零**（`2026/10/2`），与会话日志的 ISO(UTC) 不同。</summary>
+        private static string WsLine(DateTime local, string sessionId, string ev)
+        {
+            return "[" + local.ToString("yyyy/M/d H:mm:ss.fff", CultureInfo.InvariantCulture) + "]"
+                 + " [Info] [pid=53888] [SessionRunStateMachine] transition | sessionId=" + sessionId
+                 + " | event=" + ev + " | from=idle | to=preparing | lifecycle=preparing"
+                 + " | busy=true | queueBusy=false | elapsedSinceLastTransitionMs=1";
         }
 
         /// <summary>合成一行 WorkBuddy 会话日志。⚠ 形状照抄真实：`<ISO> state-machine:transition

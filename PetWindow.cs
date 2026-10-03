@@ -771,6 +771,12 @@ namespace AzhuPet
         private void StepAgentTimer()
         {
             if (_agentTimer == null || _feed == null) return;
+            // ⚠ 开关（TaskTimerOn）：关掉就**清空**顶上那组读数 —— 只停 Poll 而留着上一次的 Header，
+            //   读数会**挂在屏幕上不走**，用户会以为开关没生效。
+            // ⚠⚠ 这里**不碰** `AgentTaskTimer.Enabled`：那个静态位是**判据模式的闸**（`Program.Main`
+            //   里按 `!o.AnyTest()` 置位），本方法在判据里也会被调到；若在这里按配置去写它，
+            //   两个入口会互相覆盖（`--lifttest` 等会因此把真日志读进判据窗口，污染读数判据）。
+            if (!Cfg.TaskTimerOn) { _feed.Header = null; return; }
             try
             {
                 _agentTimer.Poll(_clock.Elapsed.TotalSeconds);
