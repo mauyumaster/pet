@@ -78,9 +78,9 @@ AzhuPet-v0.1.4-win-x64/
 
 <div align="center">
 
-<img src="assets/docs/settings-speech.png" width="620" alt="设置面板 · 说话与吐槽">
+<img src="assets/docs/settings-speech.png" width="620" alt="设置面板 · 模型通道">
 
-<sub>「说话与吐槽」——她什么时候开口、用不用模型</sub>
+<sub>「模型通道」——台词和每小时小结走哪条通道：模板句 / OpenAI 兼容端点 / Trae</sub>
 
 </div>
 
@@ -96,13 +96,13 @@ AzhuPet-v0.1.4-win-x64/
 
 <div align="center">
 
-<img src="assets/docs/settings-rhythm.png" width="620" alt="设置面板 · 触发节奏">
+<img src="assets/docs/settings-rhythm.png" width="620" alt="设置面板 · 外观与启动">
 
-<sub>「触发节奏」三个旋钮 —— 她多久说一句，改完点保存立刻生效，不用重启</sub>
+<sub>「外观与启动」——大小三档、始终置顶、夜间调光、开机自启；改完点「保存并生效」</sub>
 
 </div>
 
-**先说「说话与吐槽」栏那三个旋钮**（最常被问的一个问题）：
+**先说她多久开口 ——「说话与吐槽」栏那三个旋钮**（最常被问的一个问题）：
 
 | 旋钮 | 默认 | 管什么 |
 | --- | --- | --- |

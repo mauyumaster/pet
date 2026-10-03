@@ -21,6 +21,7 @@ _desktop_check*
 _icon_*
 _verify_*
 _tmp_*
+_negcheck*
 # 当年抓 Trae 接口的探针脚本 —— 教人抓凭据的脚本不适合公开发布
 trae_chat_spike.ps1
 
