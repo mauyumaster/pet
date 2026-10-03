@@ -976,12 +976,44 @@ namespace AzhuPet
 
         // ==== 路径与标签 ====
 
+        /// <summary>TRAE 的日志根目录。**通配扫描** `%APPDATA%` 下所有名字里带 `TRAE` 的目录的 `logs\`，
+        /// 不再枚举写死的两个名字。
+        ///
+        /// ⚠⚠ 为什么必须通配（2026-10-03 用户要求）：原实现写死 `TRAE SOLO CN` / `TRAE CN` 两个变体，
+        ///   而本机只装了前者 ⇒ 第二个变体**从未在真机验过**；更要命的是 TRAE 只要再改一次产品名
+        ///   （它已经改过一次：`TRAE CN` → `TRAE SOLO CN`），桌宠就会**静默读不到** ——
+        ///   不报错、不提示，用户只看到「TRAE 计时不见了」，而这正是本仓最忌讳的那类假状态。
+        ///   通配扫描把「名字里有没有 TRAE」这件事实交给文件系统，产品再改名也不用改代码。
+        ///
+        /// ⚠ 排序：`Directory.GetDirectories` 的返回顺序**不保证**，而它决定谁先进配额
+        ///   （见 <see cref="TraeQuota"/>）⇒ 顺序不定会让读数在几次扫描之间抖动。
+        ///   按目录名序排定，求确定性。
+        /// ⚠ 匹配**只认目录名**里含 `TRAE`（大小写不敏感），不看子目录名 —— `logs` 是固定的一层。
+        /// ⚠ `TraeRootOverride` 优先分支**必须保留**：判据靠它把根目录指到临时目录（离线、不碰真数据）。</summary>
         private static IEnumerable<string> TraeRoots()
         {
             if (!string.IsNullOrEmpty(TraeRootOverride)) { yield return TraeRootOverride; yield break; }
             string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            yield return Path.Combine(roaming, "TRAE SOLO CN", "logs");
-            yield return Path.Combine(roaming, "TRAE CN", "logs");
+            foreach (string r in TraeRootsUnder(roaming)) yield return r;
+        }
+
+        /// <summary>`TraeRoots` 的**纯逻辑**部分：给定一个 roaming 根，列出其下所有「名字含 `TRAE`」的
+        /// 目录的 `logs\`。抽出来是为了给判据用（H 组）—— 否则验「通配真的通配」只能靠用户机器上
+        /// 恰好装了什么，不可重复。见 <see cref="TraeRoots"/> 的注释。</summary>
+        internal static List<string> TraeRootsUnder(string roaming)
+        {
+            var outp = new List<string>();
+            if (string.IsNullOrEmpty(roaming)) return outp;
+
+            string[] dirs;
+            try { dirs = Directory.GetDirectories(roaming); } catch { return outp; }
+            Array.Sort(dirs, StringComparer.OrdinalIgnoreCase);   // 求确定性，见 TraeRoots 的「排序」
+            foreach (string d in dirs)
+            {
+                if (Path.GetFileName(d).IndexOf("TRAE", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                outp.Add(Path.Combine(d, "logs"));
+            }
+            return outp;
         }
 
         private static string UserProfile()

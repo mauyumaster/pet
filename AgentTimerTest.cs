@@ -64,6 +64,7 @@ namespace AzhuPet
             RunCodexSessions(rows, notes, o.OldCodex);
             RunWorkBuddyHeartbeat(rows, notes);
             RunWorkBuddyStateMachine(rows, notes);
+            RunTraeWildcardRoots(rows, notes);
 
             string modelPath = Cli.ResolveModel(o.ModelPath);
             if (modelPath == null)
@@ -813,6 +814,85 @@ namespace AzhuPet
                 AgentTaskTimer.WorkBuddySessionsOverride = null;
                 AgentTaskTimer.TraeRootOverride = null;
                 AgentTaskTimer.CodexRootOverride = null;
+            }
+        }
+
+        // ---- H 组：TRAE 的日志根目录必须**通配扫描**，不许写死产品名 ----
+        //
+        // 用户报（2026-10-03）：「把 TRAE 目录名改成通配扫描。」
+        // 起因：`TraeRoots()` 原实现写死 `TRAE SOLO CN` / `TRAE CN` 两个名字，而本机只装了前者
+        //   ⇒ 第二个变体**从未在真机验过**；TRAE 只要再改一次名（它已经改过一次：TRAE CN → TRAE SOLO CN），
+        //   桌宠就**静默读不到** TRAE 的计时 —— 不报错、不提示，用户只看到读数不见了。
+        //
+        // 四条，缺一条就证明不了：
+        //   H1 **正对照**：目录名不叫那两个写死的名字（`TRAE NEO`）也必须被发现 ⇒ 证明通配真的通配。
+        //      ⚠ 没有 H1，「支持通配」只是句自述 —— 旧实现也能发那两个名字。
+        //   H2 老名字（`TRAE CN` / `TRAE SOLO CN`）**照旧**被发现 ⇒ 通配没有把老路径弄丢（回归）。
+        //   H3 名字里没有 `TRAE` 的目录（`TRACE`／`Unrelated`）必须**排除** ⇒
+        //      证明匹配不是「凡目录都收」（否则会去别人的目录里乱读，配额也被白占）。
+        //      ⚠ 用 `TRACE`（只差一个字母）当反例最狠：写成 `StartsWith("TRA")` 这种松匹配会在这条上红。
+        //   H4 返回顺序**确定**（按目录名序）⇒ 配额按发现顺序切（TraeQuota），顺序飘会让读数在几次扫描间抖动。
+        //
+        // ⚠ 这一组**纯逻辑**：不驱动 Poll、不碰真 `%APPDATA%`，直接把合成目录喂给
+        //   `AgentTaskTimer.TraeRootsUnder`。理由是「验通配」不该依赖用户机器上恰好装了什么。
+        private static void RunTraeWildcardRoots(List<string[]> rows, List<string> notes)
+        {
+            string root = Path.Combine(Path.GetTempPath(), "azhu-traewild");
+            try
+            {
+                try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch { }
+                // 造一批目录：两个老名字 ＋ 一个**新**名字 ＋ 三个「像但不是」的干扰项
+                Directory.CreateDirectory(Path.Combine(root, "TRAE SOLO CN"));
+                Directory.CreateDirectory(Path.Combine(root, "TRAE CN"));
+                Directory.CreateDirectory(Path.Combine(root, "TRAE NEO"));           // 未来的改名
+                Directory.CreateDirectory(Path.Combine(root, "TRACE"));              // 干扰项（差一个字母）
+                Directory.CreateDirectory(Path.Combine(root, "trae-logs-archive"));  // 干扰项（小写 trae ⇒ 应命中，验大小写）
+                Directory.CreateDirectory(Path.Combine(root, "Unrelated"));          // 干扰项（完全无关）
+
+                List<string> got = AgentTaskTimer.TraeRootsUnder(root);
+                var set = new HashSet<string>(got, StringComparer.OrdinalIgnoreCase);
+                notes.Add("H 组合成 roaming 根 = " + root + "；发现 " + got.Count + " 条：" + string.Join(" | ", got));
+
+                string solo = Path.Combine(root, "TRAE SOLO CN", "logs");
+                string cn = Path.Combine(root, "TRAE CN", "logs");
+                string neo = Path.Combine(root, "TRAE NEO", "logs");
+                string trace = Path.Combine(root, "TRACE", "logs");
+                string lower = Path.Combine(root, "trae-logs-archive", "logs");
+                string unrel = Path.Combine(root, "Unrelated", "logs");
+
+                rows.Add(Row("agenttimer.H1.wildcard_finds_new_name",
+                    "新名字 `TRAE NEO` 被发现 = " + set.Contains(neo)
+                    + "（期望 True：旧实现写死两个名字，这条会红）", set.Contains(neo)));
+                rows.Add(Row("agenttimer.H2.old_names_still_found",
+                    "老名字 `TRAE SOLO CN`/`TRAE CN` 照旧被发现 = "
+                    + (set.Contains(solo) && set.Contains(cn)) + "（期望 True：回归）",
+                    set.Contains(solo) && set.Contains(cn)));
+                // ⚠ 大小写不敏感：目录名是 `trae-logs-archive`（小写），Windows 上产品目录名实际就混着大小写。
+                rows.Add(Row("agenttimer.H2b.case_insensitive",
+                    "小写 `trae-logs-archive` 被发现 = " + set.Contains(lower) + "（期望 True：匹配大小写不敏感）",
+                    set.Contains(lower)));
+                // ⚠⚠ 这条是本组的**区分度**所在：`TRACE` 与 `TRAE` 只差一个字母，任何比
+                //   「名字里含 TRAE」更松的匹配（例如 StartsWith("TRA")）都会在这里红。
+                rows.Add(Row("agenttimer.H3.lookalike_excluded",
+                    "干扰项 `TRACE` / `Unrelated` 被排除 = "
+                    + (!set.Contains(trace) && !set.Contains(unrel)) + "（期望 True）",
+                    !set.Contains(trace) && !set.Contains(unrel)));
+                // ⚠ 排序确定性：配额按发现顺序切（TraeQuota），顺序飘会让读数在几次扫描间抖动。
+                var sorted = new List<string>(got);
+                sorted.Sort(StringComparer.OrdinalIgnoreCase);
+                bool stable = got.Count == sorted.Count;
+                for (int i = 0; stable && i < got.Count; i++)
+                    if (!string.Equals(got[i], sorted[i], StringComparison.OrdinalIgnoreCase)) stable = false;
+                rows.Add(Row("agenttimer.H4.order_is_deterministic",
+                    "返回顺序 = 目录名序（期望 True：配额按发现顺序切，顺序飘会让读数抖动）", stable));
+            }
+            catch (Exception ex)
+            {
+                rows.Add(Row("agenttimer.H.exception", ex.GetType().Name + ": " + ex.Message, false));
+            }
+            finally
+            {
+                AgentTaskTimer.TraeRootOverride = null;
             }
         }
 
