@@ -24,7 +24,7 @@ namespace AzhuPet
         /// <summary>扩展标识（= package.json 里的 publisher.name）。</summary>
         public const string PubId = "azhupet.trae-token-sync";
         /// <summary>扩展版本。改扩展代码时要**一起改这里**（和 `trae-ext/package.json` 的 version）。</summary>
-        public const string Version = "0.1.3";
+        public const string Version = "0.1.4";
 
         /// <summary>本次投放要用的目录名 —— **每一次都不同**（&lt;PubId&gt;-&lt;版本&gt;-&lt;UTC 时间戳&gt;）。
         /// ⚠⚠ 为什么不能固定成一个名字（2026-10-01 六次现场实验定案，推翻 2026-09-30 的判断）：
